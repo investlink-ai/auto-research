@@ -31,15 +31,26 @@ Track progress in the [issue tracker](../../issues) and
 ```bash
 # 1. Python project + tooling
 uv sync --all-extras
-make check
+uv run pre-commit install     # mechanical checks on every commit
+make check                    # ruff + mypy + unit tests
 
 # 2. Langfuse self-hosted for LLM traces (one-time per machine)
 docker compose up -d
 # open http://localhost:3000, sign up, create a project, copy keys → .env
 
 # 3. Verify telemetry end-to-end (requires Docker running + .env populated)
-uv run pytest -m integration tests/test_telemetry.py
+make integration
 ```
+
+## Test layers
+
+| Target | Scope | Cost / prerequisites |
+|---|---|---|
+| `make test` | `tests/unit/` — hermetic | none |
+| `make integration` | `tests/integration/` — needs Langfuse running | `docker compose up -d` |
+| `make eval` | `@pytest.mark.eval` — paid API tests (DeepEval, Ragas) | `ANTHROPIC_API_KEY` + $ |
+| `make check` | `quick` + `test` | none (default pre-PR gate) |
+| `make check-full` | `quick` + `test` + `integration` | Langfuse running |
 
 ## Workflow
 

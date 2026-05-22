@@ -1,0 +1,30 @@
+# Pre-commit hooks — fast mechanical checks before every commit.
+# Heavier checks (mypy, pytest) run via `make check` and CI.
+#
+# Install once per machine:
+#     uv run pre-commit install
+#
+# Run against all files (e.g., first time after install):
+#     uv run pre-commit run --all-files
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: detect-private-key  # defends INV-7 (no secrets in commits)
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.14  # keep in sync with pyproject.toml dev deps
+    hooks:
+      - id: ruff
+        args: ["--fix", "--exit-non-zero-on-fix"]

@@ -74,3 +74,8 @@ files = ["src/auto_research", "tests"]
 [[tool.mypy.overrides]]
 module = "langfuse.*"
 ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.0",
+]
