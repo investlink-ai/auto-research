@@ -31,7 +31,8 @@ services:
         condition: service_healthy
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      # Bind to loopback only — keeps the dev instance off the LAN.
+      - "127.0.0.1:3000:3000"
     environment:
       DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
       # Local-dev secret. Override in production.

@@ -38,7 +38,7 @@ docker compose up -d
 # open http://localhost:3000, sign up, create a project, copy keys → .env
 
 # 3. Verify telemetry end-to-end (requires Docker running + .env populated)
-make eval -- tests/test_telemetry.py -k integration
+uv run pytest -m integration tests/test_telemetry.py
 ```
 
 ## Workflow

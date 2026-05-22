@@ -11,7 +11,7 @@ license = { text = "MIT" }
 # they introduce (anthropic, feast, langgraph, pydantic-ai, ...).
 dependencies = [
     "anthropic>=0.104.0",
-    "langfuse>=4.6.1",
+    "langfuse>=2,<3",
     "traceloop-sdk>=0.30",
 ]
 

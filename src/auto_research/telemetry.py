@@ -54,15 +54,17 @@ def init_telemetry(*, service_name: str = "auto-research") -> None:
                 "create a project, and paste the public/secret keys."
             )
 
-        # Encode Langfuse Basic auth into the OTLP headers. We use setdefault
-        # so an explicit OTEL_EXPORTER_OTLP_HEADERS in the environment is
-        # respected (covers cases where a user has additional headers).
+        # Encode Langfuse Basic auth into the OTLP headers. The OTLP env-var
+        # format is a single comma-separated `k=v` string, not a dict — so
+        # we parse any existing value and append our Authorization unless
+        # the user explicitly set their own auth (which we respect).
         creds = f"{public_key}:{secret_key}".encode()
         basic = base64.b64encode(creds).decode()
-        os.environ.setdefault(
-            "OTEL_EXPORTER_OTLP_HEADERS",
-            f"Authorization=Basic {basic}",
-        )
+        existing = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
+        parts = [p.strip() for p in existing.split(",") if p.strip()]
+        if not any(p.lower().startswith("authorization=") for p in parts):
+            parts.append(f"Authorization=Basic {basic}")
+        os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = ",".join(parts)
 
         # Import inside the function to keep import-time light for callers
         # that don't initialize telemetry (tests, CLI --help, etc.).
