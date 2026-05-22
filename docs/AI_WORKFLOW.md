@@ -26,12 +26,48 @@ Authority order:
    `~/Documents/projects/auto-research-trees/N-short-slug/` on branch
    `feat/N-short-slug` from `origin/main`. W1 (sequential foundation work) can
    stay in the main checkout.
-3. Classify risk using the 2 tiers below. When uncertain, choose Tier 2.
-4. Pick the artifact for that tier (most issues need none beyond the issue
+3. **Plan the issue just-in-time** (see §1.5 below). Do not pre-write
+   implementation code in the project plan.
+4. Classify risk using the 2 tiers below. When uncertain, choose Tier 2.
+5. Pick the artifact for that tier (most issues need none beyond the issue
    body + a failing test).
-5. Implement in the worktree, **tests first** for behavior changes.
-6. Verify using the tier gate and the issue acceptance criteria.
-7. Open or update the PR with evidence that maps to the AC.
+6. Implement in the worktree, **tests first** for behavior changes.
+7. Verify using the tier gate and the issue acceptance criteria.
+8. Open or update the PR with evidence that maps to the AC.
+
+## 1.5 Plan lifecycle
+
+This repo distinguishes two plan artifacts. Conflating them is the failure
+mode that prompted the v1-detailed plan to be archived.
+
+**Project plan** — `docs/plans/2026-05-22-auto-research-implementation.md`.
+Issue-shaped: title, objective, acceptance criteria, labels, milestone,
+blocked-by. **No implementation code.** Stable; updated only when issues are
+added, removed, or reordered. Source of GitHub issues. ~500-700 lines.
+
+**Per-issue plan** — generated **at issue pickup, inside the worktree** by
+invoking `superpowers:writing-plans` with the issue body as input. Contains
+the bite-sized TDD steps, file paths, test names, commit messages for that
+one issue, derived against the actual current state of the codebase.
+Disposable. Lives in the PR body or under `docs/plans/per-issue/<N>-<slug>.md`
+in the worktree, and is **deleted at PR merge**. Only the AC, commits, and
+PR body survive.
+
+**Authority order between them:** AGENTS.md §2 > contract docs > project plan
+> per-issue plan. A per-issue plan that contradicts the project plan's AC
+loses; an AC that contradicts an invariant loses.
+
+**When to invoke `writing-plans`:** at issue pickup, never at session start.
+Pre-writing a plan against a non-existent codebase produces speculative code
+that anchors the implementation away from what reading the actual repo would
+suggest. The archived
+`docs/plans/archive/2026-05-22-auto-research-implementation-v1-detailed.md`
+demonstrates the failure mode: 5,500 lines of code written before the first
+line of `src/auto_research/` existed.
+
+**When NOT to invoke `writing-plans`:** Tier 0 (editorial), Tier 1 issues
+with ≤ 5 trivial steps where the AC alone is enough. The skill is for issues
+where the implementation path is genuinely non-obvious.
 
 ---
 
