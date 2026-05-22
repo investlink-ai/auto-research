@@ -1,0 +1,50 @@
+name: CI
+
+# Runs ruff + mypy + unit tests on every PR that touches code or config.
+# Eval tests (DeepEval / Ragas) are excluded by default — they hit paid LLM
+# APIs and run locally or via a separate workflow_dispatch when needed.
+#
+# Path filters mean this workflow stays quiet during the docs-only bootstrap
+# phase. First real run is Issue 1's PR (which lands pyproject.toml + Makefile).
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "feast_repo/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "ruff.toml"
+      - "Makefile"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Lint + typecheck
+        run: make quick
+
+      - name: Unit tests
+        run: uv run pytest -m "not eval and not integration" -v
