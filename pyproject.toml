@@ -1,0 +1,64 @@
+[project]
+name = "auto-research"
+version = "0.1.0"
+description = "Two-plane multi-agent research platform for cross-asset language-driven alpha"
+authors = [{ name = "Sam Xu", email = "samxu0825@gmail.com" }]
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+# Runtime dependencies are added per-issue as features land. See the
+# implementation plan; subsequent issues will `uv add` the packages
+# they introduce (anthropic, feast, langgraph, pydantic-ai, ...).
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.7",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/auto_research"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Markers used to scope which tests run in CI vs locally. See Makefile
+# and .github/workflows/ci.yml.
+markers = [
+    "eval: tests that hit external LLM/eval APIs (excluded from CI by default)",
+    "integration: tests that hit external services (excluded from CI by default)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # bugbear
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+    "SIM", # simplify
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501", # line length (handled by formatter)
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+warn_return_any = true
+warn_unused_ignores = true
+no_implicit_optional = true
+files = ["src/auto_research"]

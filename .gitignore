@@ -1,9 +1,60 @@
-# Minimal pre-Issue-1 gitignore. Issue 1's PR expands this with venv,
-# build artifacts, mlruns, etc.
-
 # Per-issue worktrees (Option C layout per docs/AI_WORKFLOW.md §1)
 .worktree/
 
-# Python bytecode (covers scripts/__pycache__ until Issue 1 ships the full ignore)
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# uv / virtualenv
+.venv/
+
+# Environments — never commit real secrets (also enforced by .claude/settings.json)
+.env
+.env.local
+.env.*.local
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# OS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Project data — audit trail; never committed (also enforced by .claude/settings.json deny)
+data/raw/
+data/extracted/
+data/quarantine/
+data/manifest.parquet
+
+# MLflow local backend
+mlruns/
+mlartifacts/
+
+# Langfuse local Docker volumes
+.langfuse/
+postgres-data/
+
+# LanceDB stores (per-doc + memos)
+*.lance/
+
+# DeepEval cache
+.deepeval/
+
+# Feast offline store (Parquet) + registry SQLite
+feast_repo/data/
