@@ -70,9 +70,9 @@ After bootstrap, the plan-to-issue mapping is 1:1.
 ### Issue 1 — `chore(repo): scaffold uv project with pyproject, ruff, mypy, pytest`
 
 **Objective.** Bootstrap the Python project: `uv` venv, `pyproject.toml`,
-ruff, mypy, pytest, `Makefile`, `.gitignore`, `.env.example`, README stub,
-`CONTRIBUTING.md` documenting the worktree convention. After this lands,
-`.github/workflows/ci.yml` (already committed) starts running.
+ruff, mypy, pytest, `Makefile`, `.gitignore`, `.env.example`, README
+linking to `AGENTS.md` + `docs/AI_WORKFLOW.md` for workflow. After this
+lands, `.github/workflows/ci.yml` (already committed) starts running.
 
 **Acceptance criteria.**
 - `uv sync --all-extras` succeeds from a clean clone.
@@ -82,11 +82,12 @@ ruff, mypy, pytest, `Makefile`, `.gitignore`, `.env.example`, README stub,
   `[tool.pytest.ini_options]`: `eval` (paid-API tests, excluded from CI)
   and `integration` (external-service tests, excluded from CI).
 - `make quick` returns clean on the empty `src/auto_research/`.
-- `make check` passes with an empty suite.
+- `make check` passes (smoke test verifies the harness).
 - `uv run python -c "import auto_research; print(auto_research.__version__)"` prints `0.1.0`.
 - `.env.example` lists every required external service key (Anthropic, FMP,
   Voyage, Langfuse, SEC user-agent) with empty values; no real secrets committed.
-- `CONTRIBUTING.md` documents the worktree convention from spec §23.4.
+- README's workflow section links to `AGENTS.md` + `docs/AI_WORKFLOW.md`
+  (no parallel policy doc).
 - This PR's CI run is green (proves the workflow + Makefile + markers wire up).
 
 **Labels.** `infra`, `small` **Milestone.** W1 **Blocked by.** —

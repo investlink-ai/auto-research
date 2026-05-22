@@ -33,7 +33,9 @@ uv sync --all-extras
 make check
 ```
 
-## Contributing
+## Workflow
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the worktree convention,
-branch + commit format, and per-issue planning workflow.
+[`AGENTS.md`](AGENTS.md) is the source of truth for both human and
+AI-agent workflow — invariants, sensitive paths, working style.
+[`docs/AI_WORKFLOW.md`](docs/AI_WORKFLOW.md) covers the issue → worktree
+→ PR loop, tier classification, plan lifecycle, and verification gates.
