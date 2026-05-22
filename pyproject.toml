@@ -9,7 +9,11 @@ license = { text = "MIT" }
 # Runtime dependencies are added per-issue as features land. See the
 # implementation plan; subsequent issues will `uv add` the packages
 # they introduce (anthropic, feast, langgraph, pydantic-ai, ...).
-dependencies = []
+dependencies = [
+    "anthropic>=0.104.0",
+    "langfuse>=4.6.1",
+    "traceloop-sdk>=0.30",
+]
 
 [project.optional-dependencies]
 dev = [

@@ -29,8 +29,16 @@ Track progress in the [issue tracker](../../issues) and
 ## Quickstart
 
 ```bash
+# 1. Python project + tooling
 uv sync --all-extras
 make check
+
+# 2. Langfuse self-hosted for LLM traces (one-time per machine)
+docker compose up -d
+# open http://localhost:3000, sign up, create a project, copy keys → .env
+
+# 3. Verify telemetry end-to-end (requires Docker running + .env populated)
+make eval -- tests/test_telemetry.py -k integration
 ```
 
 ## Workflow

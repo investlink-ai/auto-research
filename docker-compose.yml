@@ -1,0 +1,45 @@
+# Langfuse self-hosted for local development.
+#
+# Quickstart:
+#   docker compose up -d
+#   open http://localhost:3000
+#   sign up (first user is admin), create a project, copy keys → .env
+#   then: uv run python -c "from auto_research.telemetry import init_telemetry; init_telemetry()"
+#
+# Excluded data (postgres volume, langfuse local volume) is git-ignored.
+
+services:
+  langfuse-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  langfuse-server:
+    image: langfuse/langfuse:2
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      # Local-dev secret. Override in production.
+      NEXTAUTH_SECRET: local-dev-secret-rotate-in-production
+      SALT: local-dev-salt-rotate-in-production
+      NEXTAUTH_URL: http://localhost:3000
+      TELEMETRY_ENABLED: "true"
+      LANGFUSE_INIT_PROJECT_NAME: auto-research
+
+volumes:
+  postgres-data:
