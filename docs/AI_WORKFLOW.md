@@ -23,9 +23,10 @@ Authority order:
      `docs/plans/2026-05-22-auto-research-implementation.md`.
    - Tiny editorial fixes (typos, broken links, comment polish) skip the issue.
 2. If the change spans more than one milestone day, create or enter a worktree:
-   `~/Documents/projects/auto-research-trees/N-short-slug/` on branch
+   `~/Documents/projects/auto-research/.worktree/N-short-slug/` on branch
    `feat/N-short-slug` from `origin/main`. W1 (sequential foundation work) can
-   stay in the main checkout.
+   stay in the main checkout. The `.worktree/` directory is git-ignored
+   (added in Issue 1's `.gitignore`).
 3. **Plan the issue just-in-time** (see §1.5 below). Do not pre-write
    implementation code in the project plan.
 4. Classify risk using the 2 tiers below. When uncertain, choose Tier 2.

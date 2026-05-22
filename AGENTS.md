@@ -170,7 +170,7 @@ Without explicit approval in the current task, agents must not:
 | **2** Sensitive paths (§3) | Failing test first, full pytest suite for the touched module, plus relevant eval (DeepEval for extraction, Ragas for RAG, CPCV for backtest). PR body cites the test name. |
 
 Conventional-commit messages. Issue-driven branches (`feat/N-short-slug` from
-`origin/main`, via worktree at `~/Documents/projects/auto-research-trees/N-slug/`).
+`origin/main`, via worktree at `~/Documents/projects/auto-research/.worktree/N-slug/`).
 PR body maps to acceptance criteria, not raw logs.
 
 See `docs/AI_WORKFLOW.md` for the full workflow and PR evidence template.

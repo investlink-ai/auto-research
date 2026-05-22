@@ -69,7 +69,7 @@ done
 
 # 3. Labels: domain (color-coded) + size (gray) -----------------------------
 # Two parallel arrays so the script works in bash 3.2 (macOS default).
-LABEL_NAMES=(infra extract rag signal backtest agent mcp eval obs docs polish xs s m l)
+LABEL_NAMES=(infra extract rag signal backtest agent mcp eval obs docs polish extra-small small medium large)
 LABEL_COLORS=(cfd3d7 fbca04 0e8a16 1d76db 5319e7 b60205 d4c5f9 fef2c0 bfdadc c2e0c6 ededed ededed ededed ededed ededed)
 
 EXISTING_LABELS="$(gh label list -R "$OWNER/$REPO_NAME" -L 200 --json name --jq '.[].name' 2>/dev/null || true)"

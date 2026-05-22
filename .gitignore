@@ -1,0 +1,9 @@
+# Minimal pre-Issue-1 gitignore. Issue 1's PR expands this with venv,
+# build artifacts, mlruns, etc.
+
+# Per-issue worktrees (Option C layout per docs/AI_WORKFLOW.md §1)
+.worktree/
+
+# Python bytecode (covers scripts/__pycache__ until Issue 1 ships the full ignore)
+__pycache__/
+*.pyc

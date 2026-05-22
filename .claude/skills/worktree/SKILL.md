@@ -16,7 +16,7 @@ concurrently.
 
 - Main checkout: `~/Documents/projects/auto-research/` — stays on `main`.
 - Per-issue worktree:
-  `~/Documents/projects/auto-research-trees/<N>-<short-slug>/`
+  `~/Documents/projects/auto-research/.worktree/<N>-<short-slug>/`
 - Branch name: `feat/<N>-<short-slug>` (or `fix/`, `docs/`, `chore/`
   per conventional-commits prefix).
 - Issue number `N` is the GitHub issue number. Short slug is 2-4 words,
@@ -42,12 +42,12 @@ gh issue view <N> --json title,labels,milestone
 # Create the worktree from origin/main (always from current main, never from a stale local main)
 git fetch origin main
 git worktree add \
-  ~/Documents/projects/auto-research-trees/<N>-<slug> \
+  ~/Documents/projects/auto-research/.worktree/<N>-<slug> \
   -b feat/<N>-<slug> origin/main
 
 # Hand off — print the cd command for the user
 echo "Worktree ready. Open a new Claude Code / Cursor session with:"
-echo "  cd ~/Documents/projects/auto-research-trees/<N>-<slug>"
+echo "  cd ~/Documents/projects/auto-research/.worktree/<N>-<slug>"
 ```
 
 After creation, the new session should:
@@ -104,9 +104,9 @@ worktree" failure mode.
 PWD_PATH=$(pwd)
 BRANCH=$(git branch --show-current)
 
-# Expected: PWD matches ~/Documents/projects/auto-research-trees/<N>-<slug>
+# Expected: PWD matches ~/Documents/projects/auto-research/.worktree/<N>-<slug>
 # Expected: BRANCH matches feat/<N>-<slug>
-if [[ "$PWD_PATH" =~ /auto-research-trees/([0-9]+)-([a-z0-9-]+)$ ]]; then
+if [[ "$PWD_PATH" =~ /auto-research/\.worktree/([0-9]+)-([a-z0-9-]+)$ ]]; then
   ISSUE_N="${BASH_REMATCH[1]}"
   SLUG="${BASH_REMATCH[2]}"
   EXPECTED_BRANCH="feat/${ISSUE_N}-${SLUG}"
@@ -144,5 +144,5 @@ fi
 |---|---|---|
 | `git worktree add` fails: "already checked out" | Worktree from a prior session not cleaned up | `git worktree list`, then `git worktree remove <path>` or `--force` if dirty |
 | Branch creation fails: "already exists" | Earlier session created the branch but the worktree was removed | `git worktree add <path> feat/<N>-<slug>` (no `-b`) to reuse |
-| New session lands in `~/Documents/projects/auto-research/` (main) but branch is `feat/...` | User opened a terminal in the wrong dir | `cd ~/Documents/projects/auto-research-trees/<N>-<slug>` |
+| New session lands in `~/Documents/projects/auto-research/` (main) but branch is `feat/...` | User opened a terminal in the wrong dir | `cd ~/Documents/projects/auto-research/.worktree/<N>-<slug>` |
 | Agent edits files in main checkout while a worktree exists for the same issue | Skill not invoked at session start | Run `worktree check` before any non-trivial edit |

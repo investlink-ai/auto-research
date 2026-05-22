@@ -61,7 +61,7 @@ After bootstrap, the plan-to-issue mapping is 1:1.
 - **Sensitive paths** (marked `[SENSITIVE]` below) are Tier 2 per
   `docs/AI_WORKFLOW.md` §2 — failing test first, named evidence in PR body.
 - **Labels:** `infra`, `extract`, `rag`, `signal`, `backtest`, `agent`,
-  `mcp`, `eval`, `obs`, `docs`, `polish` + size `xs`/`s`/`m`/`l`.
+  `mcp`, `eval`, `obs`, `docs`, `polish` + size `extra-small`/`small`/`medium`/`large`.
 
 ---
 
@@ -89,7 +89,7 @@ ruff, mypy, pytest, `Makefile`, `.gitignore`, `.env.example`, README stub,
 - `CONTRIBUTING.md` documents the worktree convention from spec §23.4.
 - This PR's CI run is green (proves the workflow + Makefile + markers wire up).
 
-**Labels.** `infra`, `s` **Milestone.** W1 **Blocked by.** —
+**Labels.** `infra`, `small` **Milestone.** W1 **Blocked by.** —
 
 ### Issue 2 — `chore(obs): Langfuse self-hosted via Docker compose + OpenLLMetry wiring`
 
@@ -105,7 +105,7 @@ auto-trace to Langfuse via OTLP.
   with token counts populated.
 - README quickstart documents `docker compose up` as W1 setup step.
 
-**Labels.** `infra`, `obs`, `s` **Milestone.** W1 **Blocked by.** #1
+**Labels.** `infra`, `obs`, `small` **Milestone.** W1 **Blocked by.** #1
 
 ### Issue 3 — `chore(obs): MLflow local file backend + smoke test`
 
@@ -119,7 +119,7 @@ auto-trace to Langfuse via OTLP.
   dummy artifact; the run is visible via `mlflow ui`.
 - Test asserts a logged param round-trips.
 
-**Labels.** `infra`, `obs`, `s` **Milestone.** W1 **Blocked by.** #1
+**Labels.** `infra`, `obs`, `small` **Milestone.** W1 **Blocked by.** #1
 
 ### Issue 4 — `feat(data): universe loader + ticker registry`
 
@@ -135,7 +135,7 @@ explicit `tradeable: bool` flag (narrative-source names default to `False`).
 - Tests cover empty universe (raises), duplicate ticker (raises), unknown
   sub-universe (raises).
 
-**Labels.** `infra`, `s` **Milestone.** W1 **Blocked by.** #1
+**Labels.** `infra`, `small` **Milestone.** W1 **Blocked by.** #1
 
 ### Issue 5 — `feat(ingest): EDGAR client for 10-K/Q, 8-K, S-1/S-3 + manifest ledger`
 
@@ -153,7 +153,7 @@ manifest at `data/manifest.parquet`.
 - User-Agent header reads from `SEC_USER_AGENT` env (SEC requires it);
   missing env raises a typed error.
 
-**Labels.** `infra`, `s` **Milestone.** W1 **Blocked by.** #1, #4
+**Labels.** `infra`, `small` **Milestone.** W1 **Blocked by.** #1, #4
 
 ### Issue 6 — `feat(ingest): FMP transcript client + manifest integration`
 
@@ -169,7 +169,7 @@ into degraded data.
 - Manifest entries are idempotent (rerun is no-op).
 - VCR-recorded test covers one populated transcript and one gap case.
 
-**Labels.** `infra`, `s` **Milestone.** W1 **Blocked by.** #5
+**Labels.** `infra`, `small` **Milestone.** W1 **Blocked by.** #5
 
 ### Issue 7 — `feat(feast): Feast scaffold + price FeatureView + PIT discipline property test` [SENSITIVE]
 
@@ -186,7 +186,7 @@ offline store. **PIT discipline property test is the gate.**
 - No query-time `as_of_ts` arithmetic anywhere in repo (verified by `pit-check` skill).
 - PR cites the property test by name.
 
-**Labels.** `infra`, `m` **Milestone.** W1 **Blocked by.** #4
+**Labels.** `infra`, `medium` **Milestone.** W1 **Blocked by.** #4
 
 ### Issue 8 — `feat(agents): reliability primitives (circuit breaker, cost cap, retry, fallback)` [SENSITIVE]
 
@@ -203,7 +203,7 @@ offline store. **PIT discipline property test is the gate.**
 - Failing `cost_cap` raises `CostCapExceeded`; failing `circuit_breaker`
   raises `CircuitOpen` — both are typed, not generic.
 
-**Labels.** `agent`, `infra`, `m` **Milestone.** W1 **Blocked by.** #1, #2
+**Labels.** `agent`, `infra`, `medium` **Milestone.** W1 **Blocked by.** #1, #2
 
 ### Issue 9 — `feat(extract): Pydantic schemas + citation-grounding validator` [SENSITIVE]
 
@@ -222,7 +222,7 @@ asserts `source_text[span] == source_quote`.
   quarantine write (per `citation-check` skill).
 - No `permissive` / `soft_mode` / `skip_validation` flag exists anywhere.
 
-**Labels.** `extract`, `m` **Milestone.** W1 **Blocked by.** #1
+**Labels.** `extract`, `medium` **Milestone.** W1 **Blocked by.** #1
 
 ### Issue 10 — `feat(extract): Anthropic client with prompt caching + tiered model routing`
 
@@ -238,7 +238,7 @@ worker/task to the model tier from spec §7.3, and integrates with
 - Reliability decorators applied by default.
 - Cost log per call includes `(input_tokens, output_tokens, cache_read, cache_create, est_usd)`.
 
-**Labels.** `extract`, `m` **Milestone.** W1 **Blocked by.** #8, #9
+**Labels.** `extract`, `medium` **Milestone.** W1 **Blocked by.** #8, #9
 
 ### Issue 11 — `feat(extract): prompts registry directory + S-1/S-3 worker end-to-end`
 
@@ -255,7 +255,7 @@ form classification). Wire to Langfuse prompt registry.
 - A corrupted citation in test fixture routes to `data/quarantine/s_filings/`.
 - `bump-prompt-version` skill checks pass.
 
-**Labels.** `extract`, `m` **Milestone.** W1 **Blocked by.** #5, #9, #10
+**Labels.** `extract`, `medium` **Milestone.** W1 **Blocked by.** #5, #9, #10
 
 ### Issue 12 — `feat(cli): CLI entry point + W1 acceptance smoke`
 
@@ -268,7 +268,7 @@ form classification). Wire to Langfuse prompt registry.
 - End-to-end smoke (one ticker, one S-3) completes in `< 5 min` locally.
 - `auto-research --help` documents every subcommand and required env var.
 
-**Labels.** `infra`, `m` **Milestone.** W1 **Blocked by.** #5, #6, #7, #11
+**Labels.** `infra`, `medium` **Milestone.** W1 **Blocked by.** #5, #6, #7, #11
 
 ---
 
@@ -285,7 +285,7 @@ respecting Item 1A / 7 / 8 boundaries. Output is `list[Chunk]` with
 - Chunks under 4K tokens; boundary-respecting (no chunk spans a section break).
 - Test verifies `source_text[chunk.char_span] == chunk.text` (citation-friendly).
 
-**Labels.** `rag`, `m` **Milestone.** W2 **Blocked by.** #1
+**Labels.** `rag`, `medium` **Milestone.** W2 **Blocked by.** #1
 
 ### Issue 14 — `feat(extract): contextual chunking (Anthropic pattern)`
 
@@ -299,7 +299,7 @@ controls"*) via cached LLM call and prepend to chunk text before embedding.
 - Stored alongside chunk for audit.
 - `bump-prompt-version` skill applied if the context prompt changes.
 
-**Labels.** `rag`, `extract`, `m` **Milestone.** W2 **Blocked by.** #10, #13
+**Labels.** `rag`, `extract`, `medium` **Milestone.** W2 **Blocked by.** #10, #13
 
 ### Issue 15 — `feat(extract): LanceDB + Voyage embeddings adapter (BGE local fallback)`
 
@@ -312,7 +312,7 @@ exceeded. Persist per-doc LanceDB store at `data/rag/{doc_id}.lance`.
 - Same query against the same store returns deterministic top-k order.
 - Fallback decision logged with reason (no key / quota / explicit override).
 
-**Labels.** `rag`, `m` **Milestone.** W2 **Blocked by.** #14
+**Labels.** `rag`, `medium` **Milestone.** W2 **Blocked by.** #14
 
 ### Issue 16 — `feat(extract): hybrid retrieval (BM25 + dense + RRF)`
 
@@ -325,7 +325,7 @@ retrieval in parallel and merges via Reciprocal Rank Fusion.
 - Hand-built micro-corpus test verifies RRF beats either retriever alone on
   precision@5 for at least 2 of 3 example queries.
 
-**Labels.** `rag`, `m` **Milestone.** W2 **Blocked by.** #15
+**Labels.** `rag`, `medium` **Milestone.** W2 **Blocked by.** #15
 
 ### Issue 17 — `feat(extract): BGE reranker on top-20 → top-5`
 
@@ -337,7 +337,7 @@ output before extraction.
 - Hand-built test: rerank improves precision@5 over RRF alone on micro-corpus.
 - CPU-only inference; no GPU assumption.
 
-**Labels.** `rag`, `s` **Milestone.** W2 **Blocked by.** #16
+**Labels.** `rag`, `small` **Milestone.** W2 **Blocked by.** #16
 
 ### Issue 18 — `feat(extract): entity resolution (Flow 3 — supplier mention → ticker)`
 
@@ -350,7 +350,7 @@ text → top-3 candidates → LLM disambiguator picks or returns `unknown`.
 - Disambiguator stores reasoning per resolution for audit (DeepEval reads).
 - `unknown` is an allowed output (no false-confident matches).
 
-**Labels.** `rag`, `m` **Milestone.** W2 **Blocked by.** #15
+**Labels.** `rag`, `medium` **Milestone.** W2 **Blocked by.** #15
 
 ### Issue 19 — `feat(extract): 10-K, transcript, 8-K worker bodies + prompts`
 
@@ -366,7 +366,7 @@ single-shot with caching.
   branch coverage); RAG path for `≥ 100K`.
 - `bump-prompt-version` skill applied.
 
-**Labels.** `extract`, `l` **Milestone.** W2 **Blocked by.** #11, #14, #17, #18
+**Labels.** `extract`, `large` **Milestone.** W2 **Blocked by.** #11, #14, #17, #18
 
 ### Issue 20 — `feat(eval): gold sets + DeepEval pytest harness`
 
@@ -383,7 +383,7 @@ field, G-Eval for subjective fields, hallucination metric.
 - Suite passes the published baseline thresholds (otherwise issue calls
   out the gap for fix in #22).
 
-**Labels.** `eval`, `l` **Milestone.** W2 **Blocked by.** #19
+**Labels.** `eval`, `large` **Milestone.** W2 **Blocked by.** #19
 
 ### Issue 21 — `feat(eval): Ragas RAG eval (context_recall, faithfulness, answer_relevancy)`
 
@@ -397,7 +397,7 @@ suite per spec §8.5.
 - Flow 2 baseline meets `context_recall > 0.75` and `faithfulness > 0.85`
   (or the gap is documented + tracked).
 
-**Labels.** `eval`, `rag`, `m` **Milestone.** W2 **Blocked by.** #16, #17, #18
+**Labels.** `eval`, `rag`, `medium` **Milestone.** W2 **Blocked by.** #16, #17, #18
 
 ### Issue 22 — `feat(extract): backfill orchestrator + Anthropic Batch API kickoff`
 
@@ -414,7 +414,7 @@ Anthropic Batch API run for ~2,700 docs across 90 names. **Live spend
 - Resumable: a partial-failure run continues from manifest state.
 - Post-batch run populates Feast via `feast materialize-incremental`.
 
-**Labels.** `extract`, `infra`, `l` **Milestone.** W2 **Blocked by.** #19, #20
+**Labels.** `extract`, `infra`, `large` **Milestone.** W2 **Blocked by.** #19, #20
 
 ---
 
@@ -433,7 +433,7 @@ Anthropic Batch API run for ~2,700 docs across 90 names. **Live spend
 - Property test: `bootstrap_significance` CI width shrinks as `n_boot` grows.
 - All numeric stats include t-stat + n.
 
-**Labels.** `backtest`, `m` **Milestone.** W3 **Blocked by.** #7
+**Labels.** `backtest`, `medium` **Milestone.** W3 **Blocked by.** #7
 
 ### Issue 24 — `feat(backtest): triple-barrier labels + CPCV + deflated Sharpe + cost model + reports` [SENSITIVE]
 
@@ -452,7 +452,7 @@ Anthropic Batch API run for ~2,700 docs across 90 names. **Live spend
 - `BacktestReport.sharpe_gross_diagnostic_only` exists but
   `tests/backtest/test_no_gross_sharpe_in_gates.py` asserts no gate code reads it.
 
-**Labels.** `backtest`, `l` **Milestone.** W3 **Blocked by.** #23
+**Labels.** `backtest`, `large` **Milestone.** W3 **Blocked by.** #23
 
 ### Issue 25 — `feat(backtest): vbt.pro engine wrapper + tier-aware gates` [SENSITIVE]
 
@@ -470,7 +470,7 @@ backtest per `docs/BACKTEST.md` §4.5. `backtest/gates.py` defines
 - Static test (`tests/backtest/test_no_llm_in_gates.py`) verifies neither
   gate function imports any LLM client.
 
-**Labels.** `backtest`, `m` **Milestone.** W3 **Blocked by.** #24
+**Labels.** `backtest`, `medium` **Milestone.** W3 **Blocked by.** #24
 
 ### Issue 26 — `feat(signals): A2 + A1 + B1 + IC-weighted combiner + AlphaLibrary`
 
@@ -487,7 +487,7 @@ per `docs/CONTRACTS.md`.
 - Combiner returns per-name daily alpha; covariance regularization unit-tested.
 - AlphaLibrary registry round-trips via MLflow API.
 
-**Labels.** `signal`, `backtest`, `l` **Milestone.** W3 **Blocked by.** #25, #18, #19
+**Labels.** `signal`, `backtest`, `large` **Milestone.** W3 **Blocked by.** #25, #18, #19
 
 ---
 
@@ -509,7 +509,7 @@ Read-only contract; no write tools.
 - README documents Claude Desktop wiring via `.cursor/mcp.json` /
   Claude config `mcp.json`.
 
-**Labels.** `mcp`, `agent`, `l` **Milestone.** W4 **Blocked by.** #7, #25, #26
+**Labels.** `mcp`, `agent`, `large` **Milestone.** W4 **Blocked by.** #7, #25, #26
 
 ### Issue 28 — `feat(agents): LangGraph research agent — state + checkpointer + HITL interrupt` [SENSITIVE]
 
@@ -530,7 +530,7 @@ critique → write_memo), `SqliteSaver` checkpointer, `interrupt()` at
 - Cost-cap + circuit-breaker + max-iterations decorators applied to every
   LLM-touching node.
 
-**Labels.** `agent`, `l` **Milestone.** W4 **Blocked by.** #26, #27
+**Labels.** `agent`, `large` **Milestone.** W4 **Blocked by.** #26, #27
 
 ### Issue 29 — `feat(agents): Pydantic AI live critic + two worked examples`
 
@@ -545,7 +545,7 @@ both produce attribution memos demonstrating the haircut output.
 - Two end-to-end demo scripts produce signed haircut memos under `data/memos/`.
 - `scripts/cron_daily_critic.sh` documented in README.
 
-**Labels.** `agent`, `m` **Milestone.** W4 **Blocked by.** #26
+**Labels.** `agent`, `medium` **Milestone.** W4 **Blocked by.** #26
 
 ### Issue 30 — `docs: README rewrite + architecture diagram + signal cards + Langfuse trace links`
 
@@ -562,7 +562,7 @@ trace links demonstrating the research-agent loop end-to-end.
   end-to-end successful session).
 - Cuts list (spec §19) visible in README "Status" section.
 
-**Labels.** `docs`, `m` **Milestone.** W4 **Blocked by.** #26, #28, #29
+**Labels.** `docs`, `medium` **Milestone.** W4 **Blocked by.** #26, #28, #29
 
 ### Issue 31 — `chore(repo): scripts/setup_github.sh + scripts/create_all_issues.py`
 
@@ -578,7 +578,7 @@ ships the two scripts as a committed PR closing Issue 31.
 - Smoke test parses this plan and reports 32 issues found.
 - Re-running both scripts is a no-op (title-based dedup).
 
-**Labels.** `infra`, `polish`, `s` **Milestone.** W4 **Blocked by.** —
+**Labels.** `infra`, `polish`, `small` **Milestone.** W4 **Blocked by.** —
 
 ### Issue 32 — `feat(dashboard): optional Streamlit dashboard` (stretch; first cut candidate)
 
@@ -593,7 +593,7 @@ buffer compresses.
 - All panels degrade gracefully when data is missing.
 - Listed as `extension` in README, not a core component.
 
-**Labels.** `polish`, `m` **Milestone.** W4 **Blocked by.** #26, #29
+**Labels.** `polish`, `medium` **Milestone.** W4 **Blocked by.** #26, #29
 
 ---
 
