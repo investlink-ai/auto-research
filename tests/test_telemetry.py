@@ -46,20 +46,29 @@ def test_is_initialized_starts_false(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.integration
 def test_anthropic_call_under_telemetry() -> None:
-    """Real Anthropic call after init_telemetry; verify visually in Langfuse UI.
+    """End-to-end: Anthropic call → trace landed in Langfuse.
 
     Requires:
       - `docker compose up -d` (Langfuse + Postgres reachable at :3000)
       - `.env` with LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY,
         OTEL_EXPORTER_OTLP_ENDPOINT, ANTHROPIC_API_KEY
 
-    Asserts the SDK call succeeds and reports token counts. The trace
-    landing in Langfuse is verified visually at http://localhost:3000.
+    Verifies:
+      1. Anthropic SDK call returns with token counts populated
+      2. OTel batch processor flushes within timeout
+      3. At least one trace exists in Langfuse within the test window
     """
+    import datetime
+    import time
+
     if not os.environ.get("ANTHROPIC_API_KEY"):
         pytest.skip("ANTHROPIC_API_KEY not set; skipping integration smoke")
+    if not os.environ.get("LANGFUSE_PUBLIC_KEY"):
+        pytest.skip("LANGFUSE_PUBLIC_KEY not set; skipping integration smoke")
 
     init_telemetry()
+
+    window_start = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=5)
 
     import anthropic
 
@@ -73,3 +82,25 @@ def test_anthropic_call_under_telemetry() -> None:
     assert response.usage.input_tokens > 0
     assert response.usage.output_tokens > 0
     assert response.content[0].text.strip().lower().startswith("ok")
+
+    # Force-flush spans so we can query Langfuse synchronously.
+    from opentelemetry import trace as otel_trace
+
+    provider = otel_trace.get_tracer_provider()
+    if hasattr(provider, "force_flush"):
+        flushed = provider.force_flush(timeout_millis=5000)
+        assert flushed, "OTel span flush timed out (5s)"
+
+    # Poll Langfuse for the trace landing (ingestion is async).
+    from langfuse import Langfuse
+
+    lf = Langfuse()
+    found = False
+    for _ in range(5):  # up to ~10s
+        time.sleep(2)
+        traces = lf.fetch_traces(from_timestamp=window_start, limit=20)
+        if traces.data:
+            found = True
+            break
+
+    assert found, "No traces landed in Langfuse within 10s of the Anthropic call"

@@ -54,23 +54,25 @@ def init_telemetry(*, service_name: str = "auto-research") -> None:
                 "create a project, and paste the public/secret keys."
             )
 
-        # Encode Langfuse Basic auth into the OTLP headers. The OTLP env-var
-        # format is a single comma-separated `k=v` string, not a dict — so
-        # we parse any existing value and append our Authorization unless
-        # the user explicitly set their own auth (which we respect).
+        # Compute Langfuse Basic auth.
         creds = f"{public_key}:{secret_key}".encode()
         basic = base64.b64encode(creds).decode()
-        existing = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
-        parts = [p.strip() for p in existing.split(",") if p.strip()]
-        if not any(p.lower().startswith("authorization=") for p in parts):
-            parts.append(f"Authorization=Basic {basic}")
-        os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = ",".join(parts)
 
-        # Import inside the function to keep import-time light for callers
-        # that don't initialize telemetry (tests, CLI --help, etc.).
+        # Pass endpoint + headers explicitly. The traceloop-sdk reads
+        # TRACELOOP_BASE_URL / TRACELOOP_HEADERS env vars and does NOT
+        # honor the OTel standard OTEL_EXPORTER_OTLP_* vars — relying on
+        # env propagation would silently misroute spans to api.traceloop.com.
+        # `endpoint_is_traceloop=False` disables the SDK's hosted-mode
+        # behavior (telemetry config sync, dashboards URL, etc.).
         from traceloop.sdk import Traceloop
 
-        Traceloop.init(app_name=service_name, disable_batch=False)
+        Traceloop.init(
+            app_name=service_name,
+            api_endpoint=endpoint,
+            headers={"Authorization": f"Basic {basic}"},
+            disable_batch=False,
+            endpoint_is_traceloop=False,
+        )
         _INITIALIZED = True
 
 
