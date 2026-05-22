@@ -31,8 +31,10 @@ packages = ["src/auto_research"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--strict-markers"
 # Markers used to scope which tests run in CI vs locally. See Makefile
-# and .github/workflows/ci.yml.
+# and .github/workflows/ci.yml. Tests under tests/integration/ are
+# auto-marked via tests/integration/conftest.py.
 markers = [
     "eval: tests that hit external LLM/eval APIs (excluded from CI by default)",
     "integration: tests that hit external services (excluded from CI by default)",
@@ -65,4 +67,10 @@ warn_unused_configs = true
 warn_return_any = true
 warn_unused_ignores = true
 no_implicit_optional = true
-files = ["src/auto_research"]
+files = ["src/auto_research", "tests"]
+
+# Third-party libs without type stubs. Keep this list short; each entry
+# means we're trusting an untyped surface.
+[[tool.mypy.overrides]]
+module = "langfuse.*"
+ignore_missing_imports = true
