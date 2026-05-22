@@ -1,0 +1,63 @@
+---
+description: auto-research repo-wide rules — always loaded
+alwaysApply: true
+---
+
+# auto-research
+
+Repo-wide rules. Full content is in `AGENTS.md` at the repo root; this file
+mirrors the core so Cursor's rule system enforces it without a separate read.
+
+## Authority order
+
+1. User instruction and the GitHub issue acceptance criteria.
+2. `AGENTS.md` §2 invariants.
+3. `docs/AI_WORKFLOW.md`, `docs/AI_CODE_STYLE.md`, `docs/ARCHITECTURE.md`,
+   `docs/CONTRACTS.md`, `docs/DATA_MODEL.md`, `docs/BACKTEST.md`.
+4. `docs/specs/` (frozen v1 rationale), `docs/plans/` (task ordering).
+5. Local tool habits.
+
+## Non-negotiable invariants (must not violate)
+
+- **INV-1** Feast features carry `as_of_ts = event_datetime + 1 trading day`
+  baked in at write-time. No query-time lag enforcement.
+- **INV-2** Every extracted claim has `source_span` + `source_quote`;
+  post-validation asserts the slice equals the quote. Failures → `data/quarantine/`.
+- **INV-3** LLM is never in the trading-decision path. `T1_GATE` / `T2_GATE`
+  decide promote/iterate/kill in code; LLM critic is qualitative addendum only.
+- **INV-4** Backtest discipline: CPCV with embargo, triple-barrier labels,
+  deflated Sharpe across all hypotheses + parameter sweeps. No naive Sharpe.
+- **INV-5** Costs (FMP half-spread + sqrt impact + borrow + commissions) are
+  plumbed into `vbt.Portfolio.from_signals`. Net-of-cost results only.
+- **INV-6** Prompts version-pinned; extraction is a pure function of
+  `(raw_doc, prompt_version)` with content-hash idempotent cache.
+- **INV-7** No credential reads (`.env`, `*.key`, `*.pem`). Mask secrets.
+
+## Sensitive paths (test-first, name the test in PR body)
+
+- `src/auto_research/extract/{guardrails.py,schemas.py}`
+- `feast_repo/`
+- `src/auto_research/backtest/{cpcv.py,deflated_sharpe.py,labels.py,costs.py,gates.py}`
+- `src/auto_research/agents/{research_graph.py,reliability.py}`
+- `src/auto_research/mcp_server.py`
+
+## Working style
+
+- **Surface tradeoffs; don't pick silently.** Multiple interpretations → present
+  them. Unclear → stop and name the confusion. Silent reasonable-looking
+  choices ship lookahead bugs.
+- **Surgical changes.** Every changed line traces to the request or the AC. No
+  drive-by refactors. Remove only orphans your changes created.
+- **Goal-driven, verify-then-loop.** Convert tasks into `Step → verify` pairs.
+  For sensitive paths the verify is a test/eval; for ordinary code it's
+  `make quick` + targeted unit test.
+- **Simplicity first.** Minimum code, no speculative abstractions, no
+  configurability that wasn't requested.
+
+## Operational prohibitions
+
+- No `.env` reads, no credential logging.
+- No deletes/rewrites under `data/raw/`, `data/extracted/`, `data/quarantine/`.
+- No bypassing the citation-grounding post-validation.
+- No backfill runs (~$75-150 API spend) without user confirmation.
+- No force-push to `main`, no PR merges.

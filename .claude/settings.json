@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport sys, json, re\nd = json.load(sys.stdin)\ntool_input = d.get('tool_input') or {}\np = tool_input.get('file_path') or d.get('file_path', '')\nSENSITIVE = re.compile(r'(src/auto_research/(extract/(guardrails|schemas|citation)|backtest/(cpcv|deflated_sharpe|labels|costs)|agents/(research_graph|reliability)|mcp_server\\.py)|^feast/|/feast/)')\nif SENSITIVE.search(p):\n    print('\\n\\033[33m\\u26a0\\ufe0f  SENSITIVE PATH \\u2014 check AGENTS.md \\u00a72 invariant + \\u00a73, name a failing test or eval gate before finalising.\\033[0m')\n\"",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport sys, json\nd = json.load(sys.stdin)\nresult = json.dumps(d.get('tool_response', ''))\nif any(x in result for x in ['FAILED', 'ERROR', 'AssertionError', 'Traceback']):\n    print('\\n\\033[31m\\u2717 Build/test failure detected \\u2014 stop and root-cause before next edit. Do not paper over with try/except or skip markers.\\033[0m')\n\"",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "deny": [
+      "Read(**/.env*)",
+      "Read(**/secrets/**)",
+      "Read(**/Secrets/**)",
+      "Read(**/credentials/**)",
+      "Read(**/Credentials/**)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Bash(rm -rf data/raw/**)",
+      "Bash(rm -rf data/extracted/**)",
+      "Bash(rm -rf data/quarantine/**)"
+    ]
+  }
+}
