@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Spec, plan, and architecture
+    url: https://github.com/investlink-ai/auto-research/tree/main/docs
+    about: Read docs/specs/, docs/plans/, AGENTS.md, ARCHITECTURE.md before opening a non-trivial issue.

@@ -1,13 +1,15 @@
-"""Parse the implementation plan and create one GitHub issue per `### Issue N`.
+"""Parse the implementation plan and create or update GitHub issues.
 
-Idempotent: skips issues whose title already exists on GitHub (title-based
-dedup). Re-runnable without producing duplicates.
+Idempotent: by default, skips issues whose title already exists. With
+`--update`, edits the body of existing issues to match the current plan
+content (useful when the plan or this parser has changed).
 
 Run from repo root after `scripts/setup_github.sh`.
 
 Usage:
-    python scripts/create_all_issues.py              # live
+    python scripts/create_all_issues.py              # create missing
     python scripts/create_all_issues.py --dry-run    # parse + preview only
+    python scripts/create_all_issues.py --update     # refresh existing bodies
     python scripts/create_all_issues.py --only 5,7   # specific issues
 """
 
@@ -65,6 +67,33 @@ class Issue:
     blocked_by: list[int] = field(default_factory=list)
 
 
+def parse_ac_bullets(ac_text: str) -> list[str]:
+    """Parse bullets from an AC block, joining multi-line continuations.
+
+    A bullet starts at a line beginning with "- ". Subsequent non-empty lines
+    that do not start with "- " are continuations and get joined with a
+    single space. Empty lines flush the current bullet.
+    """
+    bullets: list[str] = []
+    current: str | None = None
+    for raw in ac_text.splitlines():
+        line = raw.rstrip()
+        stripped = line.lstrip()
+        if stripped.startswith("- "):
+            if current is not None:
+                bullets.append(current.strip())
+            current = stripped[2:].strip()
+        elif current is not None and stripped:
+            current += " " + stripped
+        elif not stripped:
+            if current is not None:
+                bullets.append(current.strip())
+                current = None
+    if current is not None:
+        bullets.append(current.strip())
+    return bullets
+
+
 def parse_issues(plan_text: str) -> list[Issue]:
     issues: list[Issue] = []
     headers = list(ISSUE_HEADER_RE.finditer(plan_text))
@@ -81,11 +110,7 @@ def parse_issues(plan_text: str) -> list[Issue]:
 
         ac_m = AC_RE.search(body)
         ac_text = ac_m.group("text").strip() if ac_m else ""
-        ac_lines = [
-            line.lstrip()[2:].strip()  # strip leading "- "
-            for line in ac_text.splitlines()
-            if line.lstrip().startswith("- ")
-        ]
+        ac_lines = parse_ac_bullets(ac_text)
 
         foot_m = FOOTER_RE.search(body)
         if not foot_m:
@@ -117,21 +142,21 @@ def parse_issues(plan_text: str) -> list[Issue]:
     return issues
 
 
-def existing_issue_titles() -> set[str]:
+def existing_issues_by_title() -> dict[str, int]:
     try:
         out = subprocess.check_output(
             [
                 "gh", "issue", "list",
                 "--state", "all",
                 "--limit", "200",
-                "--json", "title",
+                "--json", "title,number",
             ],
             text=True,
         )
-        return {row["title"] for row in json.loads(out)}
+        return {row["title"]: row["number"] for row in json.loads(out)}
     except subprocess.CalledProcessError as exc:
         print(f"WARN: could not list existing issues: {exc}", file=sys.stderr)
-        return set()
+        return {}
 
 
 def issue_body(issue: Issue) -> str:
@@ -145,21 +170,37 @@ def issue_body(issue: Issue) -> str:
         "## Acceptance criteria\n\n" + "\n".join(f"- [ ] {ac}" for ac in issue.ac_lines) + "\n",
     ]
     if issue.blocked_by:
+        # GitHub task-list syntax: `- [ ] #N` renders as a tracked checkbox
+        # that auto-checks when the referenced issue closes.
         parts.append(
             "## Blocked by\n\n"
-            + "\n".join(f"- #{b}" for b in issue.blocked_by)
+            + "\n".join(f"- [ ] #{b}" for b in issue.blocked_by)
             + "\n"
         )
     return "\n".join(parts)
 
 
-def create_one(issue: Issue, *, dry_run: bool, existing: set[str]) -> str:
+def create_or_update(
+    issue: Issue,
+    *,
+    dry_run: bool,
+    update: bool,
+    existing: dict[str, int],
+) -> str:
     title = f"Issue {issue.n}: {issue.title}"
-    if title in existing:
-        return f"SKIP (exists): {title}"
-
     body = issue_body(issue)
     milestone = MILESTONE_TITLES[issue.milestone]
+
+    if title in existing:
+        issue_number = existing[title]
+        if not update:
+            return f"SKIP (exists): #{issue_number} {title}"
+        if dry_run:
+            return f"DRY-RUN would update body: #{issue_number} {title}"
+        subprocess.check_call(
+            ["gh", "issue", "edit", str(issue_number), "--body", body]
+        )
+        return f"UPDATED: #{issue_number} {title}"
 
     if dry_run:
         return (
@@ -184,7 +225,12 @@ def main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Parse and print without creating issues on GitHub.",
+        help="Parse and print without calling gh.",
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Edit existing issues' bodies in place instead of skipping.",
     )
     parser.add_argument(
         "--only",
@@ -207,22 +253,28 @@ def main() -> int:
         issues = [i for i in issues if i.n in wanted]
         print(f"Filtered to {len(issues)} issues: {sorted(i.n for i in issues)}")
 
-    existing = existing_issue_titles() if not args.dry_run else set()
+    existing = existing_issues_by_title() if not args.dry_run else {}
 
-    created = 0
-    skipped = 0
+    counts = {"CREATED": 0, "UPDATED": 0, "SKIP": 0, "DRY-RUN": 0}
     for issue in issues:
-        result = create_one(issue, dry_run=args.dry_run, existing=existing)
+        result = create_or_update(
+            issue,
+            dry_run=args.dry_run,
+            update=args.update,
+            existing=existing,
+        )
         print(result)
-        if result.startswith("SKIP"):
-            skipped += 1
-        else:
-            created += 1
+        for key in counts:
+            if result.startswith(key):
+                counts[key] += 1
+                break
 
     print(
-        f"\nSummary: {created} "
-        f"{'would-create' if args.dry_run else 'created'}, "
-        f"{skipped} skipped"
+        f"\nSummary: "
+        f"{counts['CREATED']} created, "
+        f"{counts['UPDATED']} updated, "
+        f"{counts['SKIP']} skipped, "
+        f"{counts['DRY-RUN']} dry-run"
     )
     return 0
 
