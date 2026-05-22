@@ -19,7 +19,9 @@ repos:
       - id: check-merge-conflict
       - id: check-added-large-files
         args: ["--maxkb=500"]
-      - id: detect-private-key  # defends INV-7 (no secrets in commits)
+        exclude: ^uv\.lock$  # lockfile is allowed to grow with deps
+      - id: detect-private-key  # catches PEM/OpenSSH only; LLM API keys
+        # use prefix detection in the local hook below
       - id: mixed-line-ending
         args: ["--fix=lf"]
 
@@ -28,3 +30,14 @@ repos:
     hooks:
       - id: ruff
         args: ["--fix", "--exit-non-zero-on-fix"]
+
+  # Custom LLM-API-key detection — defends INV-7. detect-private-key
+  # only matches PEM/OpenSSH headers; LLM tokens have their own prefixes.
+  - repo: local
+    hooks:
+      - id: detect-llm-api-keys
+        name: detect LLM API keys (anthropic / langfuse)
+        entry: '(sk-ant-[A-Za-z0-9_-]{20,}|pk-lf-[a-f0-9-]{30,}|sk-lf-[a-f0-9-]{30,})'
+        language: pygrep
+        types: [text]
+        exclude: ^(\.env\.example|docs/.*\.md|tests/.*)$

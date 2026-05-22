@@ -61,15 +61,16 @@ def test_anthropic_call_under_telemetry() -> None:
         assert flushed, "OTel span flush timed out (5s)"
 
     # Poll Langfuse for the trace landing (ingestion is async).
+    # Cold-Docker ingestion can take 10-15s, so budget 30s with early-exit.
     from langfuse import Langfuse
 
     lf = Langfuse()
     found = False
-    for _ in range(5):  # up to ~10s
+    for _ in range(15):  # up to ~30s
         time.sleep(2)
         traces = lf.fetch_traces(from_timestamp=window_start, limit=20)
         if traces.data:
             found = True
             break
 
-    assert found, "No traces landed in Langfuse within 10s of the Anthropic call"
+    assert found, "No traces landed in Langfuse within 30s of the Anthropic call"
