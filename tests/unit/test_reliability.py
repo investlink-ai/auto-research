@@ -20,11 +20,8 @@ from anthropic.types import Message, TextBlock, Usage
 from auto_research.agents.reliability import (
     CircuitOpen,
     CostCapExceeded,
-    MaxIterationsExceeded,
     circuit_breaker,
     cost_cap,
-    fallback_model,
-    max_iterations,
     reliable_agent_node,
     retry_with_backoff,
 )
@@ -237,43 +234,6 @@ def test_cost_cap_rejects_unknown_model() -> None:
         call()
 
 
-# --- max_iterations ----------------------------------------------------------
-
-
-def test_max_iterations_trips_on_n_plus_one() -> None:
-    calls = []
-
-    @max_iterations(n=3)
-    def call() -> str:
-        calls.append(1)
-        return "ok"
-
-    for _ in range(3):
-        call()
-    assert len(calls) == 3
-    with pytest.raises(MaxIterationsExceeded):
-        call()
-    assert len(calls) == 3
-
-
-def test_max_iterations_counts_failures_too() -> None:
-    # The research-graph cap is on cycles, not successes — a failing call still
-    # consumes a slot, otherwise a thrashing graph could exceed the budget.
-    calls = []
-
-    @max_iterations(n=2)
-    def call() -> None:
-        calls.append(1)
-        raise RuntimeError("boom")
-
-    for _ in range(2):
-        with pytest.raises(RuntimeError):
-            call()
-    assert len(calls) == 2
-    with pytest.raises(MaxIterationsExceeded):
-        call()
-
-
 # --- retry_with_backoff -------------------------------------------------------
 
 
@@ -327,49 +287,6 @@ def test_retry_with_backoff_retries_5xx() -> None:
     assert state["i"] == 2
 
 
-# --- fallback_model ----------------------------------------------------------
-
-
-def test_fallback_model_switches_to_fallback_on_rate_limit() -> None:
-    seen_models: list[str] = []
-
-    @fallback_model(primary="claude-sonnet-4-6", fallback="claude-haiku-4-5")
-    def call(*, model: str = "") -> str:
-        seen_models.append(model)
-        if model == "claude-sonnet-4-6":
-            raise _rate_limit_error()
-        return f"ok:{model}"
-
-    assert call() == "ok:claude-haiku-4-5"
-    assert seen_models == ["claude-sonnet-4-6", "claude-haiku-4-5"]
-
-
-def test_fallback_model_does_not_retry_on_non_capacity_error() -> None:
-    # The fallback is for capacity / rate-limit, not for arbitrary errors —
-    # otherwise it would mask logic bugs by silently re-routing to a cheaper model.
-    seen_models: list[str] = []
-
-    @fallback_model(primary="claude-sonnet-4-6", fallback="claude-haiku-4-5")
-    def call(*, model: str = "") -> str:
-        seen_models.append(model)
-        raise ValueError("config bug")
-
-    with pytest.raises(ValueError):
-        call()
-    assert seen_models == ["claude-sonnet-4-6"], "fallback should not run for ValueError"
-
-
-def test_fallback_model_propagates_fallback_failure() -> None:
-    @fallback_model(primary="claude-sonnet-4-6", fallback="claude-haiku-4-5")
-    def call(*, model: str = "") -> str:
-        raise _rate_limit_error()
-
-    # If even the fallback model is rate-limited, the original exception
-    # surfaces — no infinite swap.
-    with pytest.raises(RateLimitError):
-        call()
-
-
 # --- composite (reliable_agent_node) -----------------------------------------
 
 
@@ -377,24 +294,25 @@ def test_composite_short_circuits_at_cost_cap_outermost() -> None:
     """`cost_cap` must be the outermost gate.
 
     Once the cap is exceeded, no further calls should reach the inner
-    function — not even to feed `circuit_breaker` failure tallies or
-    `max_iterations` counters. We verify by counting inner invocations.
+    function — not even to feed `circuit_breaker` failure tallies. We
+    verify by counting inner invocations.
     """
-    inner_calls: list[str] = []
+    inner_calls: list[int] = []
 
     @reliable_agent_node(
         failures=99,
         usd=5.00,
-        max_iters=99,
         max_retries=0,
         initial_wait=0.0,
         max_wait=0.0,
-        primary="claude-sonnet-4-6",
-        fallback="claude-haiku-4-5",
     )
-    def call(*, model: str = "") -> Message:
-        inner_calls.append(model)
-        return _msg(input_tokens=1_000_000, output_tokens=1_000_000, model=model)
+    def call() -> Message:
+        inner_calls.append(1)
+        return _msg(
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            model="claude-sonnet-4-6",
+        )
 
     call()
     assert len(inner_calls) == 1
@@ -404,46 +322,22 @@ def test_composite_short_circuits_at_cost_cap_outermost() -> None:
 
 
 def test_composite_applies_circuit_breaker_inside_cost_cap() -> None:
-    inner_calls: list[str] = []
+    inner_calls: list[int] = []
 
     @reliable_agent_node(
         failures=2,
         usd=1000.00,  # effectively unlimited so circuit trips first
-        max_iters=99,
         max_retries=0,
         initial_wait=0.0,
         max_wait=0.0,
-        primary="claude-sonnet-4-6",
-        fallback="claude-haiku-4-5",
     )
-    def call(*, model: str = "") -> Message:
-        inner_calls.append(model)
+    def call() -> Message:
+        inner_calls.append(1)
         raise ValueError("intentional inner failure")
 
-    # First two calls bubble the inner ValueError. fallback_model is a no-op
-    # here because ValueError isn't a capacity error.
+    # First two calls bubble the inner ValueError; the third trips the circuit.
     for _ in range(2):
         with pytest.raises(ValueError):
             call()
     with pytest.raises(CircuitOpen):
-        call()
-
-
-def test_composite_applies_max_iterations_inside_circuit_breaker() -> None:
-    @reliable_agent_node(
-        failures=99,
-        usd=1000.00,
-        max_iters=2,
-        max_retries=0,
-        initial_wait=0.0,
-        max_wait=0.0,
-        primary="claude-sonnet-4-6",
-        fallback="claude-haiku-4-5",
-    )
-    def call(*, model: str = "") -> Message:
-        return _msg(input_tokens=10, output_tokens=10, model=model)
-
-    call()
-    call()
-    with pytest.raises(MaxIterationsExceeded):
         call()

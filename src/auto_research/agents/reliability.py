@@ -1,39 +1,41 @@
 """Reliability primitives for agent / worker LLM calls (per `docs/CONTRACTS.md` §5).
 
-Five composable decorators plus a `@reliable_agent_node` composite:
+Three composable decorators plus a `@reliable_agent_node` composite:
 
 - `@cost_cap(usd=...)` — hard per-session USD limit, read from the real
   `anthropic.types.Usage` block on every returned `Message`. Raises
   `CostCapExceeded` (typed) once the running total crosses the cap.
 - `@circuit_breaker(failures=...)` — N consecutive failures stop further
   calls; raises `CircuitOpen` (typed).
-- `@max_iterations(n=...)` — research-graph cycle cap; raises
-  `MaxIterationsExceeded` (typed). Counts both successes and failures so
-  a thrashing graph can't exceed the budget.
 - `@retry_with_backoff(max_retries=...)` — exponential backoff with jitter
   on Anthropic `RateLimitError` / 5xx `APIStatusError` and transient httpx
   network errors. Non-retryable exceptions propagate immediately.
-- `@fallback_model(primary=..., fallback=...)` — on a capacity-class
-  exception (`RateLimitError` or HTTP 529 overload), swap the `model`
-  kwarg once and re-call. No infinite swap.
 
 Composite order (outermost → innermost):
 
     @cost_cap                 # short-circuit if the budget is already gone
     @circuit_breaker          # short-circuit if too many consecutive failures
-    @max_iterations           # count cycles before robustness kicks in
-    @retry_with_backoff       # transient retries inside one logical call
-    @fallback_model           # innermost: actually invokes the API
-    def call(*, model: str) -> Message: ...
+    @retry_with_backoff       # transient retries on the innermost call
+    def call(...) -> Message: ...
 
 `cost_cap` is outermost so an exceeded budget can't be paid down further
-by retries or fallbacks. `fallback_model` is innermost so retries see the
-final attempt's outcome (primary failed AND fallback failed) before
-counting against `max_retries`.
+by retries.
 
 State is per-wrapper instance: each decorator application creates a fresh
 closure. The wrappers are thread-safe via an internal `Lock` — required
 because the LangGraph research agent dispatches nodes from a thread pool.
+
+Removed in this v1, vs the original CONTRACTS §5 surface:
+- `@max_iterations` — the research-graph cycle cap belongs in LangGraph's
+  `recursion_limit` config (set on `graph.invoke`), which counts node
+  transitions across the whole traversal. A per-function decorator bounds
+  the wrong dimension and duplicates a native primitive.
+- `@fallback_model` — silent Sonnet → Haiku downgrade hides capacity
+  signal we want to see, changes the model that produced the output
+  (different quality per spec §7.3), and complicates cost accounting.
+  Canonical strategy on 429 / 5xx is `retry_with_backoff` on the primary
+  model; if Anthropic genuinely sheds load, that's a circuit-breaker
+  concern.
 """
 
 from __future__ import annotations
@@ -43,7 +45,7 @@ import threading
 from collections.abc import Callable
 from typing import Any, Final, TypeVar, cast
 
-from anthropic import AnthropicError, APIStatusError, RateLimitError
+from anthropic import APIStatusError, RateLimitError
 from anthropic.types import Message
 from tenacity import (
     retry,
@@ -83,14 +85,6 @@ class CostCapExceeded(Exception):  # noqa: N818  # contract-mandated name (CONTR
     """
 
 
-class MaxIterationsExceeded(Exception):  # noqa: N818  # contract-mandated name
-    """Raised when `@max_iterations` is asked for an (n+1)th call. The
-    propose→backtest→decide loop is bounded at 10 cycles per spec §13.2
-    — exceeding the bound means the agent is thrashing and should hand
-    off to a human, not silently keep spending.
-    """
-
-
 # --- Pricing -----------------------------------------------------------------
 #
 # Anthropic list prices (USD per million tokens) for the three tiers the
@@ -101,6 +95,9 @@ class MaxIterationsExceeded(Exception):  # noqa: N818  # contract-mandated name
 
 _PRICING_PER_MTOK: Final[dict[str, tuple[float, float]]] = {
     # model: (input USD / MTok, output USD / MTok)
+    # Source: Anthropic public pricing, last verified 2026-05-24.
+    # W2 follow-up: source from Langfuse model registry at startup so prices
+    # update without code edits when Anthropic adjusts list rates.
     "claude-sonnet-4-6": (3.00, 15.00),
     "claude-haiku-4-5": (1.00, 5.00),
     "claude-opus-4-7": (15.00, 75.00),
@@ -155,14 +152,6 @@ def _is_5xx(exc: BaseException) -> bool:
         and not isinstance(exc, RateLimitError)
         and 500 <= exc.status_code < 600
     )
-
-
-def _is_capacity_error(exc: BaseException) -> bool:
-    """529 = overloaded; 429 = rate-limited. Both indicate temporary capacity
-    pressure that a model swap can route around."""
-    if isinstance(exc, RateLimitError):
-        return True
-    return isinstance(exc, APIStatusError) and exc.status_code == 529
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -283,42 +272,6 @@ def cost_cap(*, usd: float) -> Callable[[F], F]:
     return decorate
 
 
-# --- @max_iterations ---------------------------------------------------------
-
-
-def max_iterations(*, n: int) -> Callable[[F], F]:
-    """Cap the total number of invocations at `n`. The (n+1)th raises
-    `MaxIterationsExceeded`. Failures consume slots — a thrashing loop
-    cannot escape the bound by repeatedly erroring out.
-    """
-    if n < 1:
-        raise ValueError("`n` must be >= 1")
-
-    def decorate(func: F) -> F:
-        state = {"calls": 0}
-        lock = threading.Lock()
-
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            with lock:
-                if state["calls"] >= n:
-                    raise MaxIterationsExceeded(
-                        f"max_iterations exceeded on {func.__qualname__}: "
-                        f"{state['calls']} >= {n}"
-                    )
-                state["calls"] += 1
-            return func(*args, **kwargs)
-
-        def reset() -> None:
-            with lock:
-                state["calls"] = 0
-
-        wrapper.reset = reset  # type: ignore[attr-defined]
-        return cast(F, wrapper)
-
-    return decorate
-
-
 # --- @retry_with_backoff -----------------------------------------------------
 
 
@@ -354,40 +307,6 @@ def retry_with_backoff(
     return decorate
 
 
-# --- @fallback_model ---------------------------------------------------------
-
-
-def fallback_model(*, primary: str, fallback: str) -> Callable[[F], F]:
-    """Swap `model=primary` → `model=fallback` once on a capacity-class
-    exception (429 / 529).
-
-    The decorated function must accept `model` as a keyword argument. The
-    decorator injects it on every call. No infinite swap: if the fallback
-    also raises, the exception propagates.
-    """
-
-    def decorate(func: F) -> F:
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            # If the caller explicitly passes a `model`, honor it (e.g., for
-            # tests). Otherwise inject the primary.
-            kwargs.setdefault("model", primary)
-            try:
-                return func(*args, **kwargs)
-            except AnthropicError as exc:
-                if not _is_capacity_error(exc):
-                    raise
-                # One-shot swap. Don't loop — that would mask sustained
-                # capacity issues from `retry_with_backoff` and
-                # `circuit_breaker` upstream.
-                kwargs["model"] = fallback
-                return func(*args, **kwargs)
-
-        return cast(F, wrapper)
-
-    return decorate
-
-
 # --- composite: @reliable_agent_node -----------------------------------------
 
 
@@ -395,27 +314,23 @@ def reliable_agent_node(
     *,
     failures: int = 3,
     usd: float = 5.00,
-    max_iters: int = 10,
     max_retries: int = 3,
     initial_wait: float = 1.0,
     max_wait: float = 30.0,
-    primary: str,
-    fallback: str,
 ) -> Callable[[F], F]:
-    """Apply all five primitives in the contract-mandated order.
+    """Apply all three primitives in the contract-mandated order.
 
-    Outer → inner: cost_cap, circuit_breaker, max_iterations,
-    retry_with_backoff, fallback_model. See module docstring for rationale.
+    Outer → inner: cost_cap, circuit_breaker, retry_with_backoff. See
+    module docstring for rationale (and for the two primitives dropped vs
+    the v1 CONTRACTS §5 surface).
     """
 
     def decorate(func: F) -> F:
-        wrapped = fallback_model(primary=primary, fallback=fallback)(func)
         wrapped = retry_with_backoff(
             max_retries=max_retries,
             initial_wait=initial_wait,
             max_wait=max_wait,
-        )(wrapped)
-        wrapped = max_iterations(n=max_iters)(wrapped)
+        )(func)
         wrapped = circuit_breaker(failures=failures)(wrapped)
         wrapped = cost_cap(usd=usd)(wrapped)
         return wrapped
@@ -426,11 +341,8 @@ def reliable_agent_node(
 __all__ = [
     "CircuitOpen",
     "CostCapExceeded",
-    "MaxIterationsExceeded",
     "circuit_breaker",
     "cost_cap",
-    "fallback_model",
-    "max_iterations",
     "reliable_agent_node",
     "retry_with_backoff",
 ]

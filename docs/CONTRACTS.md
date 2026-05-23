@@ -226,21 +226,45 @@ Anthropic call.
 
 ## 5. Reliability primitives
 
-`src/auto_research/agents/reliability.py`. Decorators / context managers
-applied to every agent or worker that makes an LLM call.
+`src/auto_research/agents/reliability.py`. Decorators applied to every
+agent or worker that makes an LLM call.
 
 ```python
+@cost_cap(usd=5.00)                       # per-session hard $ limit
 @circuit_breaker(failures=3)              # 3 consecutive failures → stop
-@cost_cap(usd=5.00)                       # per-session hard limit
-@max_iterations(n=10)                     # research-graph cap
-@retry_with_backoff(max_retries=3)        # 5xx / rate limit
-@fallback_model(primary="sonnet", fallback="haiku")
+@retry_with_backoff(max_retries=3)        # exp-jitter on 429 / 5xx / transport
 def my_llm_call(...): ...
 ```
 
 Contract: every decorator is composable. Order matters — `cost_cap` outermost,
-then `circuit_breaker`, then `retry_with_backoff`, then `fallback_model`. The
-research graph applies all five via a single `@reliable_agent_node` composite.
+then `circuit_breaker`, then `retry_with_backoff` (innermost). The research
+graph applies all three via a single `@reliable_agent_node` composite.
+
+Trip exceptions are typed: `CostCapExceeded` (cumulative spend over the cap)
+and `CircuitOpen` (consecutive failures reached). The retry layer re-raises
+the underlying SDK exception (`anthropic.RateLimitError`, `APIStatusError`,
+or `httpx.*Error`) once the budget is exhausted.
+
+### 5.1 Primitives intentionally not included
+
+The original v1 spec (`docs/specs/2026-05-22-design.md` §13.2) named two
+more primitives. Both were removed during Issue #8 design review:
+
+- **`@max_iterations(n=10)`** — the research-graph cycle cap belongs in
+  LangGraph's `recursion_limit` config (set on `graph.invoke`), which
+  counts node transitions across the whole traversal. A per-function
+  decorator bounds the wrong dimension and duplicates a native framework
+  primitive.
+- **`@fallback_model(primary, fallback)`** — silent Sonnet → Haiku
+  downgrade hides the capacity signal we want to see, changes the model
+  that produced the output (Haiku ≠ Sonnet for cross-doc reasoning per
+  spec §7.3), and complicates cost accounting. Canonical strategy on
+  429 / 5xx is `retry_with_backoff` on the primary model; sustained
+  capacity loss is `circuit_breaker`'s concern.
+
+If a future requirement reintroduces either, add a typed trip exception
+and update the composite — don't reintroduce them without an explicit
+follow-up issue and a contract amendment.
 
 ---
 
