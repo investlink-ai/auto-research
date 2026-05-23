@@ -22,6 +22,7 @@ See ``docs/DATA_MODEL.md`` §1 and ``AGENTS.md`` INV-1 for the contract.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
@@ -104,6 +105,19 @@ def test_as_of_ts_is_next_trading_day_cutoff_for_price_features(events: pd.Serie
         assert as_of_session.date() > event_et_date, (
             f"as_of session {as_of_session.date()} not > event ET date {event_et_date}"
         )
+        # 5. Minimality: as_of_session is the FIRST trading session strictly
+        # after the event's NYSE-local date — catches a regression that
+        # advances 2+ sessions (which would still satisfy 1-4). Uses
+        # sessions_in_range, a different xcals API path than the impl's
+        # date_to_session(direction="next"), for independent verification.
+        later_sessions = _NYSE.sessions_in_range(
+            pd.Timestamp(event_et_date) + pd.Timedelta(days=1),
+            pd.Timestamp(event_et_date) + pd.Timedelta(days=30),
+        )
+        assert as_of_session == later_sessions[0], (
+            f"as_of_session {as_of_session.date()} is not the first session "
+            f"strictly after event ET date {event_et_date} (got {later_sessions[0].date()})"
+        )
 
 
 # ---- Boundary validation: producer cannot leak naive / NaT past the cutoff ----
@@ -126,6 +140,17 @@ def test_next_trading_day_cutoff_rejects_nat() -> None:
         next_trading_day_cutoff(pd.NaT)  # type: ignore[arg-type]  # intentional
 
 
+def _zero_features(n: int) -> dict[str, list[float]]:
+    return {
+        "close_adj": [0.0] * n,
+        "returns_1d": [0.0] * n,
+        "returns_5d": [0.0] * n,
+        "vol_20d_annualized": [0.0] * n,
+        "bid_ask_half_spread_bps": [0.0] * n,
+        "adv_20d_usd": [0.0] * n,
+    }
+
+
 def test_materialize_price_features_rejects_tz_naive_column() -> None:
     """The materializer should reject a tz-naive event_datetime column at the
     boundary once, rather than letting next_trading_day_cutoff raise per-row.
@@ -136,16 +161,59 @@ def test_materialize_price_features_rejects_tz_naive_column() -> None:
             "entity_id": ["NVDA"] * n,
             # tz-naive on purpose — must be rejected.
             "event_datetime": pd.to_datetime(["2024-06-04 10:00", "2024-06-05 10:00"]),
-            "close_adj": [0.0] * n,
-            "returns_1d": [0.0] * n,
-            "returns_5d": [0.0] * n,
-            "vol_20d_annualized": [0.0] * n,
-            "bid_ask_half_spread_bps": [0.0] * n,
-            "adv_20d_usd": [0.0] * n,
+            **_zero_features(n),
         }
     )
     with pytest.raises(TypeError, match="tz-aware"):
         materialize_price_features(frame)
+
+
+# ---- Parquet round-trip: the actual production trigger of the naive bug ----
+
+
+def test_naive_event_datetime_after_parquet_roundtrip_is_rejected(tmp_path: Path) -> None:
+    """A naive event_datetime column stays naive through pyarrow parquet
+    round-trip; the materializer must reject the degraded frame at the
+    boundary instead of silently bucketing every row by UTC date.
+    """
+    n = 3
+    naive = pd.DataFrame(
+        {
+            "entity_id": ["NVDA"] * n,
+            # tz-naive — what some pyarrow writer/schema combinations produce.
+            "event_datetime": pd.to_datetime(["2024-06-04 10:00"] * n),
+            **_zero_features(n),
+        }
+    )
+    path = tmp_path / "events.parquet"
+    naive.to_parquet(path, index=False)
+    roundtripped = pd.read_parquet(path)
+    # Sanity: parquet round-trip preserved the (broken) naive dtype.
+    assert not isinstance(roundtripped["event_datetime"].dtype, pd.DatetimeTZDtype)
+    with pytest.raises(TypeError, match="tz-aware"):
+        materialize_price_features(roundtripped)
+
+
+def test_tz_aware_event_datetime_survives_parquet_roundtrip(tmp_path: Path) -> None:
+    """The happy path: a tz-aware event_datetime column round-trips through
+    parquet without losing its dtype, so the materializer's boundary check
+    accepts it and produces as_of_ts.
+    """
+    n = 3
+    aware = pd.DataFrame(
+        {
+            "entity_id": ["NVDA"] * n,
+            "event_datetime": pd.to_datetime(["2024-06-04 10:00"] * n, utc=True),
+            **_zero_features(n),
+        }
+    )
+    path = tmp_path / "events.parquet"
+    aware.to_parquet(path, index=False)
+    roundtripped = pd.read_parquet(path)
+    assert isinstance(roundtripped["event_datetime"].dtype, pd.DatetimeTZDtype)
+    result = materialize_price_features(roundtripped)
+    assert "as_of_ts" in result.columns
+    assert (result["as_of_ts"] > result["event_datetime"]).all()
 
 
 # ---- Holiday/weekend anchors: cheap explicit checks that document the contract ----
