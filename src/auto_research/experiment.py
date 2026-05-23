@@ -34,20 +34,40 @@ from mlflow.entities import Run
 _DEFAULT_URI = "file:./mlruns"
 
 
-def _normalize_uri(raw: str) -> str:
-    """Resolve relative `file:` URIs to absolute paths.
+def _project_root() -> Path:
+    """Walk up from this module to find the directory containing pyproject.toml.
 
-    Without this, `file:./mlruns` resolves against the current working
-    directory — so a run started inside `.worktree/3-mlflow/` writes
+    Editable installs (uv sync) keep src/auto_research/ inside the repo, so
+    walking up from __file__ hits pyproject.toml deterministically. For
+    non-editable installs (wheel in site-packages), falls back to CWD.
+    """
+    here = Path(__file__).resolve()
+    for parent in (here, *here.parents):
+        if (parent / "pyproject.toml").exists():
+            return parent
+    return Path.cwd()
+
+
+def _normalize_uri(raw: str) -> str:
+    """Resolve relative `file:` URIs against the project root, not CWD.
+
+    Without this, `file:./mlruns` resolves against the *current working
+    directory* — so a run started inside `.worktree/3-mlflow/` writes
     `.worktree/3-mlflow/mlruns/` while `uv run mlflow ui` from the main
-    checkout reads an empty `./mlruns/`. Silent data fragmentation.
-    Absolute paths and non-file schemes (sqlite://, http://, ...) pass
+    checkout reads an empty `./mlruns/`. The earlier fix (`Path.resolve()`
+    with no arg) hid the bug behind an abstraction but kept the
+    CWD-dependent behavior. Anchoring on the directory containing
+    pyproject.toml makes every CWD produce the same store.
+
+    Absolute paths and non-file schemes (sqlite://, http://) pass
     through unchanged.
     """
     if not raw.startswith("file:"):
         return raw
     path = Path(raw.removeprefix("file:"))
-    return path.resolve().as_uri() if not path.is_absolute() else raw
+    if path.is_absolute():
+        return raw
+    return (_project_root() / path).resolve().as_uri()
 
 
 @contextmanager

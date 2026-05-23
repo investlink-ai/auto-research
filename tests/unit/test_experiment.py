@@ -33,15 +33,31 @@ def test_configured_tracking_uri_passes_absolute_through(
 def test_configured_tracking_uri_resolves_relative_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default `file:./mlruns` resolves to an absolute file URI.
-
-    Defends against the worktree-vs-main-checkout data fragmentation
-    failure mode (different CWDs → different mlruns/ dirs silently).
-    """
+    """Default `file:./mlruns` resolves to an absolute file URI."""
     monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
     uri = configured_tracking_uri()
     assert uri.startswith("file://")
     assert uri.endswith("/mlruns")
+
+
+def test_configured_tracking_uri_stable_across_cwds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Relative URIs anchor on project root — NOT current working directory.
+
+    Defends against worktree-vs-main-checkout data fragmentation: calling
+    configured_tracking_uri() from any CWD must return the same store URI.
+    Regression test for the Codex P2 finding on PR #34.
+    """
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    uri_from_repo_root = configured_tracking_uri()
+
+    monkeypatch.chdir(tmp_path)
+    uri_from_other_cwd = configured_tracking_uri()
+
+    assert uri_from_repo_root == uri_from_other_cwd
+    assert str(tmp_path) not in uri_from_other_cwd
 
 
 def test_configured_tracking_uri_passes_non_file_scheme(
