@@ -1,6 +1,6 @@
 ---
 name: chestertons-fence
-description: Use BEFORE removing any decorator, config parameter, framework wiring, validation, exception handler, or method that existed in the original code (whether from a self-review finding, external reviewer feedback, or "this looks redundant" instinct). Forces an explicit understand-then-test-then-decide cycle so a wrong rationalisation doesn't silently regress behaviour. Catches the failure mode that hit PR #38: dropping `created_timestamp_column` on a Feast FileSource because the documented field semantic was "inverted" — which broke PIT tie-break determinism for intraday duplicates and shipped through a self-review batch before round-3 review caught it via reproduction.
+description: Use BEFORE removing any decorator, config parameter, framework wiring, validation, exception handler, or method that existed in the original code (whether prompted by a self-review finding, external reviewer feedback, or a "this looks redundant" instinct). The "this looks redundant / inverted / wrong" finding is high-confidence in SHAPE but low-confidence in CONSEQUENCE; this skill forces an explicit understand-then-test-then-decide cycle so a wrong rationalisation doesn't silently regress behaviour.
 allowed-tools: Read, Grep, Bash, Edit, Write
 ---
 
@@ -85,13 +85,12 @@ These rationalisations ship silent regressions:
 - **"This looks redundant"** — without checking whether the framework
   treats the apparent duplication as redundant.
 - **"The semantic is inverted vs the docs"** — the documented semantic
-  describes intent; the actual behaviour may be what the original code
-  wanted. Inversion of LABEL ≠ inversion of EFFECT. (PR #38's
-  `created_timestamp_column='event_datetime'` was Feast's "ingestion
-  time" field, semantically inverted because `event_datetime ≤ as_of_ts`
-  always. But the BEHAVIOUR — Feast's `ORDER BY created_timestamp DESC`
-  tie-break — produced the correct PIT-conservative reading. Removing it
-  broke determinism for intraday duplicates.)
+  describes the framework's INTENT for the field/decorator/hook; the
+  actual BEHAVIOUR may be what the original code wanted. Inversion of
+  label ≠ inversion of effect. A field labelled "ingestion timestamp"
+  may also serve as a generic tie-breaker; using a value that violates
+  the documented label can still produce the correct behaviour for the
+  underlying mechanism.
 - **"No current callers exercise this"** — the absence of current
   callers doesn't tell you what FUTURE callers will need. Defensive
   wiring removed today bakes a regression into the next caller.
@@ -130,13 +129,10 @@ is probably load-zero — but say so explicitly in the commit message
 ("no behavioural difference observed; treating as cosmetic").
 
 **3. Verify against framework SOURCE, not just docs.** Docs describe
-intent; source describes effect. For Feast, Pydantic, FastAPI, SQLAlchemy
-etc., read the relevant function in `.venv/lib/.../site-packages/<framework>`
-or run a minimal reproduction. The PR-#38 case: Feast's offline-store
-code at `feast/infra/offline_stores/ibis.py` showed
-`ibis.desc(table[created_timestamp_col])` as the tie-break ORDER BY
-clause — the docs called the field "ingestion timestamp" but the source
-revealed it as a generic tie-breaker.
+intent; source describes effect. For any framework whose wiring you're
+removing, read the relevant function in `.venv/lib/.../site-packages/<framework>`
+or run a minimal reproduction. The label a field carries in the docs
+may not match what the implementation does with it.
 
 ## Pre-submit checklist
 
@@ -158,7 +154,7 @@ revealed it as a generic tie-breaker.
 ## Escalation
 
 If you removed something without this check and a later review caught a
-silent regression (as happened with PR #38's `created_timestamp_column`):
+silent regression:
 
 1. **Restore the thing immediately.** Don't try to find an alternative
    path that "achieves the same thing without it" — that's how the
@@ -171,43 +167,6 @@ silent regression (as happened with PR #38's `created_timestamp_column`):
    added at [path]." Future-you and future-reviewers need the trail.
 4. **Consider whether the skill needs updating.** If the case was
    genuinely subtle (e.g. the framework's behaviour required reading
-   non-obvious source files), add the framework or pattern to the
-   "what 'wrong' looks like" examples here.
-
-## Worked example: PR #38
-
-The case that motivated this skill. Pasted verbatim so future readers
-can see the failure mode in concrete form.
-
-**The fence:** Original `feast_repo/feature_views.py` had
-`FileSource(timestamp_field='as_of_ts', created_timestamp_column='event_datetime')`.
-
-**Round-1 self-review rationalisation:** "Feast docs say
-`created_timestamp_column` is the row's ingestion time, conventionally
-≥ `timestamp_field`. But `event_datetime ≤ as_of_ts` always — this is
-semantically inverted. The materializer emits one row per
-`(entity_id, event_datetime)`, so there's no tie-breaker need today. Drop
-the column."
-
-**What that rationalisation missed:** The PIT join key is
-`(entity_id, as_of_ts)`, not `(entity_id, event_datetime)`. Under the
-lag-1 cutoff, ALL intraday events for one ticker on one ET trading day
-collapse onto a single `as_of_ts` (the next session's close). So
-multiple rows with identical `(entity_id, as_of_ts)` are not just
-possible — they're the normal case under any real producer that emits
-more than one intraday event per ticker per day. Feast's PIT join
-without a tie-breaker becomes non-deterministic across pandas sort
-stability / parquet row order.
-
-**Round-3 review caught it via reproduction:** two AAPL rows at
-2024-06-04 10:00Z and 15:30Z produced two parquet rows at identical
-`as_of_ts=2024-06-05 20:00Z`. Verified Feast's offline-store source uses
-`ORDER BY ... created_timestamp DESC` as tie-break.
-
-**What the skill would have prevented:** step 2 (falsifying test before
-removal) would have forced writing a test that emits two intraday events
-and asserts a specific row wins. That test would have failed after
-removal — preventing the bad commit from landing. Step 3 (read framework
-source) would have shown the `created_timestamp_column` is generically
-the tie-break key, and using `event_datetime` as the tie-break value is
-a label/effect mismatch but a correct behaviour choice.
+   non-obvious source files), capture the general pattern in this
+   skill's "what 'wrong' looks like" — without naming the specific
+   incident.
