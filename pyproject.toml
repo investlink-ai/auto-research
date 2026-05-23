@@ -12,6 +12,7 @@ license = { text = "MIT" }
 dependencies = [
     "anthropic>=0.104.0",
     "langfuse>=2,<3",
+    "mlflow>=3.12.0",
     "traceloop-sdk>=0.30",
 ]
 
@@ -73,6 +74,10 @@ files = ["src/auto_research", "tests"]
 # means we're trusting an untyped surface.
 [[tool.mypy.overrides]]
 module = "langfuse.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "mlflow.*"
 ignore_missing_imports = true
 
 [dependency-groups]
