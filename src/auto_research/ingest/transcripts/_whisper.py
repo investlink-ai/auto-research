@@ -1,0 +1,248 @@
+"""OpenAI Whisper API client for earnings-call audio.
+
+Single responsibility: take raw audio bytes (any container ffmpeg
+can read — mp3, m4a, mp4, wav, webm) and return a structured
+`Transcript`. Source discovery / download is the caller's problem;
+see `transcripts.sources.*` and the orchestrator in
+`transcripts/__init__.py`.
+
+Why OpenAI Whisper API (`whisper-1`) rather than local
+`whisper.cpp`:
+- The cost is negligible at our scale (~$0.36 / 60-min call, ~$10/mo
+  ongoing for ~90 calls/quarter).
+- Quality is identical (the API serves the same `large-v3` weights).
+- One less local dependency (whisper.cpp + a model file ~3 GB).
+- The `make live-smoke` harness can drive the API; no GPU required.
+
+The 25 MB upload-size limit on the Whisper API is enforced by
+chunking the input audio with `ffmpeg` (~10-minute segments at
+default 60 kbps voice quality, which keeps each chunk under 5 MB).
+Transcripts of each chunk are concatenated.
+
+Q&A boundary detection runs on the concatenated text. Conventional
+analyst-call markers ("Question-and-Answer Session", "We will now
+begin the Q&A", "I'll turn it over to questions") split the text
+into prepared remarks and Q&A. If no marker is found, the whole
+transcript lands in `prepared_remarks` and `q_and_a` is the empty
+string — downstream signal extractors that care about the Q&A
+section MUST handle that case.
+
+`OPENAI_API_KEY` must be set in the environment (read at
+construction). Raises `TranscriptConfigError` on missing/blank key
+so the failure surfaces at startup rather than mid-fetch.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import Final
+
+from openai import OpenAI
+from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
+
+from auto_research.ingest import _http
+
+from ._base import Transcript, TranscriptConfigError
+
+# Whisper API caps single uploads at 25 MB. Stay well under that to
+# absorb header overhead — 20 MB target.
+_MAX_CHUNK_BYTES: Final = 20 * 1024 * 1024
+# Default ffmpeg chunk duration. Earnings calls run ~50-70 min; 10 min
+# chunks → 5-7 segments per call, each safely under the 20 MB cap at
+# 64 kbps voice quality.
+_CHUNK_SECONDS: Final = 600
+
+# Q&A boundary markers — ordered most-specific to most-generic. The
+# first match wins; subsequent markers are ignored. Real earnings
+# calls almost always have at least one of these phrasings.
+_QA_BOUNDARY_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"\bQuestion[-\s]and[-\s]Answer\s+Session\b", re.IGNORECASE),
+    re.compile(r"\bWe(?:'ll| will)\s+now\s+(?:begin|move)\s+(?:the\s+)?Q\s*&\s*A\b", re.IGNORECASE),
+    re.compile(r"\bI(?:'ll| will)\s+(?:now\s+)?turn\s+(?:it|the call)\s+over\s+to\s+questions\b", re.IGNORECASE),
+    re.compile(r"\b(?:we'll|we will|let's)\s+(?:now\s+)?(?:take|open).*questions\b", re.IGNORECASE),
+)
+
+
+def _resolve_api_key(api_key: str | None) -> str:
+    raw = api_key if api_key is not None else os.environ.get("OPENAI_API_KEY", "")
+    cleaned = raw.strip()
+    if not cleaned:
+        raise TranscriptConfigError(
+            "OpenAI Whisper API requires OPENAI_API_KEY. Set it in the "
+            "environment, or pass `api_key=` to WhisperEngine explicitly."
+        )
+    return cleaned
+
+
+def _ensure_ffmpeg() -> str:
+    """Locate ffmpeg or raise. ffmpeg-python could replace this, but
+    a `subprocess` call to the system binary is one less dependency
+    and avoids the per-process startup cost of a Python wrapper.
+    """
+    path = shutil.which("ffmpeg")
+    if not path:
+        raise TranscriptConfigError(
+            "ffmpeg not found on PATH. Whisper audio chunking requires "
+            "ffmpeg. On macOS: `brew install ffmpeg`. On Debian/Ubuntu: "
+            "`apt-get install ffmpeg`."
+        )
+    return path
+
+
+def _split_qa(full_text: str) -> tuple[str, str]:
+    """Detect the prepared-remarks → Q&A boundary in `full_text`.
+
+    Returns `(prepared_remarks, q_and_a)`. If no marker is found,
+    `(full_text, "")` — the whole transcript lands in prepared remarks.
+    Downstream Q&A-specific signals must check for an empty q_and_a.
+    """
+    for pattern in _QA_BOUNDARY_PATTERNS:
+        match = pattern.search(full_text)
+        if match:
+            return full_text[: match.start()].rstrip(), full_text[match.start() :].lstrip()
+    return full_text, ""
+
+
+class WhisperEngine:
+    """Thin OpenAI Whisper API wrapper.
+
+    Constructed once per ingest run; reused across calls. The
+    underlying `openai.OpenAI` client is opened eagerly in `__init__`.
+    Always close it — either via `.close()` or `with` form.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        model: str = "whisper-1",
+        max_attempts: int = _http.DEFAULT_MAX_ATTEMPTS,
+        chunk_seconds: int = _CHUNK_SECONDS,
+        ffmpeg_path: str | None = None,
+    ) -> None:
+        self._client = OpenAI(api_key=_resolve_api_key(api_key))
+        self._model = model
+        self._max_attempts = max_attempts
+        self._chunk_seconds = chunk_seconds
+        self._ffmpeg = ffmpeg_path or _ensure_ffmpeg()
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> WhisperEngine:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def transcribe(
+        self,
+        audio: bytes,
+        *,
+        ticker: str,
+        year: int,
+        quarter: int,
+        event_datetime: datetime,
+    ) -> Transcript:
+        """Transcribe one earnings call's audio bytes.
+
+        Strategy:
+        1. Write `audio` to a tmp file (ffmpeg needs a seekable input).
+        2. Probe duration via ffmpeg; if under chunk_seconds, send in
+           one shot. Otherwise split into chunk-sized segments.
+        3. Call Whisper API per chunk; concatenate the text.
+        4. Apply Q&A boundary detection.
+
+        Retries on network / 5xx from the OpenAI SDK via tenacity.
+        """
+        with tempfile.TemporaryDirectory(prefix="whisper-") as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            source_path = tmpdir_path / "source.audio"
+            source_path.write_bytes(audio)
+            segments = self._chunk_audio(source_path, tmpdir_path)
+            full_text_parts: list[str] = []
+            for segment in segments:
+                full_text_parts.append(self._transcribe_one(segment))
+        full_text = "\n".join(part.strip() for part in full_text_parts if part.strip())
+        prepared, qa = _split_qa(full_text)
+        return Transcript(
+            ticker=ticker,
+            year=year,
+            quarter=quarter,
+            event_datetime=event_datetime,
+            prepared_remarks=prepared,
+            q_and_a=qa,
+        )
+
+    def _chunk_audio(self, source: Path, workdir: Path) -> list[Path]:
+        """Split `source` into ~`chunk_seconds`-long segments via ffmpeg.
+
+        Single-pass `-f segment` invocation; ffmpeg writes each output
+        chunk as `chunk-000.mp3`, `chunk-001.mp3`, … The encode is mp3
+        at 64 kbps (voice-quality, well under Whisper's 25 MB cap for
+        even 30+ minute chunks). If the source is shorter than the
+        chunk length, ffmpeg emits a single output file.
+        """
+        out_pattern = workdir / "chunk-%03d.mp3"
+        cmd = [
+            self._ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            "-f",
+            "segment",
+            "-segment_time",
+            str(self._chunk_seconds),
+            "-acodec",
+            "libmp3lame",
+            "-b:a",
+            "64k",
+            "-vn",
+            str(out_pattern),
+        ]
+        subprocess.run(cmd, check=True)
+        chunks = sorted(workdir.glob("chunk-*.mp3"))
+        if not chunks:
+            raise RuntimeError(
+                f"ffmpeg produced no chunks from {source}. "
+                "Possible cause: source file is not decodable as audio."
+            )
+        for chunk in chunks:
+            size = chunk.stat().st_size
+            if size > _MAX_CHUNK_BYTES:
+                raise RuntimeError(
+                    f"Chunk {chunk.name} is {size} bytes (>{_MAX_CHUNK_BYTES} "
+                    f"limit). Reduce chunk_seconds or lower the bitrate."
+                )
+        return chunks
+
+    def _transcribe_one(self, chunk: Path) -> str:
+        """Send one chunk to the OpenAI Whisper API and return its text."""
+        for attempt in Retrying(
+            stop=stop_after_attempt(self._max_attempts),
+            wait=_http.make_retry_wait(),
+            retry=retry_if_exception_type(_http.TRANSIENT_NETWORK_ERRORS),
+            reraise=True,
+        ):
+            with attempt:
+                with chunk.open("rb") as fh:
+                    resp = self._client.audio.transcriptions.create(
+                        model=self._model,
+                        file=fh,
+                        response_format="text",
+                    )
+                # response_format="text" returns a string body.
+                return str(resp).strip()
+        raise RuntimeError("unreachable: tenacity always returns or raises")
+
+
+__all__ = ["WhisperEngine"]
