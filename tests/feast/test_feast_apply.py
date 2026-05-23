@@ -12,7 +12,6 @@ schema.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
@@ -70,14 +69,11 @@ def feast_workspace(tmp_path: Path) -> Path:
 
 
 def _run_feast_apply(workspace: Path) -> subprocess.CompletedProcess[str]:
-    """Invoke ``feast apply`` against ``workspace`` with PYTHONPATH set so the
-    repo's absolute ``feast_repo.entities`` import resolves during feast's
-    file scan (feast chdir's into the repo and flat-imports each ``*.py``).
+    """Invoke ``feast apply`` against ``workspace`` with the natural CLI
+    contract — no ``PYTHONPATH`` override, no env hacks. This is what a human
+    or CI runs by hand; if it ever needs PYTHONPATH to succeed, the repo has
+    regressed to the fragile cross-file import pattern Codex flagged on #38.
     """
-    env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join(
-        p for p in (str(workspace.parent), env.get("PYTHONPATH", "")) if p
-    )
     return subprocess.run(
         [str(_FEAST_BIN), "apply"],
         cwd=workspace,
@@ -85,7 +81,6 @@ def _run_feast_apply(workspace: Path) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
         timeout=120,
-        env=env,
     )
 
 

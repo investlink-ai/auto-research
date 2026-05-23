@@ -14,7 +14,10 @@ from pathlib import Path
 from feast import FeatureView, Field, FileSource
 from feast.types import Float64
 
-from feast_repo.entities import entity_id
+# `feast apply` chdir's into this directory and puts it (not its parent) on
+# sys.path, so cross-module imports inside feast_repo/ use the no-prefix
+# Feast tutorial convention rather than `from feast_repo.entities import ...`.
+from entities import entity_id  # type: ignore[import-not-found]
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"
 
