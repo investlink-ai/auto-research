@@ -1,0 +1,52 @@
+name: Live Smoke
+
+# Nightly canary that hits the real upstream services (SEC EDGAR today;
+# FMP, Anthropic, Langfuse, etc. as ingest modules land in W1/W2). The
+# unit + VCR-cassette suites pinned in `make test` / `make integration`
+# verify our code against frozen recordings; this workflow verifies the
+# recordings themselves haven't rotted against upstream drift.
+#
+# Cadence: 03:00 UTC daily (after most US trading days settle but
+# before Asia-Pacific developers start their morning). Also runnable
+# on-demand via workflow_dispatch.
+#
+# Secrets required (set per environment in repo settings):
+# - SEC_USER_AGENT: meaningful UA per SEC fair-access policy
+#     (e.g., "auto-research-ci ops@yourdomain.com")
+# Add others (FMP_API_KEY, ANTHROPIC_API_KEY, ...) as their smokes land.
+# Tests skip cleanly when their required env vars are missing, so the
+# job stays green during the bootstrap phase before a credential is
+# wired up.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: live-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Live smoke
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: make live-smoke

@@ -44,6 +44,7 @@ addopts = "--strict-markers"
 markers = [
     "eval: tests that hit external LLM/eval APIs (excluded from CI by default)",
     "integration: tests that hit external services (excluded from CI by default)",
+    "live: tests that hit real external services over real network (excluded from CI by default; run via `make live-smoke` with credentials)",
 ]
 
 [tool.ruff]
