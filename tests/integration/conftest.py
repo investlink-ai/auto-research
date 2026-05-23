@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -23,14 +24,13 @@ def _is_integration_item(item: pytest.Item) -> bool:
 
 
 def _needs_langfuse(item: pytest.Item) -> bool:
-    """Tests with `telemetry` in the file name talk to Langfuse.
+    """Tests whose filename contains `telemetry` talk to Langfuse.
 
-    Filename-based — explicit `@pytest.mark.langfuse` would be slightly
-    cleaner, but requires every Langfuse test to remember to declare it.
-    The convention here is "any integration test file named *telemetry*
-    needs Langfuse"; new test files just need a different name.
+    Filename-based via `Path.name` so backslash-separated paths on
+    Windows behave the same as POSIX. New non-Langfuse integration
+    tests just need a different filename.
     """
-    return "telemetry" in str(item.path).rsplit("/", 1)[-1]
+    return "telemetry" in Path(str(item.path)).name
 
 
 def _langfuse_healthy(

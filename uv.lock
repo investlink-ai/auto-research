@@ -239,6 +239,7 @@ dependencies = [
     { name = "mlflow-skinny" },
     { name = "pyarrow" },
     { name = "pydantic" },
+    { name = "tenacity" },
     { name = "traceloop-sdk" },
 ]
 
@@ -247,6 +248,7 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "vcrpy" },
 ]
 
 [package.dev-dependencies]
@@ -254,7 +256,6 @@ dev = [
     { name = "mlflow" },
     { name = "pre-commit" },
     { name = "pytest-randomly" },
-    { name = "vcrpy" },
 ]
 
 [package.metadata]
@@ -268,7 +269,9 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.7" },
+    { name = "tenacity", specifier = ">=9.1.4" },
     { name = "traceloop-sdk", specifier = ">=0.30" },
+    { name = "vcrpy", marker = "extra == 'dev'", specifier = ">=8.1.1" },
 ]
 provides-extras = ["dev"]
 
@@ -277,7 +280,6 @@ dev = [
     { name = "mlflow", specifier = ">=3.0" },
     { name = "pre-commit", specifier = ">=4.6.0" },
     { name = "pytest-randomly", specifier = ">=4.1.0" },
-    { name = "vcrpy", specifier = ">=8.1.1" },
 ]
 
 [[package]]

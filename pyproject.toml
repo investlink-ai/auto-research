@@ -16,6 +16,7 @@ dependencies = [
     "mlflow-skinny>=3.0",
     "pyarrow>=23.0.1",
     "pydantic>=2.13.4",
+    "tenacity>=9.1.4",
     "traceloop-sdk>=0.30",
 ]
 
@@ -24,6 +25,7 @@ dev = [
     "pytest>=8.3",
     "ruff>=0.7",
     "mypy>=1.13",
+    "vcrpy>=8.1.1",
 ]
 
 [build-system]
@@ -96,5 +98,4 @@ dev = [
     "mlflow>=3.0",
     "pre-commit>=4.6.0",
     "pytest-randomly>=4.1.0",
-    "vcrpy>=8.1.1",
 ]
