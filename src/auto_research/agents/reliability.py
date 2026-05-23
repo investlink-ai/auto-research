@@ -108,6 +108,11 @@ _PRICING_PER_MTOK: Final[dict[str, tuple[float, float]]] = {
 
 _CACHE_READ_DISCOUNT: Final[float] = 0.10  # cached input billed at 10% of base.
 _CACHE_WRITE_PREMIUM: Final[float] = 1.25  # cache *writes* billed at 125% of base.
+# Per spec §7.4 backfill economics, ~2,700 docs are extracted via the Batch
+# API at 50% off list. `response.usage.service_tier == "batch"` is the
+# authoritative signal; ignoring it would have `cost_cap` trip ~2x too early
+# on every nightly batch run.
+_BATCH_DISCOUNT: Final[float] = 0.50
 
 
 def _usd_for_message(message: Message) -> float:
@@ -128,6 +133,12 @@ def _usd_for_message(message: Message) -> float:
     cost += (cache_read / 1_000_000) * input_per_mtok * _CACHE_READ_DISCOUNT
     cost += (cache_write / 1_000_000) * input_per_mtok * _CACHE_WRITE_PREMIUM
     cost += (usage.output_tokens / 1_000_000) * output_per_mtok
+
+    if usage.service_tier == "batch":
+        cost *= _BATCH_DISCOUNT
+    # `priority` tier is 2x list but the spec doesn't route to it; leaving it
+    # at list price means cost_cap will *over-bill* (trip early) rather than
+    # under-bill — safe direction. Revisit if W2 adopts priority routing.
     return cost
 
 

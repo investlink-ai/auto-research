@@ -32,7 +32,13 @@ from auto_research.agents.reliability import (
 # --- helpers -----------------------------------------------------------------
 
 
-def _msg(*, input_tokens: int, output_tokens: int, model: str) -> Message:
+def _msg(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    model: str,
+    service_tier: str = "standard",
+) -> Message:
     """A real-shape Anthropic Message with the usage fields we care about."""
     return Message(
         id="msg_test",
@@ -50,7 +56,7 @@ def _msg(*, input_tokens: int, output_tokens: int, model: str) -> Message:
             cache_read_input_tokens=None,
             inference_geo=None,
             server_tool_use=None,
-            service_tier="standard",
+            service_tier=service_tier,  # type: ignore[arg-type]
         ),
     )
 
@@ -182,6 +188,41 @@ def test_cost_cap_exceeded_is_typed_not_generic() -> None:
         expensive()
     assert isinstance(exc_info.value, CostCapExceeded)
     assert not isinstance(exc_info.value, ValueError)
+
+
+def test_cost_cap_applies_batch_discount() -> None:
+    # 1M-in + 1M-out Sonnet 4.6 = $18 standard, $9 batch. With a $10 cap:
+    #   standard: call 1 leaves state at $18 → call 2 trips immediately.
+    #   batch:    call 1 leaves state at $9 → call 2 runs, leaves $18 →
+    #             call 3 trips.
+    # The §7.4 backfill economics depend on this discount; ignoring it
+    # would trip cost_cap ~2x too early on every nightly batch run.
+
+    @cost_cap(usd=10.00)
+    def standard_call() -> Message:
+        return _msg(
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            model="claude-sonnet-4-6",
+        )
+
+    @cost_cap(usd=10.00)
+    def batch_call() -> Message:
+        return _msg(
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            model="claude-sonnet-4-6",
+            service_tier="batch",
+        )
+
+    standard_call()
+    with pytest.raises(CostCapExceeded):
+        standard_call()
+
+    batch_call()
+    batch_call()  # would have tripped at standard pricing; batch fits.
+    with pytest.raises(CostCapExceeded):
+        batch_call()
 
 
 def test_cost_cap_rejects_unknown_model() -> None:
