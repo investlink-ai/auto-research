@@ -34,11 +34,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
+from urllib.parse import urlparse
 
 from auto_research.ingest import _http, manifest
 from auto_research.ingest.transcripts import registry
@@ -113,12 +113,16 @@ def _destination_path(
 
     `data/raw/transcripts/{ticker}/{year}/{ticker}-{year}Q{quarter}{ext}`
     where `ext` is derived from the audio URL (defaults to `.bin` if
-    none). Both `?query` and `#fragment` are stripped before suffix
-    extraction — a URL like `.../audio.mp3#t=120` would otherwise
-    bake `.mp3#t=120` into the filename.
+    none). Uses `urllib.parse.urlparse` so query strings, fragments,
+    `;jsessionid=` path parameters, and userinfo are all stripped in
+    one canonical pass before suffix extraction.
     """
-    url_path = re.split(r"[?#]", audio_url, maxsplit=1)[0]
-    ext = Path(url_path).suffix or ".bin"
+    parsed = urlparse(audio_url.strip())
+    # urlparse's `path` strips query and fragment but keeps params
+    # (the `;`-delimited segment per RFC 3986). Split on `;` to drop
+    # `;jsessionid=…`-style suffixes that some IR pages still carry.
+    path_only = parsed.path.split(";", 1)[0]
+    ext = Path(path_only).suffix or ".bin"
     return raw_root / SOURCE / ticker.upper() / str(year) / f"{_doc_id(ticker, year, quarter)}{ext}"
 
 
@@ -203,6 +207,9 @@ def _ok_row(
     }
 
 
+_ERROR_DEDUP_KEYS: Final = ("source", "doc_id", "status", "form_type")
+
+
 def fetch_transcript(
     ticker: str,
     year: int,
@@ -210,9 +217,9 @@ def fetch_transcript(
     *,
     raw_root: Path,
     manifest_path: Path,
+    event_datetime: datetime,
     engine: Transcriber | None = None,
     source: AudioSource | None = None,
-    event_datetime: datetime | None = None,
 ) -> Transcript | None:
     """Fetch and transcribe one earnings call. Idempotent via the manifest.
 
@@ -220,19 +227,19 @@ def fetch_transcript(
     `status ∈ ("ok", "no_coverage")`, returns None without touching
     the source or Whisper. `status="error"` rows do NOT cache — a
     follow-up run retries (registry population, transient empty
-    bodies, etc.).
+    bodies, etc.). Error rows dedup by `(source, doc_id, status,
+    form_type)` so distinct failure modes (`transcript:unregistered`
+    vs. `transcript:direct_mp3`) coexist rather than colliding.
 
     `source` and `engine` are dependency-injection seams for testing
     — production callers leave them None and the orchestrator
     constructs them from the registry / env.
 
     `event_datetime` is the call start time (e.g., from an 8-K Item
-    2.02 announcement). Required for the ok path: a fallback to
-    `datetime.now(UTC)` would silently violate INV-1 by stamping
-    backfilled transcripts with the run wall-clock time. If omitted
-    and a real transcript would be produced, raises
-    `TranscriptConfigError`. Tz-aware datetime required; `Transcript`
-    enforces this in defense-in-depth.
+    2.02 announcement). REQUIRED: a wall-clock fallback would
+    silently violate INV-1 by stamping backfilled transcripts with
+    the run time. `Transcript`'s field validator additionally rejects
+    naive datetimes (defense in depth).
     """
     ticker_upper = ticker.upper()
     doc_id = _doc_id(ticker_upper, year, quarter)
@@ -253,16 +260,13 @@ def fetch_transcript(
         manifest.append(
             manifest_path,
             [_error_row(ticker_upper, year, quarter, source_name=_UNREGISTERED_SUFFIX)],
+            unique_keys=_ERROR_DEDUP_KEYS,
         )
         return None
 
     owns_source = source is None
     if source is None:
         source = _open_source(source_name)
-    # Engine construction is intentionally deferred until we know we
-    # actually need to transcribe — a coverage-survey loop dominated
-    # by `find_audio_url is None` shouldn't require OPENAI_API_KEY +
-    # ffmpeg to be present.
     try:
         audio_url = source.find_audio_url(ticker_upper, year, quarter)
         if audio_url is None:
@@ -279,53 +283,64 @@ def fetch_transcript(
             )
             return None
 
-        # Download, then persist atomically (same discipline as EDGAR
-        # raw filings — see `_http.atomic_write_bytes`).
-        content = source.download(audio_url)
-        if not content:
-            # Empty body slipped past whatever retry layer the source
-            # uses; record as error (retryable) rather than caching a
-            # known-bad result forever.
-            _logger.warning(
-                "source %s returned empty body for %s %sQ%s; recording error",
-                source_name,
-                ticker_upper,
-                year,
-                quarter,
-            )
-            manifest.append(
-                manifest_path,
-                [_error_row(ticker_upper, year, quarter, source_name=source_name)],
-            )
-            return None
-
-        # INV-1 guard: we are about to stamp the manifest's
-        # event_datetime column from the caller's value. Refuse the
-        # silent now() fallback — a wrong PIT stamp here propagates
-        # into Feast's lag-1 cutoff and corrupts every downstream
-        # backtest that joins on this transcript.
-        if event_datetime is None:
-            raise TranscriptConfigError(
-                f"event_datetime is required when transcribing "
-                f"{ticker_upper} {year}Q{quarter}; a wall-clock fallback "
-                "would violate INV-1 (point-in-time discipline)."
-            )
-
-        sha = hashlib.sha256(content).hexdigest()
-        dest = _destination_path(ticker_upper, year, quarter, raw_root, audio_url)
-        _http.atomic_write_bytes(dest, content)
-
+        # Engine constructed here — AFTER find_audio_url so a coverage-
+        # survey loop dominated by None responses never pays the
+        # OPENAI_API_KEY / ffmpeg cost, but BEFORE source.download so a
+        # missing env doesn't leave an orphan audio file on disk.
         owns_engine = engine is None
         if engine is None:
             engine = WhisperEngine()
         try:
-            transcript = engine.transcribe(
-                content,
-                ticker=ticker_upper,
-                year=year,
-                quarter=quarter,
-                event_datetime=event_datetime,
-            )
+            content = source.download(audio_url)
+            if not content:
+                # Empty body slipped past the source's own retries.
+                # Retryable: don't poison the cache with a permanent
+                # no_coverage on a transient host hiccup.
+                _logger.warning(
+                    "source %s returned empty body for %s %sQ%s; recording error",
+                    source_name,
+                    ticker_upper,
+                    year,
+                    quarter,
+                )
+                manifest.append(
+                    manifest_path,
+                    [_error_row(ticker_upper, year, quarter, source_name=source_name)],
+                    unique_keys=_ERROR_DEDUP_KEYS,
+                )
+                return None
+
+            sha = hashlib.sha256(content).hexdigest()
+            dest = _destination_path(ticker_upper, year, quarter, raw_root, audio_url)
+            _http.atomic_write_bytes(dest, content)
+            try:
+                transcript = engine.transcribe(
+                    content,
+                    ticker=ticker_upper,
+                    year=year,
+                    quarter=quarter,
+                    event_datetime=event_datetime,
+                )
+            except Exception:
+                # Audio is on disk but transcription failed. Record
+                # an error row so the operator can see the orphan
+                # has a tracked failure (otherwise the file looks
+                # untracked); the row is NOT cached so the next run
+                # retries and overwrites.
+                _logger.warning(
+                    "Whisper transcribe failed for %s %sQ%s — audio at %s, "
+                    "recording error row",
+                    ticker_upper,
+                    year,
+                    quarter,
+                    dest,
+                )
+                manifest.append(
+                    manifest_path,
+                    [_error_row(ticker_upper, year, quarter, source_name=source_name)],
+                    unique_keys=_ERROR_DEDUP_KEYS,
+                )
+                raise
             manifest.append(manifest_path, [_ok_row(transcript, source_name, dest, sha)])
             return transcript
         finally:

@@ -43,12 +43,30 @@ from datetime import datetime
 from pathlib import Path
 from typing import Final
 
+import openai
 from openai import OpenAI
-from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
+from tenacity import (
+    RetryCallState,
+    Retrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from auto_research.ingest import _http
 
 from ._base import Transcript, TranscriptConfigError
+
+# The OpenAI SDK wraps ALL transport-level errors in its own exception
+# hierarchy — `httpx.*` types never escape `client.audio.transcriptions.create`.
+# So `_http.TRANSIENT_NETWORK_ERRORS` (httpx-typed) alone never matches what
+# Whisper raises; the retry budget would be fictional. The right set for
+# this caller is OpenAI's typed exceptions for transient conditions.
+_TRANSIENT_OPENAI_ERRORS: Final[tuple[type[BaseException], ...]] = (
+    openai.APIConnectionError,   # also covers openai.APITimeoutError
+    openai.RateLimitError,       # 429
+    openai.InternalServerError,  # 5xx
+)
 
 # Whisper API caps single uploads at 25 MB. Stay well under that to
 # absorb header overhead — 20 MB target.
@@ -69,15 +87,20 @@ _DEFAULT_FFMPEG_TIMEOUT: Final = 1800.0
 # first match wins; subsequent markers are ignored. Real earnings
 # calls almost always have at least one of these phrasings.
 #
-# Pattern 4 uses `.*?` (non-greedy) instead of `.*` so a long
-# unwrapped Whisper line that mentions "questions" twice can't pull
-# the boundary all the way to the last occurrence and swallow the
-# real Q&A — and the `\bquestions\b` anchor still bounds the match.
+# Pattern 4 ("we'll/let's take/open ... questions") is the most
+# permissive marker and would otherwise false-fire on mid-prepared-
+# remarks asides like "we'll take questions in a moment". The
+# `^\s*(?:Operator:\s*)?` anchor (with re.MULTILINE) requires the
+# phrase to START a line — the convention for the operator handoff
+# in real earnings transcripts.
 _QA_BOUNDARY_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"\bQuestion[-\s]and[-\s]Answer\s+Session\b", re.IGNORECASE),
     re.compile(r"\bWe(?:'ll| will)\s+now\s+(?:begin|move)\s+(?:the\s+)?Q\s*&\s*A\b", re.IGNORECASE),
     re.compile(r"\bI(?:'ll| will)\s+(?:now\s+)?turn\s+(?:it|the call)\s+over\s+to\s+questions\b", re.IGNORECASE),
-    re.compile(r"\b(?:we'll|we will|let's)\s+(?:now\s+)?(?:take|open).*?\bquestions\b", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:Operator:\s*)?(?:we'll|we will|let's)\s+(?:now\s+)?(?:take|open).*?\bquestions\b",
+        re.IGNORECASE | re.MULTILINE,
+    ),
 )
 
 
@@ -105,6 +128,29 @@ def _ensure_ffmpeg() -> str:
             "`apt-get install ffmpeg`."
         )
     return path
+
+
+def _whisper_retry_wait(state: RetryCallState) -> float:
+    """Tenacity wait callback that honors `openai.RateLimitError`'s Retry-After.
+
+    The shared `_http.make_retry_wait` only inspects `_http.RateLimited`
+    (an httpx.HTTPStatusError subclass). Whisper traffic goes through
+    the OpenAI SDK, which raises `openai.RateLimitError` — a totally
+    separate hierarchy. Mirror the discipline here so a 429 from
+    OpenAI waits the server-requested duration.
+    """
+    fallback = wait_exponential_jitter(
+        initial=_http.DEFAULT_INITIAL_BACKOFF,
+        max=_http.DEFAULT_MAX_BACKOFF,
+    )
+    base = float(fallback(state))
+    outcome = state.outcome
+    exc = outcome.exception() if outcome is not None else None
+    if isinstance(exc, openai.RateLimitError) and exc.response is not None:
+        retry_after = _http.parse_retry_after(exc.response.headers.get("Retry-After"))
+        if retry_after is not None:
+            return max(retry_after, base)
+    return base
 
 
 def _split_qa(full_text: str) -> tuple[str, str]:
@@ -149,11 +195,15 @@ class WhisperEngine:
             raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
         if ffmpeg_timeout <= 0:
             raise ValueError(f"ffmpeg_timeout must be positive, got {ffmpeg_timeout}")
-        self._client = OpenAI(api_key=_resolve_api_key(api_key))
+        # Resolve cheap (env / PATH) dependencies BEFORE opening the
+        # OpenAI client. Otherwise a missing ffmpeg would leak an
+        # already-constructed httpx connection pool inside `OpenAI(...)`.
+        resolved_api_key = _resolve_api_key(api_key)
+        self._ffmpeg = ffmpeg_path or _ensure_ffmpeg()
+        self._client = OpenAI(api_key=resolved_api_key)
         self._model = model
         self._max_attempts = max_attempts
         self._chunk_seconds = chunk_seconds
-        self._ffmpeg = ffmpeg_path or _ensure_ffmpeg()
         self._ffmpeg_timeout = ffmpeg_timeout
 
     def close(self) -> None:
@@ -263,8 +313,8 @@ class WhisperEngine:
         """Send one chunk to the OpenAI Whisper API and return its text."""
         for attempt in Retrying(
             stop=stop_after_attempt(self._max_attempts),
-            wait=_http.make_retry_wait(),
-            retry=retry_if_exception_type(_http.TRANSIENT_NETWORK_ERRORS),
+            wait=_whisper_retry_wait,
+            retry=retry_if_exception_type(_TRANSIENT_OPENAI_ERRORS),
             reraise=True,
         ):
             with attempt:

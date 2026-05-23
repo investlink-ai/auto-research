@@ -36,8 +36,8 @@ repos:
   - repo: local
     hooks:
       - id: detect-llm-api-keys
-        name: detect LLM API keys (anthropic / langfuse)
-        entry: '(sk-ant-[A-Za-z0-9_-]{20,}|pk-lf-[a-f0-9-]{30,}|sk-lf-[a-f0-9-]{30,})'
+        name: detect LLM API keys (anthropic / langfuse / openai)
+        entry: '(sk-ant-[A-Za-z0-9_-]{20,}|pk-lf-[a-f0-9-]{30,}|sk-lf-[a-f0-9-]{30,}|sk-proj-[A-Za-z0-9_-]{40,}|sk-[A-Za-z0-9]{48,})'
         language: pygrep
         types: [text]
         exclude: ^(\.env\.example|docs/.*\.md|tests/.*)$

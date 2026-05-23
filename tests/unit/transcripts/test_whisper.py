@@ -22,6 +22,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
+import openai
 import pytest
 
 from auto_research.ingest.transcripts._base import Transcript, TranscriptConfigError
@@ -255,19 +257,145 @@ def test_whisper_engine_rejects_non_positive_timeout(
         WhisperEngine(ffmpeg_timeout=0)
 
 
-def test_split_qa_non_greedy_take_questions_pattern() -> None:
-    """The 'we'll take ... questions' pattern uses non-greedy `.*?` so
-    a single long Whisper line that mentions 'questions' both before
-    and after the real Q&A boundary anchors at the first occurrence."""
-    from auto_research.ingest.transcripts._whisper import _split_qa
-
+def test_split_qa_pattern_4_requires_line_anchor() -> None:
+    """Pattern 4 ('we'll/let's take/open ... questions') must require
+    start-of-line — otherwise a mid-prepared-remarks reference like
+    'let's take a moment to address recent questions' would false-fire
+    and corrupt the split. The fix anchors pattern 4 with `^` +
+    re.MULTILINE so only line-starting markers count."""
     text = (
-        "Operator: We'll take a couple of questions about pricing later. "
-        "Now for our prepared remarks... details about Q2 questions raised "
-        "by analysts last quarter."
+        "Thanks for joining. Before we begin, let's take a moment to "
+        "address some recent questions about strategy.\n"
+        "Operator: We'll now open the floor for questions.\n"
+        "First question please."
     )
     prepared, qa = _split_qa(text)
-    # First occurrence wins; greedy `.*` would have swallowed past it
-    # all the way to the LAST "questions". Non-greedy stops at first.
-    assert "Now for our prepared remarks" in qa
-    assert prepared.startswith("Operator:")
+    # The mid-paragraph "let's take ... questions" must NOT trigger;
+    # it stays in prepared remarks.
+    assert "let's take a moment" in prepared
+    assert "recent questions about strategy" in prepared
+    # The line-anchored operator handoff IS the boundary.
+    assert qa.startswith("Operator: We'll now open")
+
+
+# ---------- Whisper retry: OpenAI SDK exception coverage ----------
+
+
+class _FlakeyTranscriptionsClient:
+    """Fails N times with the configured exception, then succeeds."""
+
+    def __init__(
+        self,
+        *,
+        response_text: str,
+        exception: BaseException,
+        fail_count: int,
+    ) -> None:
+        self._response_text = response_text
+        self._exception = exception
+        self._fail_count = fail_count
+        self.attempts = 0
+
+    def create(self, *, model: str, file: Any, response_format: str) -> str:
+        self.attempts += 1
+        if self.attempts <= self._fail_count:
+            raise self._exception
+        return self._response_text
+
+
+@pytest.mark.skipif(not _have_ffmpeg(), reason="ffmpeg not installed")
+def test_whisper_retries_on_openai_transient_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retry predicate must match OpenAI SDK exceptions, not
+    httpx ones. The SDK wraps every transport-level error in its own
+    hierarchy (openai.APIConnectionError / RateLimitError / etc.),
+    so a retry predicate keyed on httpx.* never fires for Whisper."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    fake_request = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
+    transient_exc = openai.APIConnectionError(message="conn refused", request=fake_request)
+    flakey = _FlakeyTranscriptionsClient(
+        response_text="recovered text",
+        exception=transient_exc,
+        fail_count=2,
+    )
+    monkeypatch.setattr(
+        "auto_research.ingest.transcripts._whisper.OpenAI",
+        lambda api_key: _FakeOpenAI(flakey),
+    )
+
+    engine = WhisperEngine(max_attempts=3)
+    transcript = engine.transcribe(
+        _make_silent_wav(seconds=2.0),
+        ticker="NVDA",
+        year=2024,
+        quarter=2,
+        event_datetime=datetime(2024, 5, 22, tzinfo=UTC),
+    )
+    assert "recovered text" in transcript.prepared_remarks
+    # Failed twice, succeeded on third attempt.
+    assert flakey.attempts == 3
+
+
+@pytest.mark.skipif(not _have_ffmpeg(), reason="ffmpeg not installed")
+def test_whisper_gives_up_after_max_attempts_on_persistent_openai_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry budget honored; persistent OpenAI errors surface after max_attempts."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    fake_request = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
+    persistent_exc = openai.APIConnectionError(message="down hard", request=fake_request)
+    flakey = _FlakeyTranscriptionsClient(
+        response_text="never reached",
+        exception=persistent_exc,
+        fail_count=10,
+    )
+    monkeypatch.setattr(
+        "auto_research.ingest.transcripts._whisper.OpenAI",
+        lambda api_key: _FakeOpenAI(flakey),
+    )
+
+    engine = WhisperEngine(max_attempts=3)
+    with pytest.raises(openai.APIConnectionError):
+        engine.transcribe(
+            _make_silent_wav(seconds=2.0),
+            ticker="NVDA",
+            year=2024,
+            quarter=2,
+            event_datetime=datetime(2024, 5, 22, tzinfo=UTC),
+        )
+    assert flakey.attempts == 3
+
+
+def test_whisper_engine_resolves_ffmpeg_before_openai_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If ffmpeg is missing, __init__ must fail BEFORE constructing
+    the OpenAI client — otherwise an httpx connection pool is opened
+    and never closed, leaking on every retry of construction."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(shutil, "which", lambda _: None)  # ffmpeg missing
+
+    constructed: list[bool] = []
+
+    class _SpyOpenAI:
+        def __init__(self, api_key: str | None = None) -> None:
+            constructed.append(True)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "auto_research.ingest.transcripts._whisper.OpenAI",
+        _SpyOpenAI,
+    )
+    with pytest.raises(TranscriptConfigError, match="ffmpeg"):
+        WhisperEngine()
+    assert constructed == [], (
+        "OpenAI client must not be opened before ffmpeg check — "
+        "would leak httpx pool on every retry of construction"
+    )
