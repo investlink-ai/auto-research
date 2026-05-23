@@ -1,31 +1,22 @@
 """Append-only Parquet ledger of fetched documents.
 
-Per spec §6.1 the manifest is `(source, entity_id, doc_id, fetched_at,
-content_sha256, status)` plus the source-specific PIT stamp
-(`event_datetime`), form type, and on-disk path. It's the idempotency
-boundary for every ingest module — calling `contains(...)` /
-`existing_doc_ids(...)` before a fetch is what makes re-runs no-ops.
+The manifest is the idempotency boundary for every ingest module: calling
+`existing_doc_ids(...)` (or `contains(...)`) before a fetch is what makes
+re-runs no-ops. Schema is the single source of truth — see `SCHEMA`
+below; any change to it requires an explicit migration step (no in-code
+schema-tolerance layer is provided).
 
 Durability: writes are full-rewrite-then-rename, guarded by an
 `fcntl.flock` advisory lock and `os.fsync` on both the temp file and
 the parent directory before the rename. The PID is embedded in the
 temp filename so two writers can't trample each other's bytes even if
-the lock is bypassed (e.g., on a filesystem that doesn't honor flock).
+the lock is bypassed.
 
 Cross-process idempotency: `append()` deduplicates new rows against
 the on-disk manifest *inside the lock*, keyed by `unique_keys`
-(default `(source, doc_id)`). This closes the read-then-write race
-where two concurrent fetchers each snapshot an empty `existing_doc_ids`,
-both fetch the same documents, and both attempt to append — without
-dedup-on-append, the manifest would silently grow duplicate rows.
-
-Schema evolution: `pa.concat_tables(..., promote_options="default")`
-accepts new nullable columns added in future versions. The READ path
-(`contains`, `existing_doc_ids`) is also defensive — projects only
-the columns that actually exist on disk, so a manifest written under
-an older schema (e.g., before `status` was added) doesn't raise
-during a snapshot scan. Adding *non-nullable* columns or renaming
-columns still requires manual migration.
+(default `(source, doc_id)`). This closes the snapshot-then-write
+race where two concurrent fetchers both see an empty
+`existing_doc_ids` and both submit the same row.
 
 Concurrency: `flock(LOCK_EX)` serialises writers across processes on
 the same machine. NFS / network filesystems vary in flock semantics —
@@ -74,28 +65,6 @@ def read(path: Path) -> pa.Table:
     if not path.exists():
         return _empty_table()
     return pq.read_table(path)
-
-
-def _read_columns_lenient(path: Path, want: Sequence[str]) -> dict[str, list[Any]]:
-    """Project `want` columns from the on-disk manifest, defaulting missing ones to None.
-
-    Defensive against schema evolution: a manifest written under an
-    older SCHEMA (e.g., before `status` existed) won't raise; missing
-    columns yield an all-None list of the same length as the table.
-    """
-    if not path.exists():
-        return {col: [] for col in want}
-    schema_on_disk = pq.read_schema(path)
-    available = [col for col in want if col in schema_on_disk.names]
-    table = pq.read_table(path, columns=available) if available else pq.read_table(path)
-    n = table.num_rows
-    out: dict[str, list[Any]] = {}
-    for col in want:
-        if col in schema_on_disk.names:
-            out[col] = table.column(col).to_pylist()
-        else:
-            out[col] = [None] * n
-    return out
 
 
 @contextmanager
@@ -163,9 +132,7 @@ def append(
             return
         new_table = pa.Table.from_pylist(rows_to_write, schema=SCHEMA)
         combined = (
-            pa.concat_tables([existing, new_table], promote_options="default")
-            if existing.num_rows > 0
-            else new_table
+            pa.concat_tables([existing, new_table]) if existing.num_rows > 0 else new_table
         )
         tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
         pq.write_table(combined, tmp)
@@ -199,13 +166,16 @@ def contains(
     """
     if not path.exists():
         return False
-    cols = _read_columns_lenient(path, ("source", "doc_id", "status"))
+    table = pq.read_table(path, columns=["source", "doc_id", "status"])
     allowed = set(status) if status is not None else None
     return any(
-        s == source
-        and d == doc_id
-        and (allowed is None or st is None or st in allowed)
-        for s, d, st in zip(cols["source"], cols["doc_id"], cols["status"], strict=True)
+        s == source and d == doc_id and (allowed is None or st in allowed)
+        for s, d, st in zip(
+            table.column("source").to_pylist(),
+            table.column("doc_id").to_pylist(),
+            table.column("status").to_pylist(),
+            strict=True,
+        )
     )
 
 
@@ -220,22 +190,18 @@ def existing_doc_ids(
     Use this once at the start of a fetch loop to avoid the O(N·M) cost
     of per-filing `contains()` calls. Returns an empty set if the
     manifest doesn't exist.
-
-    Lenient against legacy schemas: a manifest written before the
-    `status` column existed reads with status=None for every row,
-    which (with the default `status=("ok",)` filter) treats every
-    legacy row as if status='ok'. That matches the pre-status-filter
-    semantics, preventing a schema upgrade from invalidating prior
-    work.
     """
     if not path.exists():
         return set()
-    cols = _read_columns_lenient(path, ("source", "doc_id", "status"))
+    table = pq.read_table(path, columns=["source", "doc_id", "status"])
     allowed = set(status) if status is not None else None
-    # Treat legacy rows (status column missing → None) as 'ok' so a schema
-    # upgrade doesn't silently invalidate every existing ledger entry.
     return {
         d
-        for s, d, st in zip(cols["source"], cols["doc_id"], cols["status"], strict=True)
-        if s == source and (allowed is None or st is None or st in allowed)
+        for s, d, st in zip(
+            table.column("source").to_pylist(),
+            table.column("doc_id").to_pylist(),
+            table.column("status").to_pylist(),
+            strict=True,
+        )
+        if s == source and (allowed is None or st in allowed)
     }
