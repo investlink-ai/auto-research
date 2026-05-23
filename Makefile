@@ -16,8 +16,10 @@ typecheck:
 	uv run mypy
 
 # Unit tests — hermetic, no network, no Docker, no API keys.
+# tests/feast is included here: it scaffolds a tmp Feast registry from local
+# files and runs `feast apply` in-process; no network.
 test:
-	uv run pytest tests/unit
+	uv run pytest tests/unit tests/feast
 
 # Integration tests — require Langfuse running (docker compose up -d).
 # Tests skip cleanly if Langfuse isn't reachable on :3000.
