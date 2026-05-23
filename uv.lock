@@ -236,6 +236,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "langfuse" },
     { name = "mlflow-skinny" },
+    { name = "pydantic" },
     { name = "traceloop-sdk" },
 ]
 
@@ -258,6 +259,7 @@ requires-dist = [
     { name = "langfuse", specifier = ">=2,<3" },
     { name = "mlflow-skinny", specifier = ">=3.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
+    { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.7" },
     { name = "traceloop-sdk", specifier = ">=0.30" },

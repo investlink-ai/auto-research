@@ -13,6 +13,7 @@ dependencies = [
     "anthropic>=0.104.0",
     "langfuse>=2,<3",
     "mlflow-skinny>=3.0",
+    "pydantic>=2.13.4",
     "traceloop-sdk>=0.30",
 ]
 
