@@ -515,3 +515,202 @@ def test_async_client_fetches_concurrently(monkeypatch: pytest.MonkeyPatch, tmp_
     assert sorted(r.accession_number for r in results) == ["A", "B", "C"]
     assert all(r.cache_hit is False for r in results)
     assert manifest.read(tmp_path / "manifest.parquet").num_rows == 3
+
+
+# ---------- post-review fixes ----------
+
+
+def test_filing_rejects_unpadded_cik() -> None:
+    """Filing.__post_init__ enforces zero-padded 10-digit CIK form."""
+    with pytest.raises(ValueError, match="zero-padded 10 digits"):
+        edgar.Filing(
+            cik="1045810",  # unpadded
+            accession_number="0001045810-24-000001",
+            form_type="10-K",
+            primary_document="a.htm",
+            accepted_datetime=datetime(2024, 2, 21, tzinfo=UTC),
+        )
+
+
+def test_filing_rejects_blank_accession_number() -> None:
+    with pytest.raises(ValueError, match="accession_number must be non-empty"):
+        edgar.Filing(
+            cik=NVDA_CIK_PADDED,
+            accession_number="   ",
+            form_type="10-K",
+            primary_document="a.htm",
+            accepted_datetime=datetime(2024, 2, 21, tzinfo=UTC),
+        )
+
+
+def test_filing_rejects_blank_primary_document() -> None:
+    with pytest.raises(ValueError, match="primary_document must be non-empty"):
+        edgar.Filing(
+            cik=NVDA_CIK_PADDED,
+            accession_number="0001045810-24-000001",
+            form_type="10-K",
+            primary_document="",
+            accepted_datetime=datetime(2024, 2, 21, tzinfo=UTC),
+        )
+
+
+def test_parse_recent_skips_empty_accession(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """SEC payload with blank accession should be skipped, not silently admitted."""
+    monkeypatch.setenv("SEC_USER_AGENT", "Test test@example.com")
+    submissions = _submissions_payload(
+        accessions=["", "0001045810-24-000200"],
+        forms=["10-K", "8-K"],
+        primary_docs=["valid-a.htm", "valid-b.htm"],
+        acceptance_dts=["2024-02-21T16:31:00Z", "2024-03-01T10:00:00Z"],
+    )
+    docs = {"valid-b.htm": b"<html>8-K</html>"}
+    client = edgar.EdgarClient(
+        transport=_fake_transport(submissions, docs),
+        rate_limiter=_fast_limiter(),
+    )
+    results = edgar.fetch_filings_for_cik(
+        NVDA_CIK,
+        client=client,
+        raw_root=tmp_path / "raw",
+        manifest_path=tmp_path / "manifest.parquet",
+        form_types=("10-K", "8-K"),
+    )
+    assert [r.accession_number for r in results] == ["0001045810-24-000200"]
+
+
+def test_parse_retry_after_delta_seconds() -> None:
+    assert edgar._parse_retry_after("30") == 30.0
+    assert edgar._parse_retry_after("  120  ") == 120.0
+    assert edgar._parse_retry_after(None) is None
+    assert edgar._parse_retry_after("") is None
+
+
+def test_parse_retry_after_http_date() -> None:
+    """RFC 7231 HTTP-date form parses to a positive delta-seconds value."""
+    # 2099-01-01 — well in the future, will be ~years from now.
+    parsed = edgar._parse_retry_after("Thu, 01 Jan 2099 00:00:00 GMT")
+    assert parsed is not None
+    assert parsed > 0
+    # Clamped at the upper bound.
+    assert parsed <= edgar._MAX_RETRY_AFTER_SECONDS
+
+
+def test_parse_retry_after_clamps_to_max() -> None:
+    """A runaway server value clamps to _MAX_RETRY_AFTER_SECONDS."""
+    assert edgar._parse_retry_after("999999") == edgar._MAX_RETRY_AFTER_SECONDS
+
+
+def test_parse_retry_after_garbage_returns_none() -> None:
+    assert edgar._parse_retry_after("not-a-thing") is None
+
+
+def test_429_does_not_double_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retry-After is applied via tenacity wait, not inside _do_request.
+
+    Regression for the previous double-sleep bug: a 429 used to sleep
+    Retry-After inside _do_request AND then sleep again under
+    tenacity's wait_exponential_jitter. Now the inline sleep is gone
+    and tenacity's wait callback honors EdgarRateLimited.retry_after.
+    """
+    monkeypatch.setenv("SEC_USER_AGENT", "Test test@example.com")
+    sleeps: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda t: sleeps.append(t))
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "5"})
+        return httpx.Response(
+            200,
+            json=_submissions_payload(
+                accessions=["0001045810-24-000001"],
+                forms=["10-K"],
+                primary_docs=["a.htm"],
+                acceptance_dts=["2024-02-21T16:31:00Z"],
+            ),
+        )
+
+    client = edgar.EdgarClient(
+        transport=_scripted_transport(handler),
+        rate_limiter=_fast_limiter(),
+        max_attempts=3,
+    )
+    filings = client.list_recent_filings(NVDA_CIK, form_types=("10-K",))
+    assert len(filings) == 1
+    # Should sleep exactly once (the tenacity wait), and that sleep must be
+    # at least the Retry-After hint of 5s.
+    assert len(sleeps) == 1
+    assert sleeps[0] >= 5.0
+
+
+def test_async_partial_failure_flushes_completed_siblings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """gather(return_exceptions=True) lets siblings finish before the flush.
+
+    Regression: prior code used the default gather() which lets
+    siblings continue running as DETACHED tasks while propagating the
+    first exception; the finally block would flush before siblings
+    appended their rows, silently losing manifest entries for filings
+    that successfully wrote to disk.
+    """
+    monkeypatch.setenv("SEC_USER_AGENT", "Test test@example.com")
+    submissions = _submissions_payload(
+        accessions=["A1", "A2", "A3"],
+        forms=["10-K", "10-K", "10-K"],
+        primary_docs=["good.htm", "good2.htm", "BOOM.htm"],
+        acceptance_dts=["2024-02-21T16:31:00Z"] * 3,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "submissions" in url:
+            return httpx.Response(200, json=submissions)
+        if url.endswith("good.htm"):
+            return httpx.Response(200, content=b"A")
+        if url.endswith("good2.htm"):
+            return httpx.Response(200, content=b"B")
+        return httpx.Response(500, text="boom")
+
+    async def runner() -> None:
+        client = edgar.AsyncEdgarClient(
+            transport=httpx.MockTransport(handler),
+            rate_limiter=_fast_limiter(),
+            max_attempts=2,
+        )
+        try:
+            with pytest.raises(edgar.EdgarServerError):
+                await edgar.afetch_filings_for_cik(
+                    NVDA_CIK,
+                    client=client,
+                    raw_root=tmp_path / "raw",
+                    manifest_path=tmp_path / "manifest.parquet",
+                    form_types=("10-K",),
+                    concurrency=3,
+                )
+        finally:
+            await client.aclose()
+
+    asyncio.run(runner())
+    # A1 and A2 completed; A3 raised. Both completed rows must be in the manifest.
+    table = manifest.read(tmp_path / "manifest.parquet")
+    recorded = set(table.column("doc_id").to_pylist())
+    assert recorded == {"A1", "A2"}
+
+
+def test_async_concurrency_zero_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """concurrency=0 would deadlock on asyncio.Semaphore(0); reject it eagerly."""
+    monkeypatch.setenv("SEC_USER_AGENT", "Test test@example.com")
+
+    async def runner() -> None:
+        with pytest.raises(ValueError, match="concurrency must be >= 1"):
+            await edgar.afetch_filings_for_cik(
+                NVDA_CIK,
+                raw_root=tmp_path / "raw",
+                manifest_path=tmp_path / "manifest.parquet",
+                form_types=("10-K",),
+                concurrency=0,
+            )
+
+    asyncio.run(runner())

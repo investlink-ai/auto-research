@@ -162,3 +162,141 @@ def test_concurrent_appends_dont_lose_rows(tmp_path: Path) -> None:
     doc_ids = set(table.column("doc_id").to_pylist())
     expected = {f"T{tid}-{i}" for tid in range(n_threads) for i in range(n_per_thread)}
     assert doc_ids == expected
+
+
+# ---------- dedup-on-append (cross-process race guard) ----------
+
+
+def test_append_dedups_against_existing_on_unique_keys(tmp_path: Path) -> None:
+    """Cross-process snapshot race guard: the same (source, doc_id) can't double-insert.
+
+    Two concurrent fetchers both snapshot an empty existing-set and
+    both submit a row for accession 'X'. The first append writes it;
+    the second sees it on disk under the file lock and drops the
+    duplicate before writing.
+    """
+    path = tmp_path / "m.parquet"
+    manifest.append(path, [_row(doc_id="X")])
+    # Second append with the SAME doc_id should be a no-op.
+    manifest.append(path, [_row(doc_id="X", sha="b" * 64)])
+    table = manifest.read(path)
+    assert table.num_rows == 1
+    # First write wins — second one was dropped before the concat.
+    assert table.column("content_sha256").to_pylist() == ["a" * 64]
+
+
+def test_append_dedups_within_a_batch_against_existing(tmp_path: Path) -> None:
+    """A batch where some rows are new and some are dups records only the new ones."""
+    path = tmp_path / "m.parquet"
+    manifest.append(path, [_row(doc_id="X")])
+    manifest.append(path, [_row(doc_id="X"), _row(doc_id="Y"), _row(doc_id="Z")])
+    assert sorted(manifest.read(path).column("doc_id").to_pylist()) == ["X", "Y", "Z"]
+
+
+def test_append_with_unique_keys_none_allows_duplicates(tmp_path: Path) -> None:
+    """Opting out of dedup is supported for true append-only audit ledgers."""
+    path = tmp_path / "m.parquet"
+    manifest.append(path, [_row(doc_id="X")])
+    manifest.append(path, [_row(doc_id="X")], unique_keys=None)
+    assert manifest.read(path).num_rows == 2
+
+
+# ---------- legacy-schema lenience ----------
+
+
+def test_existing_doc_ids_handles_legacy_schema_missing_status(tmp_path: Path) -> None:
+    """A manifest written before the `status` column existed must still read cleanly.
+
+    Reproduces the forward-compat asymmetry the code-review pass
+    flagged: writes promote via promote_options='default', but reads
+    must also be lenient against missing columns.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    # Build a legacy table that lacks `status`.
+    legacy_schema = pa.schema(
+        [
+            ("source", pa.string()),
+            ("entity_id", pa.string()),
+            ("doc_id", pa.string()),
+            ("form_type", pa.string()),
+            ("event_datetime", pa.timestamp("us", tz="UTC")),
+            ("fetched_at", pa.timestamp("us", tz="UTC")),
+            ("content_sha256", pa.string()),
+            ("path", pa.string()),
+        ]
+    )
+    legacy_table = pa.table(
+        {
+            "source": ["edgar", "edgar"],
+            "entity_id": ["0001045810", "0001045810"],
+            "doc_id": ["LEGACY-1", "LEGACY-2"],
+            "form_type": ["10-K", "8-K"],
+            "event_datetime": pa.array(
+                [datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 2, 1, tzinfo=UTC)],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+            "fetched_at": pa.array(
+                [datetime(2024, 1, 2, tzinfo=UTC), datetime(2024, 2, 2, tzinfo=UTC)],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+            "content_sha256": ["a" * 64, "b" * 64],
+            "path": ["p1", "p2"],
+        },
+        schema=legacy_schema,
+    )
+    path = tmp_path / "legacy.parquet"
+    pq.write_table(legacy_table, path)
+
+    # Old rows must surface as 'ok' (legacy default).
+    ids = manifest.existing_doc_ids(path, source="edgar")
+    assert ids == {"LEGACY-1", "LEGACY-2"}
+    assert manifest.contains(path, source="edgar", doc_id="LEGACY-1") is True
+
+
+def test_append_against_legacy_schema_uses_promote(tmp_path: Path) -> None:
+    """promote_options='default' nulls the missing `status` column on legacy rows."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    legacy_schema = pa.schema(
+        [
+            ("source", pa.string()),
+            ("entity_id", pa.string()),
+            ("doc_id", pa.string()),
+            ("form_type", pa.string()),
+            ("event_datetime", pa.timestamp("us", tz="UTC")),
+            ("fetched_at", pa.timestamp("us", tz="UTC")),
+            ("content_sha256", pa.string()),
+            ("path", pa.string()),
+        ]
+    )
+    legacy_table = pa.table(
+        {
+            "source": ["edgar"],
+            "entity_id": ["0001045810"],
+            "doc_id": ["LEGACY"],
+            "form_type": ["10-K"],
+            "event_datetime": pa.array(
+                [datetime(2024, 1, 1, tzinfo=UTC)], type=pa.timestamp("us", tz="UTC")
+            ),
+            "fetched_at": pa.array(
+                [datetime(2024, 1, 2, tzinfo=UTC)], type=pa.timestamp("us", tz="UTC")
+            ),
+            "content_sha256": ["a" * 64],
+            "path": ["p1"],
+        },
+        schema=legacy_schema,
+    )
+    path = tmp_path / "evolve.parquet"
+    pq.write_table(legacy_table, path)
+
+    manifest.append(path, [_row(doc_id="NEW")])
+
+    table = manifest.read(path)
+    assert sorted(table.column("doc_id").to_pylist()) == ["LEGACY", "NEW"]
+    # status: NEW is 'ok'; LEGACY was promoted to null.
+    by_doc = dict(zip(table.column("doc_id").to_pylist(), table.column("status").to_pylist(), strict=True))
+    assert by_doc["NEW"] == "ok"
+    assert by_doc["LEGACY"] is None
