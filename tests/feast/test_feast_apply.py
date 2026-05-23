@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -26,9 +25,13 @@ from feast_repo._materialize import PRICE_FEATURE_COLUMNS, materialize_price_fea
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _FEAST_REPO_SRC = _REPO_ROOT / "feast_repo"
-_FEAST_BIN = Path(sys.executable).parent / "feast"
+# shutil.which is portable across venv layouts and OSes (resolves to
+# `feast.exe` on Windows). Falls back to a venv-bin guess only if PATH
+# lookup fails — the test skips cleanly in that case.
+_FEAST_BIN = shutil.which("feast")
 
-# Synthetic universe of 3 tickers x 30 NYSE-session window starting 2024-01-02.
+# Synthetic universe of 3 tickers x 30 wall-calendar days starting 2024-01-02
+# (so 30 event_datetimes spanning ~22 NYSE sessions plus weekends/MLK Day).
 _TICKERS: tuple[str, ...] = ("AAPL", "MSFT", "NVDA")
 _WINDOW_START = datetime(2024, 1, 2, 16, 0, tzinfo=ZoneInfo("America/New_York"))
 
@@ -56,13 +59,16 @@ def _synthetic_events() -> pd.DataFrame:
 @pytest.fixture
 def feast_workspace(tmp_path: Path) -> Path:
     """Copy ``feast_repo/`` into a tmp dir and seed the synthetic parquet."""
+    if _FEAST_BIN is None:
+        pytest.skip("feast CLI not on PATH")
     workspace = tmp_path / "feast_repo"
     shutil.copytree(_FEAST_REPO_SRC, workspace)
-    # Wipe any preexisting registry / data so apply starts from a clean state.
+    # Wipe the entire data/ subtree (not just files) so any provider-created
+    # subdirs from a prior fixture instance don't leak across tests.
     data_dir = workspace / "data"
-    for stale in data_dir.glob("*"):
-        if stale.is_file() and stale.name != ".gitkeep":
-            stale.unlink()
+    shutil.rmtree(data_dir, ignore_errors=True)
+    data_dir.mkdir()
+    (data_dir / ".gitkeep").touch()
     materialized = materialize_price_features(_synthetic_events())
     materialized.to_parquet(data_dir / "price_features.parquet", index=False)
     return workspace
@@ -74,8 +80,9 @@ def _run_feast_apply(workspace: Path) -> subprocess.CompletedProcess[str]:
     or CI runs by hand; if it ever needs PYTHONPATH to succeed, the repo has
     regressed to the fragile cross-file import pattern Codex flagged on #38.
     """
+    assert _FEAST_BIN is not None  # guarded by fixture skip
     return subprocess.run(
-        [str(_FEAST_BIN), "apply"],
+        [_FEAST_BIN, "apply"],
         cwd=workspace,
         capture_output=True,
         text=True,
@@ -107,9 +114,10 @@ def test_price_features_registered_with_full_schema(feast_workspace: Path) -> No
     # Feast surfaces the entity join key alongside the feature columns.
     assert set(PRICE_FEATURE_COLUMNS) <= fields
     assert "entity_id" in fields
-    # ttl=None at definition -> Feast normalises to a zero timedelta sentinel
-    # meaning "unbounded" for the file offline store.
-    assert fv.ttl in (None, timedelta(0))
+    # ttl=timedelta(0) is Feast's "unbounded" sentinel; pin it tight so a
+    # future Feast change to ttl normalisation surfaces as a test failure
+    # rather than silently producing empty PIT joins.
+    assert fv.ttl == timedelta(0)
 
 
 def test_materialized_parquet_carries_pit_columns(feast_workspace: Path) -> None:

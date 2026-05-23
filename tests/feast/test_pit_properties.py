@@ -1,22 +1,30 @@
 """Property tests for the lag-1 trading-day PIT cutoff (AGENTS.md INV-1).
 
-The mandatory assertion (verified by the `pit-check` skill):
+The mandatory assertion (issue #7 AC + ``pit-check`` skill) is that every
+materialized row carries ``as_of_ts == next_trading_day_cutoff(event_datetime)``.
+But that bare equality is a tautology against an identity-perturbed cutoff
+(both sides shift together), so this module pins a stronger set of structural
+properties using ``exchange_calendars`` directly — independent of the function
+under test:
 
-    as_of_ts == next_trading_day_cutoff(event_datetime)
+* ``as_of_ts`` is strictly later than ``event_datetime`` (lag of at least one
+  trading session).
+* ``as_of_ts``'s NYSE-local date is a real NYSE trading session.
+* ``as_of_ts`` equals that session's actual close (early-close days included).
+* The session is strictly after the NYSE-local date of ``event_datetime``.
+* ``next_trading_day_cutoff`` rejects tz-naive timestamps and ``pd.NaT`` with
+  typed errors at the boundary (the producer cannot silently leak local-time
+  or null timestamps past the materializer).
 
-holds for every row in every materialized FeatureView. If a future change
-swaps the materializer to ``event_datetime + pd.Timedelta(days=1)`` or
-similar fixed delta, this test fails.
-
-See ``docs/DATA_MODEL.md`` §1 for the contract and ``AGENTS.md`` INV-1 for
-the rationale (the "single most common silent killer" of research codebases).
+See ``docs/DATA_MODEL.md`` §1 and ``AGENTS.md`` INV-1 for the contract.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import exchange_calendars as xcals
 import pandas as pd
 import pytest
 from hypothesis import given, settings
@@ -28,11 +36,19 @@ from feast_repo._pit import next_trading_day_cutoff
 _UTC = ZoneInfo("UTC")
 _ET = ZoneInfo("America/New_York")
 _NYSE_REGULAR_CLOSE_HOUR_ET = 16  # 4pm Eastern
+_NYSE = xcals.get_calendar("XNYS")
 
 # Wide range: covers pre/post-Juneteenth (added 2022), leap years, year
-# boundaries, NYSE holiday catalog, and DST transitions.
+# boundaries, NYSE holiday catalog, and DST transitions. Clamp the upper
+# bound with ~6 months of headroom against the calendar's last_session so
+# cal.date_to_session doesn't raise for events near Dec 31 (the calendar
+# rebuilds with each xcals release and may shrink, not just grow).
 _RANGE_START = datetime(2015, 1, 1)
-_RANGE_END = datetime(2026, 12, 31, 23, 59, 59)
+_CALENDAR_HEADROOM = timedelta(days=30 * 6)
+_RANGE_END = min(
+    datetime(2026, 12, 31, 23, 59, 59),
+    _NYSE.last_session.to_pydatetime() - _CALENDAR_HEADROOM,
+)
 
 
 def _event_datetimes() -> st.SearchStrategy[pd.Series]:
@@ -62,16 +78,74 @@ def _events_frame(events: pd.Series) -> pd.DataFrame:
     )
 
 
-# ---- The gate: the property assertion required by the issue AC + pit-check skill ----
+# ---- Structural PIT properties (independent of the function under test) ----
 
 
 @given(events=_event_datetimes())
 @settings(max_examples=200, deadline=None)
 def test_as_of_ts_is_next_trading_day_cutoff_for_price_features(events: pd.Series) -> None:
     df = materialize_price_features(_events_frame(events))
-    expected = events.map(next_trading_day_cutoff).reset_index(drop=True)
-    actual = df["as_of_ts"].reset_index(drop=True)
-    assert (actual == expected).all()
+    for event, as_of in zip(
+        df["event_datetime"].to_list(), df["as_of_ts"].to_list(), strict=True
+    ):
+        # 1. Strictly-later: rules out identity / same-day cutoffs.
+        assert as_of > event, f"as_of_ts {as_of} not strictly after event {event}"
+        # 2. as_of_ts falls on an actual NYSE trading session.
+        as_of_session = pd.Timestamp(as_of.tz_convert(_NYSE.tz).date())
+        assert _NYSE.is_session(as_of_session), (
+            f"as_of_ts {as_of} on non-session date {as_of_session.date()}"
+        )
+        # 3. as_of_ts equals that session's actual close (handles early closes).
+        assert as_of == _NYSE.session_close(as_of_session), (
+            f"as_of_ts {as_of} != session_close({as_of_session.date()})"
+        )
+        # 4. The session is strictly after the NYSE-local date of event.
+        event_et_date = event.tz_convert(_NYSE.tz).date()
+        assert as_of_session.date() > event_et_date, (
+            f"as_of session {as_of_session.date()} not > event ET date {event_et_date}"
+        )
+
+
+# ---- Boundary validation: producer cannot leak naive / NaT past the cutoff ----
+
+
+def test_next_trading_day_cutoff_rejects_tz_naive() -> None:
+    """Naive timestamps must not silently be treated as UTC — an upstream that
+    writes naive ET wall-clock would otherwise get a one-trading-day-too-early
+    cutoff (silent INV-1 violation).
+    """
+    with pytest.raises(TypeError, match="tz-aware"):
+        next_trading_day_cutoff(pd.Timestamp(datetime(2024, 6, 4, 10, 0)))
+
+
+def test_next_trading_day_cutoff_rejects_nat() -> None:
+    """NaT must fail fast with a typed error instead of a cryptic AttributeError
+    eleven frames deep inside exchange_calendars.
+    """
+    with pytest.raises(TypeError, match="NaT"):
+        next_trading_day_cutoff(pd.NaT)  # type: ignore[arg-type]  # intentional
+
+
+def test_materialize_price_features_rejects_tz_naive_column() -> None:
+    """The materializer should reject a tz-naive event_datetime column at the
+    boundary once, rather than letting next_trading_day_cutoff raise per-row.
+    """
+    n = 2
+    frame = pd.DataFrame(
+        {
+            "entity_id": ["NVDA"] * n,
+            # tz-naive on purpose — must be rejected.
+            "event_datetime": pd.to_datetime(["2024-06-04 10:00", "2024-06-05 10:00"]),
+            "close_adj": [0.0] * n,
+            "returns_1d": [0.0] * n,
+            "returns_5d": [0.0] * n,
+            "vol_20d_annualized": [0.0] * n,
+            "bid_ask_half_spread_bps": [0.0] * n,
+            "adv_20d_usd": [0.0] * n,
+        }
+    )
+    with pytest.raises(TypeError, match="tz-aware"):
+        materialize_price_features(frame)
 
 
 # ---- Holiday/weekend anchors: cheap explicit checks that document the contract ----

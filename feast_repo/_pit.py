@@ -27,7 +27,11 @@ def next_trading_day_cutoff(t: pd.Timestamp) -> pd.Timestamp:
 
     Semantics (per ``docs/DATA_MODEL.md`` §1):
 
-    * ``t`` is the publication / event timestamp (tz-aware; naive is treated as UTC).
+    * ``t`` MUST be a tz-aware ``pd.Timestamp``; tz-naive inputs are rejected
+      with ``TypeError`` rather than silently re-interpreted as UTC (an ET
+      producer would otherwise be off by one trading day).
+    * ``pd.NaT`` is rejected with ``TypeError`` at this boundary instead of
+      surfacing as a cryptic ``AttributeError`` deep inside ``exchange_calendars``.
     * The result is the actual session close on the next trading day after
       ``t``'s date in America/New_York. Early-close days (Christmas Eve, day
       after Thanksgiving) return the session's actual early close (1pm ET).
@@ -35,10 +39,16 @@ def next_trading_day_cutoff(t: pd.Timestamp) -> pd.Timestamp:
 
     The returned timestamp is tz-aware (UTC).
     """
+    if pd.isna(t):
+        raise TypeError("next_trading_day_cutoff: event_datetime is NaT (missing)")
     cal = _nyse()
     ts = pd.Timestamp(t)
     if ts.tzinfo is None:
-        ts = ts.tz_localize("UTC")
+        raise TypeError(
+            "next_trading_day_cutoff: event_datetime must be tz-aware "
+            "(received naive timestamp); ET-local times must be localised "
+            "explicitly to avoid silent off-by-one ET-date bucketing"
+        )
     # Compute the NYSE-local date so a 2am UTC event on Jan 2 isn't bucketed
     # into Jan 1 ET (and vice versa during DST gaps).
     et_date = ts.tz_convert(cal.tz).date()

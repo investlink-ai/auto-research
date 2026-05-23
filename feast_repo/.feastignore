@@ -1,2 +1,4 @@
-_pit.py
-_materialize.py
+# Skip private helpers at any depth so a future feast_repo/transforms/_*.py
+# stays out of `feast apply`'s import walk. (__init__.py is filtered by
+# Feast separately.)
+**/_*.py
