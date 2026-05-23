@@ -47,9 +47,8 @@ import httpx
 from anthropic import AnthropicError, APIStatusError, RateLimitError
 from anthropic.types import Message
 from tenacity import (
-    RetryError,
-    Retrying,
-    retry_if_exception_type,
+    retry,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential_jitter,
 )
@@ -172,6 +171,23 @@ _HTTPX_TRANSPORT_ERRORS: Final[tuple[type[BaseException], ...]] = (
     httpx.RemoteProtocolError,
     httpx.TimeoutException,
 )
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Predicate for tenacity's `retry_if_exception`.
+
+    Why a predicate (not `retry_if_exception_type`): `RateLimitError`
+    subclasses `APIStatusError`, so naming both in a type-list would
+    retry *every* `APIStatusError` — including 4xx programmer errors
+    (400 bad-request, 401 unauthorized) that should fail loudly, not
+    backoff-loop. The predicate filters precisely to 429 + 5xx + httpx
+    transport errors.
+    """
+    if isinstance(exc, RateLimitError):
+        return True
+    if _is_5xx(exc):
+        return True
+    return isinstance(exc, _HTTPX_TRANSPORT_ERRORS)
 
 
 # --- @circuit_breaker --------------------------------------------------------
@@ -326,56 +342,24 @@ def retry_with_backoff(
     `max_retries` is the number of *additional* attempts after the first,
     matching the contract spec's "3 retries on 5xx / rate limit." So the
     total attempt budget is `max_retries + 1`.
+
+    Uses tenacity's `retry_if_exception(_is_retryable)` predicate so 4xx
+    programmer errors (400 / 401 / 404) propagate immediately instead of
+    burning the backoff budget.
     """
     if max_retries < 0:
         raise ValueError("`max_retries` must be >= 0")
 
-    retryable: tuple[type[BaseException], ...] = (
-        RateLimitError,
-        APIStatusError,
-        *_HTTPX_TRANSPORT_ERRORS,
-    )
-
     def decorate(func: F) -> F:
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            # We pre-filter `APIStatusError` to 5xx — `retry_if_exception_type`
-            # alone would also retry 4xx (e.g., bad request), which is wrong.
-            retrying = Retrying(
-                stop=stop_after_attempt(max_retries + 1),
-                wait=wait_exponential_jitter(initial=initial_wait, max=max_wait),
-                retry=retry_if_exception_type(retryable),
-                reraise=True,
-            )
-            try:
-                for attempt in retrying:
-                    with attempt:
-                        try:
-                            return func(*args, **kwargs)
-                        except APIStatusError as exc:
-                            if isinstance(exc, RateLimitError) or _is_5xx(exc):
-                                raise
-                            # Not retryable — re-raise outside tenacity so it
-                            # doesn't get caught by retry_if_exception_type.
-                            raise _NonRetryable(exc) from exc
-            except _NonRetryable as wrapper_exc:
-                raise wrapper_exc.original from None
-            except RetryError as exc:
-                # `reraise=True` should make this unreachable; defensive.
-                raise exc.last_attempt.exception() from None  # type: ignore[misc]
-            return None  # unreachable; keeps mypy happy across the loop
-
-        return cast(F, wrapper)
+        decorated: F = retry(
+            stop=stop_after_attempt(max_retries + 1),
+            wait=wait_exponential_jitter(initial=initial_wait, max=max_wait),
+            retry=retry_if_exception(_is_retryable),
+            reraise=True,
+        )(func)
+        return decorated
 
     return decorate
-
-
-class _NonRetryable(Exception):  # noqa: N818  # internal sentinel, never user-facing
-    """Wrap a non-retryable APIStatusError to bypass tenacity's filter."""
-
-    def __init__(self, original: BaseException) -> None:
-        super().__init__(str(original))
-        self.original = original
 
 
 # --- @fallback_model ---------------------------------------------------------
