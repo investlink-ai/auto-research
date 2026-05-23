@@ -1,0 +1,110 @@
+name: Live Smoke
+
+# Nightly canary that hits the real upstream services (SEC EDGAR today;
+# FMP, Anthropic, Langfuse, etc. as ingest modules land in W1/W2). The
+# unit + VCR-cassette suites pinned in `make test` / `make integration`
+# verify our code against frozen recordings; this workflow verifies the
+# recordings themselves haven't rotted against upstream drift.
+#
+# Cadence: 03:00 UTC daily (after most US trading days settle but
+# before Asia-Pacific developers start their morning). Also runnable
+# on-demand via workflow_dispatch.
+#
+# GitHub auto-disables scheduled workflows after 60 days of repository
+# inactivity (no commits, PRs, issue activity, etc.). If the repo
+# goes quiet, the cron stops silently. Mitigations: (1) the failure
+# step below opens a tracking issue, which itself counts as activity
+# and resets the timer; (2) re-enable manually via the Actions UI or
+# workflow_dispatch when waking up a dormant repo.
+#
+# Secrets required (set per environment in repo settings):
+# - SEC_USER_AGENT: meaningful UA per SEC fair-access policy
+#     (e.g., "auto-research-ci ops@yourdomain.com")
+# Add others (FMP_API_KEY, ANTHROPIC_API_KEY, ...) as their smokes
+# land. Tests skip cleanly when their required env vars are missing,
+# so the job stays green during the bootstrap phase before a
+# credential is wired up.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: live-smoke
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write  # required for the failure-notification step
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Live smoke
+        id: smoke
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: make live-smoke
+
+      # Gated on the smoke step's outcome specifically — infra flakes
+      # (checkout / uv install / pip mirror outage) shouldn't open a
+      # `Live smoke failed` issue blaming SEC drift.
+      - name: Open issue on smoke failure
+        if: steps.smoke.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const today = new Date().toISOString().slice(0, 10);
+            // Stable title so a multi-day persistent failure folds into a
+            // single tracking issue. The per-run date / link goes in the
+            // body, where it can accumulate as comments.
+            const title = "Live smoke failed";
+            const body = [
+              `Live smoke (${context.workflow}) failed on ${today}.`,
+              ``,
+              `Run: ${runUrl}`,
+              ``,
+              `Likely causes: upstream schema drift (SEC, FMP, …), expired credentials, or a real regression in the smoke suite. Investigate the failing test name in the run logs and either re-record cassettes or fix the regression.`,
+            ].join("\n");
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'live-smoke',
+              per_page: 100,
+            });
+            const match = existing.data.find(i => i.title === title);
+            if (match) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: match.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['live-smoke'],
+              });
+            }

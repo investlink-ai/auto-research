@@ -1,4 +1,4 @@
-.PHONY: quick check check-full test integration eval lint typecheck
+.PHONY: quick check check-full test integration eval live-smoke lint typecheck
 
 # Fast pre-commit gate — run constantly during development.
 quick: lint typecheck
@@ -28,3 +28,10 @@ integration:
 # Excluded from CI by default; runs locally and bills the configured API keys.
 eval:
 	uv run pytest -m eval
+
+# Live-smoke suites — hit real SEC / FMP / Anthropic endpoints.
+# Excluded from per-PR CI; runs nightly via .github/workflows/live-smoke.yml
+# and locally on-demand. Tests skip cleanly when their required env vars
+# (declared per-module via `live_requires_env`) aren't set.
+live-smoke:
+	uv run pytest tests/live -m live

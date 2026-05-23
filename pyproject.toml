@@ -11,9 +11,12 @@ license = { text = "MIT" }
 # they introduce (anthropic, feast, langgraph, pydantic-ai, ...).
 dependencies = [
     "anthropic>=0.104.0",
+    "httpx>=0.28.1",
     "langfuse>=2,<3",
     "mlflow-skinny>=3.0",
+    "pyarrow>=23.0.1",
     "pydantic>=2.13.4",
+    "tenacity>=9.1.4",
     "traceloop-sdk>=0.30",
 ]
 
@@ -22,6 +25,7 @@ dev = [
     "pytest>=8.3",
     "ruff>=0.7",
     "mypy>=1.13",
+    "vcrpy>=8.1.1",
 ]
 
 [build-system]
@@ -40,6 +44,7 @@ addopts = "--strict-markers"
 markers = [
     "eval: tests that hit external LLM/eval APIs (excluded from CI by default)",
     "integration: tests that hit external services (excluded from CI by default)",
+    "live: tests that hit real external services over real network (excluded from CI by default; run via `make live-smoke` with credentials)",
 ]
 
 [tool.ruff]
@@ -79,6 +84,14 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "mlflow.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "pyarrow.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "vcr.*"
 ignore_missing_imports = true
 
 [dependency-groups]
