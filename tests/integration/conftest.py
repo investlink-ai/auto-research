@@ -4,8 +4,9 @@
   files don't need `@pytest.mark.integration` decorators. The hook receives
   the session-wide item list, so we filter by path explicitly — otherwise
   unit tests collected in the same session would be stamped too.
-- Probe Langfuse's health endpoint once per session; if down, mark every
-  integration item as skipped with a useful message.
+- Probe Langfuse's health endpoint once per session; if down, skip tests
+  that actually need Langfuse running. VCR-replay tests (EDGAR, FMP, …)
+  don't talk to Langfuse and run regardless.
 """
 
 from __future__ import annotations
@@ -19,6 +20,17 @@ import pytest
 def _is_integration_item(item: pytest.Item) -> bool:
     """True iff the test lives under tests/integration/."""
     return "tests/integration" in str(item.path).replace("\\", "/")
+
+
+def _needs_langfuse(item: pytest.Item) -> bool:
+    """Tests with `telemetry` in the file name talk to Langfuse.
+
+    Filename-based — explicit `@pytest.mark.langfuse` would be slightly
+    cleaner, but requires every Langfuse test to remember to declare it.
+    The convention here is "any integration test file named *telemetry*
+    needs Langfuse"; new test files just need a different name.
+    """
+    return "telemetry" in str(item.path).rsplit("/", 1)[-1]
 
 
 def _langfuse_healthy(
@@ -43,8 +55,9 @@ def pytest_collection_modifyitems(
 ) -> None:
     """Mark + conditionally-skip integration tests in one pass.
 
-    Single probe per session. Path-filtered so unit tests collected in
-    the same run are untouched.
+    Path-filtered so unit tests collected in the same run are untouched.
+    Langfuse probe runs at most once per session and only when at least
+    one Langfuse-needing test was collected.
     """
     integration_items = [item for item in items if _is_integration_item(item)]
     if not integration_items:
@@ -53,12 +66,13 @@ def pytest_collection_modifyitems(
     for item in integration_items:
         item.add_marker(pytest.mark.integration)
 
-    if not _langfuse_healthy():
+    langfuse_items = [item for item in integration_items if _needs_langfuse(item)]
+    if langfuse_items and not _langfuse_healthy():
         skip = pytest.mark.skip(
             reason=(
                 "Langfuse not reachable at localhost:3000/api/public/health. "
                 "Start with: docker compose up -d"
             )
         )
-        for item in integration_items:
+        for item in langfuse_items:
             item.add_marker(skip)

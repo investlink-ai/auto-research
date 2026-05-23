@@ -11,8 +11,10 @@ license = { text = "MIT" }
 # they introduce (anthropic, feast, langgraph, pydantic-ai, ...).
 dependencies = [
     "anthropic>=0.104.0",
+    "httpx>=0.28.1",
     "langfuse>=2,<3",
     "mlflow-skinny>=3.0",
+    "pyarrow>=23.0.1",
     "pydantic>=2.13.4",
     "traceloop-sdk>=0.30",
 ]
@@ -81,9 +83,18 @@ ignore_missing_imports = true
 module = "mlflow.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "pyarrow.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "vcr.*"
+ignore_missing_imports = true
+
 [dependency-groups]
 dev = [
     "mlflow>=3.0",
     "pre-commit>=4.6.0",
     "pytest-randomly>=4.1.0",
+    "vcrpy>=8.1.1",
 ]
