@@ -110,28 +110,69 @@ FeatureView. Required test (or equivalent):
 rg -l 'as_of_ts.*event_datetime' tests/feast/
 ```
 
-The property test in `tests/feast/test_pit_properties.py` must include this
-shape (add a case if your new FeatureView isn't yet covered):
+The property test must use the shared structural-invariant helper, NOT
+re-compare `materialize_my_view(events)["as_of_ts"]` to
+`events.map(next_trading_day_cutoff)` — that pattern is tautological
+(both sides shift identically under any regression in the cutoff function).
+Correct shape:
 
 ```python
+from tests.feast._pit_invariants import assert_pit_invariants
+
 @given(events=event_datetimes_strategy())
-def test_as_of_ts_is_next_trading_day_cutoff(events):
-    df = materialize_my_view(events)
-    expected = events.apply(next_trading_day_cutoff)
-    assert (df["as_of_ts"] == expected).all()
+def test_my_view_pit_invariants(events):
+    assert_pit_invariants(materialize_my_view(_events_frame(events)))
 ```
+
+The helper checks five structural properties via `exchange_calendars`
+directly (different code path from the impl), so a regression in
+`next_trading_day_cutoff` itself surfaces as a property failure.
+
+**5. Grep for naive-timestamp producers writing to Feast.** Tz-naive
+`event_datetime` columns are silently re-interpreted as UTC by downstream
+code and produce one-trading-day-too-early cutoffs for any ET-centric
+producer:
+
+```bash
+rg -nP 'pd\.(Timestamp|to_datetime)\(' \
+   feast_repo/ src/auto_research/ingest/ src/auto_research/extract/ \
+   --type py | rg -v 'utc=True|tz=|tz_localize|tz_convert|# naive ok:'
+```
+
+Every match must either pass `utc=True`, chain `.tz_localize(...)` /
+`.tz_convert(...)`, or carry an explicit `# naive ok:` comment justifying
+why the producer's naive convention is correct here (e.g. test fixture
+that exercises the rejection path).
+
+**6. Grep for tautological PIT property tests.** Any `tests/feast/*`
+file that calls `next_trading_day_cutoff` on both sides of a comparison
+is the failure mode that almost shipped on PR #38 (the property reduces
+to `events.map(f) == events.map(f)`, true regardless of `f`):
+
+```bash
+rg -nP 'next_trading_day_cutoff.*next_trading_day_cutoff' tests/feast/ \
+   --multiline-dotall
+```
+
+Zero hits expected. Property tests should call only `assert_pit_invariants`
+(structural assertions via `exchange_calendars`) plus explicit-anchor
+parametrized cases.
 
 ## Pre-submit checklist
 
 - [ ] Every new write to a FeatureView populates `event_datetime` AND `as_of_ts`.
 - [ ] `as_of_ts` is computed via `next_trading_day_cutoff(event_datetime)`,
       not a fixed `pd.Timedelta(days=1)`.
+- [ ] `event_datetime` columns are tz-aware (UTC) at write-time — naive
+      inputs are rejected at the materializer boundary (grep #5).
 - [ ] No query-time arithmetic on `as_of_ts` in signals, backtest, or agents.
-- [ ] Property test covers the new or modified FeatureView (grep #4).
+- [ ] Property test covers the new or modified FeatureView via
+      `assert_pit_invariants(...)` — not via a tautological self-comparison
+      (greps #4 and #6).
 - [ ] If holidays / weekends are involved, the `next_trading_day_cutoff`
       implementation is consulted — not reimplemented inline.
 - [ ] PR body cites the test name (e.g.
-      `tests/feast/test_pit_properties.py::test_as_of_ts_is_next_trading_day_cutoff_for_ten_k`).
+      `tests/feast/test_pit_properties.py::test_price_features_pit_invariants`).
 
 ## Escalation
 

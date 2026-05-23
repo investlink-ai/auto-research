@@ -33,6 +33,7 @@ from hypothesis import strategies as st
 
 from feast_repo._materialize import materialize_price_features
 from feast_repo._pit import next_trading_day_cutoff
+from tests.feast._pit_invariants import assert_pit_invariants
 
 _UTC = ZoneInfo("UTC")
 _ET = ZoneInfo("America/New_York")
@@ -84,40 +85,12 @@ def _events_frame(events: pd.Series) -> pd.DataFrame:
 
 @given(events=_event_datetimes())
 @settings(max_examples=200, deadline=None)
-def test_as_of_ts_is_next_trading_day_cutoff_for_price_features(events: pd.Series) -> None:
-    df = materialize_price_features(_events_frame(events))
-    for event, as_of in zip(
-        df["event_datetime"].to_list(), df["as_of_ts"].to_list(), strict=True
-    ):
-        # 1. Strictly-later: rules out identity / same-day cutoffs.
-        assert as_of > event, f"as_of_ts {as_of} not strictly after event {event}"
-        # 2. as_of_ts falls on an actual NYSE trading session.
-        as_of_session = pd.Timestamp(as_of.tz_convert(_NYSE.tz).date())
-        assert _NYSE.is_session(as_of_session), (
-            f"as_of_ts {as_of} on non-session date {as_of_session.date()}"
-        )
-        # 3. as_of_ts equals that session's actual close (handles early closes).
-        assert as_of == _NYSE.session_close(as_of_session), (
-            f"as_of_ts {as_of} != session_close({as_of_session.date()})"
-        )
-        # 4. The session is strictly after the NYSE-local date of event.
-        event_et_date = event.tz_convert(_NYSE.tz).date()
-        assert as_of_session.date() > event_et_date, (
-            f"as_of session {as_of_session.date()} not > event ET date {event_et_date}"
-        )
-        # 5. Minimality: as_of_session is the FIRST trading session strictly
-        # after the event's NYSE-local date — catches a regression that
-        # advances 2+ sessions (which would still satisfy 1-4). Uses
-        # sessions_in_range, a different xcals API path than the impl's
-        # date_to_session(direction="next"), for independent verification.
-        later_sessions = _NYSE.sessions_in_range(
-            pd.Timestamp(event_et_date) + pd.Timedelta(days=1),
-            pd.Timestamp(event_et_date) + pd.Timedelta(days=30),
-        )
-        assert as_of_session == later_sessions[0], (
-            f"as_of_session {as_of_session.date()} is not the first session "
-            f"strictly after event ET date {event_et_date} (got {later_sessions[0].date()})"
-        )
+def test_price_features_pit_invariants(events: pd.Series) -> None:
+    """Hypothesis sweep: the five structural PIT invariants hold for every
+    materialized row across a wide UTC date range. See
+    :mod:`tests.feast._pit_invariants` for what's checked and why.
+    """
+    assert_pit_invariants(materialize_price_features(_events_frame(events)))
 
 
 # ---- Boundary validation: producer cannot leak naive / NaT past the cutoff ----
@@ -252,9 +225,64 @@ def _close_ts(year: int, month: int, day: int, hour: int = _NYSE_REGULAR_CLOSE_H
         (_et_ts(2024, 1, 1), _close_ts(2024, 1, 2)),
         # Good Friday 2024 (Fri Mar 29, closed) -> Mon Apr 1.
         (_et_ts(2024, 3, 29), _close_ts(2024, 4, 1)),
+        # DST spring forward (Sun Mar 10, 2024 02:00 EST -> 03:00 EDT). All
+        # events that day bucket to ET date = Mar 10 -> cutoff = Mar 11 close
+        # (4pm EDT = 20:00 UTC). Two UTC instants spanning the DST moment
+        # both yield the same Monday close.
+        # 06:30 UTC = 01:30 EST (before the spring-forward moment).
+        (
+            pd.Timestamp(datetime(2024, 3, 10, 6, 30, tzinfo=_UTC)),
+            _close_ts(2024, 3, 11),
+        ),
+        # 07:30 UTC = 03:30 EDT (after the spring-forward moment).
+        (
+            pd.Timestamp(datetime(2024, 3, 10, 7, 30, tzinfo=_UTC)),
+            _close_ts(2024, 3, 11),
+        ),
+        # DST fall back (Sun Nov 3, 2024 02:00 EDT -> 01:00 EST). All events
+        # that day bucket to ET date = Nov 3 -> cutoff = Nov 4 close (4pm EST
+        # = 21:00 UTC). The 01:00-02:00 ET hour occurs twice; both instants
+        # bucket to Nov 3.
+        # 05:30 UTC = 01:30 EDT (the first 01:30 ET of the day).
+        (
+            pd.Timestamp(datetime(2024, 11, 3, 5, 30, tzinfo=_UTC)),
+            _close_ts(2024, 11, 4),
+        ),
+        # 06:30 UTC = 01:30 EST (the second 01:30 ET of the day).
+        (
+            pd.Timestamp(datetime(2024, 11, 3, 6, 30, tzinfo=_UTC)),
+            _close_ts(2024, 11, 4),
+        ),
     ],
 )
 def test_next_trading_day_cutoff_holiday_anchors(
     event: pd.Timestamp, expected_close: pd.Timestamp
 ) -> None:
     assert next_trading_day_cutoff(event) == expected_close
+
+
+def test_midnight_et_boundary_cliff_is_intentional() -> None:
+    """Two events 2 seconds apart spanning midnight ET get cutoffs ONE
+    trading day apart by design — the algorithm bins by NYSE-local date.
+
+    A 23:59:59 ET event was published on Tuesday in NY market terms; a
+    00:00:01 ET event was Wednesday. This is the conservative reading of
+    "next trading day cutoff" and is the failure mode the property test's
+    "minimality" invariant pins. Future maintainers should not "fix" this
+    by switching to a wall-clock-delta semantics — Codex flagged it on
+    PR #38 and the resolution was to document the intent, not change it.
+    """
+    just_before = pd.Timestamp(datetime(2024, 6, 4, 23, 59, 59, tzinfo=_ET))
+    just_after = pd.Timestamp(datetime(2024, 6, 5, 0, 0, 1, tzinfo=_ET))
+    # The two inputs are 2 real-time seconds apart...
+    assert (just_after.tz_convert(_UTC) - just_before.tz_convert(_UTC)) == pd.Timedelta(
+        seconds=2
+    )
+    cutoff_before = next_trading_day_cutoff(just_before)
+    cutoff_after = next_trading_day_cutoff(just_after)
+    # ...but their PIT cutoffs differ by ONE trading session (Wed close vs
+    # Thu close), because ET date Jun 4 -> Jun 5 close and ET date Jun 5 ->
+    # Jun 6 close.
+    assert cutoff_before == _close_ts(2024, 6, 5)
+    assert cutoff_after == _close_ts(2024, 6, 6)
+    assert (cutoff_after - cutoff_before) == pd.Timedelta(days=1)

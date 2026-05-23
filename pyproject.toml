@@ -76,7 +76,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["auto_research", "feast_repo"]
+known-first-party = ["auto_research", "feast_repo", "tests"]
 # `feast` (the third-party package) is otherwise misclassified as first-party
 # because ruff's auto-detection sees `feast_repo` in src and treats the prefix
 # as a package root.
@@ -91,6 +91,12 @@ warn_unused_ignores = true
 no_implicit_optional = true
 files = ["src/auto_research", "feast_repo", "tests"]
 mypy_path = "."
+# tests/feast/_pit_invariants.py is a shared test helper that mypy sees
+# under two module names (with and without the tests.feast prefix) because
+# tests/feast/ has no __init__.py — adding one shadows the feast package
+# at pytest import time. Skip strict typecheck on the helper file
+# (it's six lines of asserts; the runtime tests cover its behavior).
+exclude = ["tests/feast/_pit_invariants\\.py$"]
 
 # Third-party libs without type stubs. Keep this list short; each entry
 # means we're trusting an untyped surface.

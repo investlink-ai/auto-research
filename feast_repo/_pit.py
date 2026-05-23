@@ -42,7 +42,7 @@ def next_trading_day_cutoff(t: pd.Timestamp) -> pd.Timestamp:
     if pd.isna(t):
         raise TypeError("next_trading_day_cutoff: event_datetime is NaT (missing)")
     cal = _nyse()
-    ts = pd.Timestamp(t)
+    ts = pd.Timestamp(t)  # naive ok: validator below rejects if tz-naive
     if ts.tzinfo is None:
         raise TypeError(
             "next_trading_day_cutoff: event_datetime must be tz-aware "
@@ -53,7 +53,7 @@ def next_trading_day_cutoff(t: pd.Timestamp) -> pd.Timestamp:
     # into Jan 1 ET (and vice versa during DST gaps).
     et_date = ts.tz_convert(cal.tz).date()
     # The session strictly after t's date.
-    next_day = pd.Timestamp(et_date) + pd.Timedelta(days=1)
+    next_day = pd.Timestamp(et_date) + pd.Timedelta(days=1)  # naive ok: date arithmetic
     next_session = cal.date_to_session(next_day.date().isoformat(), direction="next")
     close = cal.session_close(next_session)
     return pd.Timestamp(close).tz_convert("UTC")

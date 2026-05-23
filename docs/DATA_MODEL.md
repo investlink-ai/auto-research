@@ -34,7 +34,36 @@ features = features[features["as_of_ts"] <= entity_ts - pd.Timedelta(days=1)]  #
 ```
 
 `next_trading_day_cutoff(t)` returns the next NYSE close ≥ `t + 1 trading day`,
-respecting holidays. Implementation in `src/auto_research/feast_repo/_pit.py`.
+respecting holidays. Implementation in `feast_repo/_pit.py`.
+
+### 1.1 Producer-side contract
+
+`event_datetime` columns written to `feast_repo/data/*.parquet` MUST be
+tz-aware (UTC by convention). Naive timestamps are rejected at the
+materializer boundary with `TypeError` — this is intentional and protects
+INV-1 from silent off-by-one ET-date bucketing.
+
+```python
+# Correct: tz-aware (UTC) — survives pyarrow parquet round-trip.
+df["event_datetime"] = pd.to_datetime(raw_timestamps, utc=True)
+
+# Wrong: naive — would be re-interpreted as UTC by downstream code with no
+# warning, producing one-trading-day-too-early cutoffs for ET-centric data.
+df["event_datetime"] = pd.to_datetime(raw_timestamps)  # NO
+```
+
+The pyarrow parquet writer preserves tz metadata only if the column is
+tz-aware before `to_parquet`. A naive column round-trips as
+`datetime64[ns]` (still naive) and the materializer rejects it on the next
+read. Tests pinning both paths:
+
+- `tests/feast/test_pit_properties.py::test_next_trading_day_cutoff_rejects_tz_naive`
+- `tests/feast/test_pit_properties.py::test_materialize_price_features_rejects_tz_naive_column`
+- `tests/feast/test_pit_properties.py::test_naive_event_datetime_after_parquet_roundtrip_is_rejected`
+- `tests/feast/test_pit_properties.py::test_tz_aware_event_datetime_survives_parquet_roundtrip`
+
+`pd.NaT` is likewise rejected with `TypeError` at the boundary (rather than
+surfacing as a cryptic `AttributeError` from inside `exchange_calendars`).
 
 ---
 
