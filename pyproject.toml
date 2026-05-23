@@ -12,6 +12,7 @@ license = { text = "MIT" }
 dependencies = [
     "anthropic>=0.104.0",
     "langfuse>=2,<3",
+    "mlflow-skinny>=3.0",
     "traceloop-sdk>=0.30",
 ]
 
@@ -75,7 +76,12 @@ files = ["src/auto_research", "tests"]
 module = "langfuse.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "mlflow.*"
+ignore_missing_imports = true
+
 [dependency-groups]
 dev = [
+    "mlflow>=3.0",
     "pre-commit>=4.6.0",
 ]

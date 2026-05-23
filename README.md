@@ -40,6 +40,9 @@ docker compose up -d
 
 # 3. Verify telemetry end-to-end (requires Docker running + .env populated)
 make integration
+
+# 4. Browse experiment tracker (after backtests have run)
+uv run mlflow ui              # opens http://localhost:5000
 ```
 
 ## Test layers
