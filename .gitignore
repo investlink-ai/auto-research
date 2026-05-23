@@ -60,3 +60,6 @@ postgres-data/
 # tracked via a .gitkeep so `feast apply` has somewhere to write the registry.
 feast_repo/data/*
 !feast_repo/data/.gitkeep
+
+# Personal learning / self-study notes — kept local, never pushed.
+docs/learning/
