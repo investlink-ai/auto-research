@@ -43,7 +43,6 @@ import threading
 from collections.abc import Callable
 from typing import Any, Final, TypeVar, cast
 
-import httpx
 from anthropic import AnthropicError, APIStatusError, RateLimitError
 from anthropic.types import Message
 from tenacity import (
@@ -52,6 +51,8 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential_jitter,
 )
+
+from auto_research._transport import TRANSIENT_NETWORK_ERRORS
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -164,15 +165,6 @@ def _is_capacity_error(exc: BaseException) -> bool:
     return isinstance(exc, APIStatusError) and exc.status_code == 529
 
 
-_HTTPX_TRANSPORT_ERRORS: Final[tuple[type[BaseException], ...]] = (
-    httpx.ConnectError,
-    httpx.ReadError,
-    httpx.WriteError,
-    httpx.RemoteProtocolError,
-    httpx.TimeoutException,
-)
-
-
 def _is_retryable(exc: BaseException) -> bool:
     """Predicate for tenacity's `retry_if_exception`.
 
@@ -187,7 +179,7 @@ def _is_retryable(exc: BaseException) -> bool:
         return True
     if _is_5xx(exc):
         return True
-    return isinstance(exc, _HTTPX_TRANSPORT_ERRORS)
+    return isinstance(exc, TRANSIENT_NETWORK_ERRORS)
 
 
 # --- @circuit_breaker --------------------------------------------------------
