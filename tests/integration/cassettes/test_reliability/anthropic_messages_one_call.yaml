@@ -1,0 +1,18 @@
+interactions:
+- request:
+    method: POST
+    uri: https://api.anthropic.com/v1/messages
+    body: null
+    headers:
+      Content-Type:
+      - application/json
+  response:
+    status:
+      code: 200
+      message: OK
+    headers:
+      Content-Type:
+      - application/json
+    body:
+      string: '{"id":"msg_01TestReliability","type":"message","role":"assistant","content":[{"type":"text","text":"Hi.","citations":null}],"model":"claude-sonnet-4-6","stop_reason":"end_turn","stop_sequence":null,"container":null,"stop_details":null,"usage":{"input_tokens":1500000,"output_tokens":900000,"cache_creation":null,"cache_creation_input_tokens":null,"cache_read_input_tokens":null,"inference_geo":null,"server_tool_use":null,"service_tier":"standard"}}'
+version: 1
