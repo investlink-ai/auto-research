@@ -57,15 +57,27 @@ _MAX_CHUNK_BYTES: Final = 20 * 1024 * 1024
 # chunks → 5-7 segments per call, each safely under the 20 MB cap at
 # 64 kbps voice quality.
 _CHUNK_SECONDS: Final = 600
+# Floor on chunk duration. Below this, a 70-min call would explode
+# into hundreds of Whisper calls (each $0.006). Caller can override
+# only above this floor to keep API spend bounded.
+_MIN_CHUNK_SECONDS: Final = 30
+# Hard ceiling on the per-call ffmpeg subprocess. A 70-min audio at
+# realtime decode is ~70 min; we give ffmpeg 30 min and call it stuck.
+_DEFAULT_FFMPEG_TIMEOUT: Final = 1800.0
 
 # Q&A boundary markers — ordered most-specific to most-generic. The
 # first match wins; subsequent markers are ignored. Real earnings
 # calls almost always have at least one of these phrasings.
+#
+# Pattern 4 uses `.*?` (non-greedy) instead of `.*` so a long
+# unwrapped Whisper line that mentions "questions" twice can't pull
+# the boundary all the way to the last occurrence and swallow the
+# real Q&A — and the `\bquestions\b` anchor still bounds the match.
 _QA_BOUNDARY_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"\bQuestion[-\s]and[-\s]Answer\s+Session\b", re.IGNORECASE),
     re.compile(r"\bWe(?:'ll| will)\s+now\s+(?:begin|move)\s+(?:the\s+)?Q\s*&\s*A\b", re.IGNORECASE),
     re.compile(r"\bI(?:'ll| will)\s+(?:now\s+)?turn\s+(?:it|the call)\s+over\s+to\s+questions\b", re.IGNORECASE),
-    re.compile(r"\b(?:we'll|we will|let's)\s+(?:now\s+)?(?:take|open).*questions\b", re.IGNORECASE),
+    re.compile(r"\b(?:we'll|we will|let's)\s+(?:now\s+)?(?:take|open).*?\bquestions\b", re.IGNORECASE),
 )
 
 
@@ -125,12 +137,24 @@ class WhisperEngine:
         max_attempts: int = _http.DEFAULT_MAX_ATTEMPTS,
         chunk_seconds: int = _CHUNK_SECONDS,
         ffmpeg_path: str | None = None,
+        ffmpeg_timeout: float = _DEFAULT_FFMPEG_TIMEOUT,
     ) -> None:
+        if chunk_seconds < _MIN_CHUNK_SECONDS:
+            raise ValueError(
+                f"chunk_seconds={chunk_seconds} is below the {_MIN_CHUNK_SECONDS}s "
+                f"floor; smaller values risk uncapped Whisper API spend "
+                f"(each chunk is a separate billed call)."
+            )
+        if max_attempts < 1:
+            raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
+        if ffmpeg_timeout <= 0:
+            raise ValueError(f"ffmpeg_timeout must be positive, got {ffmpeg_timeout}")
         self._client = OpenAI(api_key=_resolve_api_key(api_key))
         self._model = model
         self._max_attempts = max_attempts
         self._chunk_seconds = chunk_seconds
         self._ffmpeg = ffmpeg_path or _ensure_ffmpeg()
+        self._ffmpeg_timeout = ffmpeg_timeout
 
     def close(self) -> None:
         self._client.close()
@@ -209,7 +233,17 @@ class WhisperEngine:
             "-vn",
             str(out_pattern),
         ]
-        subprocess.run(cmd, check=True)
+        # `timeout=` guards against ffmpeg hanging on malformed input
+        # (corrupt mp4 atoms, stalled libavformat reads). Without it a
+        # single bad file wedges the worker and blocks the manifest
+        # lock for every other writer on the host.
+        try:
+            subprocess.run(cmd, check=True, timeout=self._ffmpeg_timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"ffmpeg exceeded {self._ffmpeg_timeout:.0f}s timeout on {source}. "
+                "Likely corrupt or unrecognized audio container."
+            ) from exc
         chunks = sorted(workdir.glob("chunk-*.mp3"))
         if not chunks:
             raise RuntimeError(
@@ -240,8 +274,21 @@ class WhisperEngine:
                         file=fh,
                         response_format="text",
                     )
-                # response_format="text" returns a string body.
-                return str(resp).strip()
+                # response_format="text" returns a plain `str` on
+                # openai>=2.38. If a future SDK ever swaps that for a
+                # typed wrapper, `str(resp)` would silently produce a
+                # `Transcription(text=...)` repr — corrupting every
+                # transcript. Assert the shape we depend on.
+                if isinstance(resp, str):
+                    return resp.strip()
+                text = getattr(resp, "text", None)
+                if isinstance(text, str):
+                    return text.strip()
+                raise TypeError(
+                    f"OpenAI Whisper returned {type(resp).__name__}; expected "
+                    "`str` (response_format='text') or an object with a `.text` "
+                    "attribute. SDK contract drift — pin openai version."
+                )
         raise RuntimeError("unreachable: tenacity always returns or raises")
 
 

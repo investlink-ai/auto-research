@@ -26,7 +26,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TranscriptConfigError(RuntimeError):
@@ -61,6 +61,19 @@ class Transcript(BaseModel):
     event_datetime: datetime
     prepared_remarks: str
     q_and_a: str
+
+    @field_validator("event_datetime")
+    @classmethod
+    def _require_tz_aware(cls, value: datetime) -> datetime:
+        # INV-1 defense in depth: a naive datetime here would silently
+        # land in `manifest.event_datetime` (pa.timestamp(tz='UTC')) and
+        # corrupt Feast's lag-1 cutoff downstream. Fail at construction.
+        if value.tzinfo is None:
+            raise ValueError(
+                "event_datetime must be timezone-aware (tzinfo is None). "
+                "Pass a UTC datetime (e.g. datetime(..., tzinfo=UTC))."
+            )
+        return value
 
 
 @runtime_checkable

@@ -208,16 +208,17 @@ def test_whisper_engine_concatenates_multiple_chunks(
         "auto_research.ingest.transcripts._whisper.OpenAI",
         lambda api_key: _FakeOpenAI(transcriptions),
     )
-    # 3 seconds of audio, chunk every 1s → 3 segments.
-    engine = WhisperEngine(chunk_seconds=1)
+    # 90s audio, 30s chunks → 3 segments. (chunk_seconds floor is 30s
+    # to bound Whisper API spend; we go just above the floor.)
+    engine = WhisperEngine(chunk_seconds=30)
     transcript = engine.transcribe(
-        _make_silent_wav(seconds=3.0),
+        _make_silent_wav(seconds=90.0),
         ticker="NVDA",
         year=2024,
         quarter=2,
         event_datetime=datetime(2024, 5, 22, tzinfo=UTC),
     )
-    assert transcriptions.calls, "Whisper was never invoked"
+    assert len(transcriptions.calls) >= 2, "expected multiple chunks"
     # Each chunk contributes "segment text"; the join uses newlines.
     assert transcript.prepared_remarks.count("segment text") == len(transcriptions.calls)
 
@@ -226,3 +227,47 @@ def test_whisper_engine_requires_openai_key(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(TranscriptConfigError):
         WhisperEngine()
+
+
+def test_whisper_engine_rejects_sub_floor_chunk_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Below the 30s floor, a 70-min call would explode into hundreds
+    of $0.006 Whisper calls. Constructor fails loud."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    with pytest.raises(ValueError, match="chunk_seconds"):
+        WhisperEngine(chunk_seconds=10)
+
+
+def test_whisper_engine_rejects_zero_max_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    with pytest.raises(ValueError, match="max_attempts"):
+        WhisperEngine(max_attempts=0)
+
+
+def test_whisper_engine_rejects_non_positive_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    with pytest.raises(ValueError, match="ffmpeg_timeout"):
+        WhisperEngine(ffmpeg_timeout=0)
+
+
+def test_split_qa_non_greedy_take_questions_pattern() -> None:
+    """The 'we'll take ... questions' pattern uses non-greedy `.*?` so
+    a single long Whisper line that mentions 'questions' both before
+    and after the real Q&A boundary anchors at the first occurrence."""
+    from auto_research.ingest.transcripts._whisper import _split_qa
+
+    text = (
+        "Operator: We'll take a couple of questions about pricing later. "
+        "Now for our prepared remarks... details about Q2 questions raised "
+        "by analysts last quarter."
+    )
+    prepared, qa = _split_qa(text)
+    # First occurrence wins; greedy `.*` would have swallowed past it
+    # all the way to the LAST "questions". Non-greedy stops at first.
+    assert "Now for our prepared remarks" in qa
+    assert prepared.startswith("Operator:")

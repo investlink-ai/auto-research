@@ -69,6 +69,14 @@ def test_transcript_validates_ticker_pattern() -> None:
         _make_transcript(ticker="")
 
 
+def test_transcript_rejects_naive_event_datetime() -> None:
+    """INV-1 defense in depth: tz-naive datetime here would corrupt the
+    manifest's tz-aware `event_datetime` column and propagate a wrong
+    PIT stamp into Feast."""
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        _make_transcript(event_datetime=datetime(2024, 5, 22, 20, 30))
+
+
 def test_transcript_allows_empty_qa() -> None:
     """A call where we couldn't detect the Q&A boundary is still a
     valid transcript — the entire body lands in prepared_remarks."""
