@@ -85,4 +85,5 @@ ignore_missing_imports = true
 dev = [
     "mlflow>=3.0",
     "pre-commit>=4.6.0",
+    "pytest-randomly>=4.1.0",
 ]
