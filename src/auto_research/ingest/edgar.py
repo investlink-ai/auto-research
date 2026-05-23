@@ -48,9 +48,12 @@ pool.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
+import logging
 import os
 import re
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -92,6 +95,8 @@ _DEFAULT_ASYNC_CONCURRENCY: Final = 8
 
 # EDGAR canonical CIK form is zero-padded to 10 digits.
 _CIK_PADDED_PATTERN = re.compile(r"^\d{10}$")
+
+_logger = logging.getLogger(__name__)
 
 
 class EdgarConfigError(RuntimeError):
@@ -296,7 +301,10 @@ def _atomic_write_bytes(dest: Path, content: bytes) -> None:
     dotfiles into the destination directory.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.parent / f".{dest.name}.{os.getpid()}.tmp"
+    # Tmp name namespaces by both PID and thread id so multiple worker
+    # threads under `asyncio.to_thread` writing to the same dest (e.g., a
+    # future deliberate-retry pattern) can't collide on the tmp filename.
+    tmp = dest.parent / f".{dest.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
         tmp.write_bytes(content)
         fd = os.open(tmp, os.O_RDONLY)
@@ -306,7 +314,11 @@ def _atomic_write_bytes(dest: Path, content: bytes) -> None:
             os.close(fd)
         os.replace(tmp, dest)
     except BaseException:
-        tmp.unlink(missing_ok=True)
+        # Cleanup must NOT mask the original exception. unlink can itself
+        # raise (PermissionError on read-only fs, EIO on a dying disk) —
+        # swallow OSError from cleanup and re-raise the original failure.
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
         raise
     dir_fd = os.open(dest.parent, os.O_RDONLY)
     try:
@@ -646,13 +658,28 @@ async def afetch_filings_for_cik(
             exceptions = [r for r in results if isinstance(r, BaseException)]
         finally:
             if new_rows:
-                await asyncio.to_thread(manifest.append, manifest_path, new_rows)
-        # Honor structured cancellation: surface CancelledError directly,
-        # without group-wrapping, so outer task-group / wait_for semantics
-        # stay intact.
-        for exc in exceptions:
-            if isinstance(exc, asyncio.CancelledError):
-                raise exc
+                # Catch the flush exception so it joins the collected per-filing
+                # failures instead of replacing them. Otherwise a disk-full at
+                # flush time would mask every EdgarRateLimited / EdgarServerError
+                # gather already captured.
+                try:
+                    await asyncio.to_thread(manifest.append, manifest_path, new_rows)
+                except BaseException as flush_exc:
+                    exceptions.append(flush_exc)
+        # Honor structured cancellation: surface CancelledError directly so
+        # outer task-group / wait_for semantics stay intact, but attach
+        # suppressed sibling failures as notes (PEP 678) instead of dropping
+        # them silently.
+        cancelled = next(
+            (e for e in exceptions if isinstance(e, asyncio.CancelledError)),
+            None,
+        )
+        if cancelled is not None:
+            for other in exceptions:
+                if other is cancelled:
+                    continue
+                cancelled.add_note(f"suppressed: {type(other).__name__}: {other}")
+            raise cancelled
         if exceptions:
             raise BaseExceptionGroup("EDGAR fetches failed", exceptions)
 
@@ -729,10 +756,25 @@ def _parse_recent(
         if form not in wanted:
             continue
         if not (isinstance(accession, str) and accession.strip()):
+            _logger.warning(
+                "skipping row with blank accessionNumber for cik=%s form=%s",
+                cik_padded,
+                form,
+            )
             continue
         if not (isinstance(primary, str) and primary.strip()):
+            _logger.warning(
+                "skipping row with blank primaryDocument for cik=%s accession=%s",
+                cik_padded,
+                accession,
+            )
             continue
         if not (isinstance(accepted, str) and accepted.strip()):
+            _logger.warning(
+                "skipping row with blank acceptanceDateTime for cik=%s accession=%s",
+                cik_padded,
+                accession,
+            )
             continue
         out.append(
             Filing(
@@ -773,6 +815,7 @@ __all__ = [
     "AsyncEdgarClient",
     "EdgarClient",
     "EdgarConfigError",
+    "EdgarEmptyResponseError",
     "EdgarRateLimited",
     "EdgarServerError",
     "FetchResult",

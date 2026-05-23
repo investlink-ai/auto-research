@@ -58,12 +58,16 @@ jobs:
         run: uv sync --all-extras
 
       - name: Live smoke
+        id: smoke
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: make live-smoke
 
-      - name: Open issue on failure
-        if: failure()
+      # Gated on the smoke step's outcome specifically — infra flakes
+      # (checkout / uv install / pip mirror outage) shouldn't open a
+      # `Live smoke failed` issue blaming SEC drift.
+      - name: Open issue on smoke failure
+        if: steps.smoke.outcome == 'failure'
         uses: actions/github-script@v7
         with:
           script: |

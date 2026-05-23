@@ -29,10 +29,25 @@ This conftest:
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
+
+# Token-aware opt-in check: `live` must appear as a standalone token AND
+# not be negated. Substring matching (`"live" in markexpr`) false-positives
+# on `not live`, `alive`, `livedb`, etc. — see code review pass on PR #37.
+_LIVE_TOKEN = re.compile(r"\blive\b")
+_NOT_LIVE = re.compile(r"\bnot\s+live\b")
+
+
+def _is_live_opt_in(markexpr: str) -> bool:
+    if not markexpr:
+        return False
+    if not _LIVE_TOKEN.search(markexpr):
+        return False
+    return not _NOT_LIVE.search(markexpr)
 
 
 def _is_live_item(item: pytest.Item) -> bool:
@@ -61,7 +76,7 @@ def pytest_collection_modifyitems(
         return
 
     markexpr = config.getoption("markexpr", default="") or ""
-    explicit_opt_in = "live" in markexpr
+    explicit_opt_in = _is_live_opt_in(markexpr)
 
     for item in live_items:
         item.add_marker(pytest.mark.live)

@@ -235,6 +235,13 @@ def test_same_status_duplicates_still_dedup(tmp_path: Path) -> None:
     assert table.column("content_sha256").to_pylist() == ["a" * 64]
 
 
+def test_unique_keys_empty_raises_value_error(tmp_path: Path) -> None:
+    """Empty unique_keys is a silent-disable footgun; reject explicitly."""
+    path = tmp_path / "m.parquet"
+    with pytest.raises(ValueError, match="must be a non-empty sequence or None"):
+        manifest.append(path, [_row(doc_id="X")], unique_keys=())
+
+
 def test_unique_keys_typo_raises_value_error(tmp_path: Path) -> None:
     """Asymmetric failure mode caught up-front: typo'd unique_keys raises immediately.
 

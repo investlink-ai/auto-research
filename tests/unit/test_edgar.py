@@ -798,11 +798,15 @@ def test_empty_response_body_raises_retryable(monkeypatch: pytest.MonkeyPatch, t
 def test_async_io_dispatched_via_to_thread(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Sync I/O in the async path must run via asyncio.to_thread, not the loop.
+    """Sync I/O in the async path runs via asyncio.to_thread AND outcomes are correct.
 
-    Smoke check: asyncio.to_thread is called at least once during a
-    fan-out. If a future refactor reverts to inline sync I/O, this
-    test catches it.
+    Asserts both:
+    - `_atomic_write_bytes` and `manifest.append` were dispatched to
+      `asyncio.to_thread` (not invoked synchronously on the loop).
+    - The files landed on disk with the expected bytes and the
+      manifest reflects every successful fetch. A regression that
+      passes the right function with wrong args would fail outcome
+      assertions even if the dispatch assertion passed.
     """
     monkeypatch.setenv("SEC_USER_AGENT", "Test test@example.com")
     submissions = _submissions_payload(
@@ -811,7 +815,7 @@ def test_async_io_dispatched_via_to_thread(
         primary_docs=["a.htm", "b.htm"],
         acceptance_dts=["2024-02-21T16:31:00Z"] * 2,
     )
-    docs = {"a.htm": b"A", "b.htm": b"B"}
+    docs = {"a.htm": b"A-body", "b.htm": b"B-body"}
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -846,12 +850,88 @@ def test_async_io_dispatched_via_to_thread(
             await client.aclose()
 
     asyncio.run(runner())
-    # _atomic_write_bytes is dispatched per filing; manifest.append once at the end.
-    assert edgar._atomic_write_bytes in to_thread_calls
-    # manifest.append also offloaded
+
+    # Dispatch assertions: both sync-IO entrypoints went through to_thread.
     from auto_research.ingest import manifest as manifest_mod
 
+    assert edgar._atomic_write_bytes in to_thread_calls
     assert manifest_mod.append in to_thread_calls
+
+    # Outcome assertions: the threaded calls actually did the right thing.
+    cik_dir = tmp_path / "raw" / "edgar" / NVDA_CIK_PADDED / "2024"
+    assert (cik_dir / "A.htm").read_bytes() == b"A-body"
+    assert (cik_dir / "B.htm").read_bytes() == b"B-body"
+    table = manifest.read(tmp_path / "manifest.parquet")
+    assert set(table.column("doc_id").to_pylist()) == {"A", "B"}
+
+
+def test_edgar_empty_response_error_is_exported() -> None:
+    """EdgarEmptyResponseError must be in __all__ alongside the other typed errors."""
+    assert "EdgarEmptyResponseError" in edgar.__all__
+
+
+def test_afetch_finally_flush_failure_doesnt_swallow_gather_exceptions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If manifest.append in the finally raises, the gather's per-filing
+    exceptions must still surface — folded into the same BaseExceptionGroup.
+
+    Regression: previously a flush error replaced the pending exceptions
+    list and the caller never learned about the per-filing failures.
+    """
+    monkeypatch.setenv("SEC_USER_AGENT", "Test test@example.com")
+    submissions = _submissions_payload(
+        accessions=["A1", "A2"],
+        forms=["10-K", "10-K"],
+        primary_docs=["good.htm", "BOOM.htm"],
+        acceptance_dts=["2024-02-21T16:31:00Z"] * 2,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "submissions" in url:
+            return httpx.Response(200, json=submissions)
+        if url.endswith("good.htm"):
+            return httpx.Response(200, content=b"A")
+        return httpx.Response(500, text="boom")
+
+    # Make manifest.append (called via to_thread in the finally) raise.
+    from auto_research.ingest import manifest as manifest_mod
+
+    real_append = manifest_mod.append
+
+    def flaky_append(*args: object, **kwargs: object) -> None:
+        raise OSError("simulated disk-full at flush time")
+
+    monkeypatch.setattr(manifest_mod, "append", flaky_append)
+    captured: list[BaseException] = []
+
+    async def runner() -> None:
+        client = edgar.AsyncEdgarClient(
+            transport=httpx.MockTransport(handler),
+            rate_limiter=_fast_limiter(),
+            max_attempts=2,
+        )
+        try:
+            try:
+                await edgar.afetch_filings_for_cik(
+                    NVDA_CIK,
+                    client=client,
+                    raw_root=tmp_path / "raw",
+                    manifest_path=tmp_path / "manifest.parquet",
+                    form_types=("10-K",),
+                    concurrency=2,
+                )
+            except BaseExceptionGroup as eg:
+                captured.extend(eg.exceptions)
+        finally:
+            await client.aclose()
+            monkeypatch.setattr(manifest_mod, "append", real_append)
+
+    asyncio.run(runner())
+    # Must surface BOTH the per-filing 5xx AND the flush OSError.
+    assert any(isinstance(e, edgar.EdgarServerError) for e in captured)
+    assert any(isinstance(e, OSError) and "simulated disk-full" in str(e) for e in captured)
 
 
 def test_atomic_write_bytes_cleans_tmp_on_failure(

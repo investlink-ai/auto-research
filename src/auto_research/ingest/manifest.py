@@ -25,8 +25,10 @@ single-machine fan-out is the supported workload.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import os
+import threading
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -51,11 +53,18 @@ SCHEMA: pa.Schema = pa.schema(
 )
 
 DEFAULT_OK_STATUSES: tuple[str, ...] = ("ok",)
-# Dedup key includes `status` so a later successful row can be appended after
-# a prior error/quarantine row for the same `(source, doc_id)`. Otherwise
-# `existing_doc_ids(status=("ok",))` would report the slot empty (caller
-# proceeds to fetch) while `append`'s lock-time dedup would silently drop
-# the new ok-row against the old error-row — a permanent retry trap.
+# Dedup key includes `status` so future writers (FMP no_coverage rows;
+# extract quarantine workflows per INV-2) can record an error row and
+# then, on a successful retry, append a new ok row WITHOUT the retry's ok
+# row being silently dropped by lock-time dedup against the prior error
+# row. The EDGAR client today only writes status='ok'; this is the
+# forward-looking shape for the source-shared manifest.
+#
+# Status DEMOTION (ok → quarantined) is not supported by simple `append`:
+# both rows coexist and `existing_doc_ids(status=("ok",))` keeps reporting
+# the doc as cached against the original ok row. Quarantine workflows
+# that need to invalidate a previously-ok row must do an explicit
+# manifest rewrite, not just an append.
 DEFAULT_UNIQUE_KEYS: tuple[str, ...] = ("source", "doc_id", "status")
 
 
@@ -130,6 +139,14 @@ def append(
     if not rows:
         return
     if unique_keys is not None:
+        # Reject empty sequence explicitly — it silently disables dedup
+        # (same observable effect as `None`) and is almost always an
+        # unintentional config bug (e.g., `tuple(filter(...))` returning empty).
+        if not unique_keys:
+            raise ValueError(
+                "unique_keys must be a non-empty sequence or None; "
+                "got empty sequence which would silently disable dedup"
+            )
         unknown = [k for k in unique_keys if k not in SCHEMA.names]
         if unknown:
             raise ValueError(
@@ -154,15 +171,18 @@ def append(
         combined = (
             pa.concat_tables([existing, new_table]) if existing.num_rows > 0 else new_table
         )
-        tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+        tmp = path.parent / f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
         try:
             pq.write_table(combined, tmp)
             _fsync_path(tmp)
             os.replace(tmp, path)
         except BaseException:
-            # tmp may or may not exist; unlink defensively. If os.replace
-            # already succeeded, the tmp name no longer resolves.
-            tmp.unlink(missing_ok=True)
+            # Cleanup must NOT mask the original exception. unlink can itself
+            # raise (PermissionError on read-only fs, EIO on a dying disk,
+            # EBUSY) — swallow OSError from the cleanup and re-raise the
+            # original write/fsync/replace failure with full fidelity.
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
             raise
         # Re-fsync the parent dir to persist the rename itself.
         dir_fd = os.open(path.parent, os.O_RDONLY)
