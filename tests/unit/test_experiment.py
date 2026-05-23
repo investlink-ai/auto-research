@@ -23,16 +23,33 @@ def isolated_mlruns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return mlruns
 
 
-def test_configured_tracking_uri_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MLFLOW_TRACKING_URI", "file:/some/path")
-    assert configured_tracking_uri() == "file:/some/path"
-
-
-def test_configured_tracking_uri_defaults_when_unset(
+def test_configured_tracking_uri_passes_absolute_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "file:/some/abs/path")
+    assert configured_tracking_uri() == "file:/some/abs/path"
+
+
+def test_configured_tracking_uri_resolves_relative_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default `file:./mlruns` resolves to an absolute file URI.
+
+    Defends against the worktree-vs-main-checkout data fragmentation
+    failure mode (different CWDs → different mlruns/ dirs silently).
+    """
     monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
-    assert configured_tracking_uri() == "file:./mlruns"
+    uri = configured_tracking_uri()
+    assert uri.startswith("file://")
+    assert uri.endswith("/mlruns")
+
+
+def test_configured_tracking_uri_passes_non_file_scheme(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sqlite/http URIs are untouched (only relative file: paths get resolved)."""
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
+    assert configured_tracking_uri() == "sqlite:///mlflow.db"
 
 
 def test_start_run_round_trips_param(isolated_mlruns: Path) -> None:

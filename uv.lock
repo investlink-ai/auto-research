@@ -235,7 +235,7 @@ source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
     { name = "langfuse" },
-    { name = "mlflow" },
+    { name = "mlflow-skinny" },
     { name = "traceloop-sdk" },
 ]
 
@@ -248,6 +248,7 @@ dev = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "mlflow" },
     { name = "pre-commit" },
 ]
 
@@ -255,7 +256,7 @@ dev = [
 requires-dist = [
     { name = "anthropic", specifier = ">=0.104.0" },
     { name = "langfuse", specifier = ">=2,<3" },
-    { name = "mlflow", specifier = ">=3.12.0" },
+    { name = "mlflow-skinny", specifier = ">=3.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.7" },
@@ -264,7 +265,10 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pre-commit", specifier = ">=4.6.0" }]
+dev = [
+    { name = "mlflow", specifier = ">=3.0" },
+    { name = "pre-commit", specifier = ">=4.6.0" },
+]
 
 [[package]]
 name = "backoff"
