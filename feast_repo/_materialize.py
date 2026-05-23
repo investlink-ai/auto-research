@@ -40,7 +40,9 @@ def materialize_price_features(events: pd.DataFrame) -> pd.DataFrame:
             f"datetime column; got dtype={events['event_datetime'].dtype!r}"
         )
     if events["event_datetime"].isna().any():
-        raise ValueError("materialize_price_features: event_datetime contains NaT")
+        # TypeError mirrors the per-row cutoff's NaT rejection; docs/DATA_MODEL.md
+        # §1.1 documents this contract — producer try/excepts catch one type.
+        raise TypeError("materialize_price_features: event_datetime contains NaT")
     out = events.copy()
     out["as_of_ts"] = out["event_datetime"].map(next_trading_day_cutoff)
     return out

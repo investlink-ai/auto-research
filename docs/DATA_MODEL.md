@@ -89,8 +89,8 @@ versioned.
 
 ## 3. FeatureViews
 
-Source location: `src/auto_research/feast_repo/feature_views.py`. All
-FeatureViews use file-based Parquet offline storage under `feast_repo/data/`.
+Source location: `feast_repo/feature_views.py`. All FeatureViews use
+file-based Parquet offline storage under `feast_repo/data/`.
 
 ### 3.1 `ten_k_features`
 
@@ -148,6 +148,13 @@ TTL: 60 days.
 | `adv_20d_usd` | Float | 20-day average dollar volume (for cost model) |
 
 TTL: unbounded (price history is forever-valid).
+
+PIT tie-break: the FileSource sets `created_timestamp_column="event_datetime"`
+so when multiple intraday events for one ticker collapse onto a single
+as_of_ts (the next session's close), Feast's PIT join keeps the row with
+the LATEST event_datetime — the most-recent intraday snapshot. Feast docs
+nominally describe this field as ingestion-time; we're using it as a
+same-day-recency tie-breaker, which is the correct PIT-conservative reading.
 
 ### 3.6 `signal_features`
 

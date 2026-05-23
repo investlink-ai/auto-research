@@ -21,55 +21,37 @@ See ``docs/DATA_MODEL.md`` §1 and ``AGENTS.md`` INV-1 for the contract.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import exchange_calendars as xcals
 import pandas as pd
 import pytest
 from hypothesis import given, settings
-from hypothesis import strategies as st
 
 from feast_repo._materialize import materialize_price_features
 from feast_repo._pit import next_trading_day_cutoff
-from tests.feast._pit_invariants import assert_pit_invariants
+from tests.feast._pit_invariants import assert_pit_invariants, event_datetimes_strategy
 
 _UTC = ZoneInfo("UTC")
 _ET = ZoneInfo("America/New_York")
 _NYSE_REGULAR_CLOSE_HOUR_ET = 16  # 4pm Eastern
-_NYSE = xcals.get_calendar("XNYS")
-
-# Wide range: covers pre/post-Juneteenth (added 2022), leap years, year
-# boundaries, NYSE holiday catalog, and DST transitions. Clamp the upper
-# bound with ~6 months of headroom against the calendar's last_session so
-# cal.date_to_session doesn't raise for events near Dec 31 (the calendar
-# rebuilds with each xcals release and may shrink, not just grow).
-_RANGE_START = datetime(2015, 1, 1)
-_CALENDAR_HEADROOM = timedelta(days=30 * 6)
-_RANGE_END = min(
-    datetime(2026, 12, 31, 23, 59, 59),
-    _NYSE.last_session.to_pydatetime() - _CALENDAR_HEADROOM,
-)
 
 
-def _event_datetimes() -> st.SearchStrategy[pd.Series]:
-    single = st.datetimes(
-        min_value=_RANGE_START,
-        max_value=_RANGE_END,
-        timezones=st.just(_UTC),
-    )
-    return st.lists(single, min_size=1, max_size=50).map(
-        lambda xs: pd.Series(pd.to_datetime(list(xs), utc=True), name="event_datetime")
-    )
-
-
-def _events_frame(events: pd.Series) -> pd.DataFrame:
+def _price_features_events_frame(events: pd.Series) -> pd.DataFrame:
+    """price_features-specific frame builder. Each FeatureView owns its own
+    builder; the shared `assert_pit_invariants` and `event_datetimes_strategy`
+    work across all of them.
+    """
     n = len(events)
     return pd.DataFrame(
         {
             "entity_id": ["NVDA"] * n,
-            "event_datetime": events.to_numpy(),
+            # Pass the Series directly (not .to_numpy()) so the column dtype
+            # stays DatetimeTZDtype even for n == 0 — otherwise the array
+            # round-trip degrades to object and the materializer's tz check
+            # fires for the wrong reason if min_size is ever relaxed.
+            "event_datetime": events.reset_index(drop=True),
             "close_adj": [0.0] * n,
             "returns_1d": [0.0] * n,
             "returns_5d": [0.0] * n,
@@ -83,14 +65,14 @@ def _events_frame(events: pd.Series) -> pd.DataFrame:
 # ---- Structural PIT properties (independent of the function under test) ----
 
 
-@given(events=_event_datetimes())
+@given(events=event_datetimes_strategy())
 @settings(max_examples=200, deadline=None)
 def test_price_features_pit_invariants(events: pd.Series) -> None:
     """Hypothesis sweep: the five structural PIT invariants hold for every
     materialized row across a wide UTC date range. See
     :mod:`tests.feast._pit_invariants` for what's checked and why.
     """
-    assert_pit_invariants(materialize_price_features(_events_frame(events)))
+    assert_pit_invariants(materialize_price_features(_price_features_events_frame(events)))
 
 
 # ---- Boundary validation: producer cannot leak naive / NaT past the cutoff ----
@@ -139,6 +121,75 @@ def test_materialize_price_features_rejects_tz_naive_column() -> None:
     )
     with pytest.raises(TypeError, match="tz-aware"):
         materialize_price_features(frame)
+
+
+def test_materialize_price_features_rejects_nat_column() -> None:
+    """A NaT row in event_datetime should be rejected at the boundary with the
+    same typed error class as the per-row cutoff, so producer-side try/excepts
+    catch both paths. docs/DATA_MODEL.md §1.1 documents `TypeError`.
+    """
+    n = 2
+    ts_col = pd.to_datetime(["2024-06-04 10:00"], utc=True).append(
+        pd.DatetimeIndex([pd.NaT], tz="UTC")
+    )
+    frame = pd.DataFrame(
+        {
+            "entity_id": ["NVDA"] * n,
+            "event_datetime": ts_col,
+            **_zero_features(n),
+        }
+    )
+    with pytest.raises(TypeError, match="NaT"):
+        materialize_price_features(frame)
+
+
+def test_next_trading_day_cutoff_past_calendar_bound_reraises_typed() -> None:
+    """Events past the NYSE calendar's `last_session` should surface a typed
+    ValueError naming the calendar bound, not a cryptic xcals
+    `DateOutOfBounds` from eleven frames deep.
+    """
+    too_far = pd.Timestamp(datetime(2099, 1, 1, 10, 0, tzinfo=_ET)).tz_convert(_UTC)
+    with pytest.raises(ValueError, match="last_session"):
+        next_trading_day_cutoff(too_far)
+
+
+# ---- assert_pit_invariants preconditions (helper is intended for 3+ future FVs) ----
+
+
+def _aware_row() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "event_datetime": pd.to_datetime(["2024-06-04 10:00"], utc=True),
+            "as_of_ts": pd.to_datetime(["2024-06-05 20:00"], utc=True),
+        }
+    )
+
+
+def test_assert_pit_invariants_rejects_empty_frame() -> None:
+    empty = pd.DataFrame(
+        {
+            "event_datetime": pd.to_datetime([], utc=True),
+            "as_of_ts": pd.to_datetime([], utc=True),
+        }
+    )
+    with pytest.raises(AssertionError, match="empty"):
+        assert_pit_invariants(empty)
+
+
+def test_assert_pit_invariants_rejects_missing_columns() -> None:
+    only_event = pd.DataFrame(
+        {"event_datetime": pd.to_datetime(["2024-06-04 10:00"], utc=True)}
+    )
+    with pytest.raises(AssertionError, match="as_of_ts"):
+        assert_pit_invariants(only_event)
+
+
+def test_assert_pit_invariants_rejects_tz_naive_event_datetime() -> None:
+    frame = _aware_row().assign(
+        event_datetime=pd.to_datetime(["2024-06-04 10:00"])  # tz-naive on purpose
+    )
+    with pytest.raises(AssertionError, match="tz-aware"):
+        assert_pit_invariants(frame)
 
 
 # ---- Parquet round-trip: the actual production trigger of the naive bug ----

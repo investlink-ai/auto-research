@@ -14,16 +14,52 @@ See ``.claude/skills/pit-check/SKILL.md`` for why a self-comparison against
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
 import exchange_calendars as xcals
 import pandas as pd
+from hypothesis import strategies as st
 
 _NYSE = xcals.get_calendar("XNYS")
+_UTC = ZoneInfo("UTC")
+
+# Wide range: covers pre/post-Juneteenth (added 2022), leap years, year
+# boundaries, NYSE holiday catalog, and DST transitions. Clamp the upper
+# bound with ~6 months of headroom against the calendar's last_session so
+# cal.date_to_session doesn't raise for events near the bound (the calendar
+# rebuilds with each xcals release and may shrink). Force-strip tz on
+# last_session — current xcals returns naive but minor versions have
+# fluctuated; min() of mixed-tz datetimes raises at module import time.
+_RANGE_START: datetime = datetime(2015, 1, 1)
+_CALENDAR_HEADROOM = timedelta(days=30 * 6)
+_RANGE_END: datetime = min(
+    datetime(2026, 12, 31, 23, 59, 59),
+    _NYSE.last_session.to_pydatetime().replace(tzinfo=None) - _CALENDAR_HEADROOM,
+)
+
+
+def event_datetimes_strategy() -> st.SearchStrategy[pd.Series]:
+    """Hypothesis strategy generating non-empty tz-aware UTC event_datetime
+    Series for FeatureView property tests. Range is clamped against the
+    NYSE calendar's last_session so cutoffs never fall past the bound.
+    """
+    single = st.datetimes(
+        min_value=_RANGE_START,
+        max_value=_RANGE_END,
+        timezones=st.just(_UTC),
+    )
+    return st.lists(single, min_size=1, max_size=50).map(
+        lambda xs: pd.Series(pd.to_datetime(list(xs), utc=True), name="event_datetime")
+    )
 
 
 def assert_pit_invariants(df: pd.DataFrame) -> None:
     """Assert the five structural PIT invariants on a materialized frame.
 
-    ``df`` must contain tz-aware ``event_datetime`` and ``as_of_ts`` columns.
+    ``df`` must be non-empty and contain tz-aware ``event_datetime`` and
+    ``as_of_ts`` columns. Preconditions surface as named ``AssertionError``s
+    rather than cryptic pandas/xcals errors from inside the loop.
 
     The five properties (each independently sufficient to catch a class of
     regression):
@@ -38,6 +74,16 @@ def assert_pit_invariants(df: pd.DataFrame) -> None:
        NYSE-local date (catches regressions that skip 2+ sessions, which 1-4
        all allow).
     """
+    # Preconditions — surface bad inputs with named errors instead of
+    # cryptic KeyError / TypeError ('Cannot compare tz-naive...') from the loop.
+    assert len(df) > 0, "assert_pit_invariants: empty materialized frame (no rows)"
+    missing = {"event_datetime", "as_of_ts"} - set(df.columns)
+    assert not missing, f"assert_pit_invariants: missing columns: {sorted(missing)}"
+    for col in ("event_datetime", "as_of_ts"):
+        assert isinstance(df[col].dtype, pd.DatetimeTZDtype), (
+            f"assert_pit_invariants: {col!r} must be tz-aware "
+            f"(got dtype={df[col].dtype!r})"
+        )
     for event, as_of in zip(
         df["event_datetime"].to_list(), df["as_of_ts"].to_list(), strict=True
     ):

@@ -10,15 +10,12 @@ See ``docs/DATA_MODEL.md`` §1 for the contract.
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 import exchange_calendars as xcals
 import pandas as pd
 
-
-@lru_cache(maxsize=1)
-def _nyse() -> xcals.ExchangeCalendar:
-    return xcals.get_calendar("XNYS")
+# Single module-level calendar instance. exchange_calendars already memoises
+# get_calendar internally, so an extra lru_cache here would be redundant.
+_NYSE = xcals.get_calendar("XNYS")
 
 
 def next_trading_day_cutoff(t: pd.Timestamp) -> pd.Timestamp:
@@ -41,7 +38,6 @@ def next_trading_day_cutoff(t: pd.Timestamp) -> pd.Timestamp:
     """
     if pd.isna(t):
         raise TypeError("next_trading_day_cutoff: event_datetime is NaT (missing)")
-    cal = _nyse()
     ts = pd.Timestamp(t)  # naive ok: validator below rejects if tz-naive
     if ts.tzinfo is None:
         raise TypeError(
@@ -51,9 +47,17 @@ def next_trading_day_cutoff(t: pd.Timestamp) -> pd.Timestamp:
         )
     # Compute the NYSE-local date so a 2am UTC event on Jan 2 isn't bucketed
     # into Jan 1 ET (and vice versa during DST gaps).
-    et_date = ts.tz_convert(cal.tz).date()
+    et_date = ts.tz_convert(_NYSE.tz).date()
     # The session strictly after t's date.
     next_day = pd.Timestamp(et_date) + pd.Timedelta(days=1)  # naive ok: date arithmetic
-    next_session = cal.date_to_session(next_day.date().isoformat(), direction="next")
-    close = cal.session_close(next_session)
+    try:
+        next_session = _NYSE.date_to_session(next_day.date().isoformat(), direction="next")
+    except xcals.errors.DateOutOfBounds as exc:
+        raise ValueError(
+            f"next_trading_day_cutoff: event_datetime {ts.isoformat()} maps to a "
+            f"next-session date past the NYSE calendar last_session "
+            f"({_NYSE.last_session.date().isoformat()}); upgrade exchange_calendars "
+            f"or clamp the input"
+        ) from exc
+    close = _NYSE.session_close(next_session)
     return pd.Timestamp(close).tz_convert("UTC")

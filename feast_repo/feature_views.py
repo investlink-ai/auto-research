@@ -11,34 +11,41 @@ from __future__ import annotations
 
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from feast import FeatureView, Field, FileSource
 from feast.types import Float64
 
-if TYPE_CHECKING:
-    # Mypy resolves the symbol via the package path so a rename in
-    # entities.py is caught at typecheck time, not as a runtime crash inside
-    # the `feast apply` subprocess.
+# Cross-file imports inside feast_repo/ need to work in TWO contexts:
+#   * Project-root Python (mypy, pytest, programmatic FeatureStore.apply)
+#     where `feast_repo` is a package and the absolute import resolves.
+#   * `feast apply` CLI, which chdir's into feast_repo/ and puts it (not its
+#     parent) on sys.path, leaving only the bare module name resolvable.
+# Try the package path first so mypy can verify the symbol; fall back to the
+# bare-name import at apply time. If `entities.py` is renamed/removed the
+# package-path branch fails at typecheck (mypy strict) AND at runtime — the
+# fallback only kicks in for the apply-time chdir context, where neither
+# import works if the symbol is wrong.
+try:
     from feast_repo.entities import entity_id
-else:
-    # `feast apply` chdir's into this directory and puts it (not its parent)
-    # on sys.path, so cross-module imports inside feast_repo/ use the
-    # no-prefix Feast tutorial convention.
-    from entities import entity_id
+except ModuleNotFoundError:  # pragma: no cover - exercised by `feast apply` only
+    from entities import entity_id  # type: ignore[no-redef,import-not-found]
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"
 
-# created_timestamp_column is omitted: Feast treats it as the row's
-# ingestion/write time used as a tie-breaker (conventionally >= timestamp_field),
-# and event_datetime is the underlying real-world event time (<= as_of_ts) — the
-# opposite semantic. The materializer emits one row per (entity_id, event_datetime),
-# so there's no tie-breaker need today; if late-arrivals appear later, add a
-# true ingest timestamp then.
+# created_timestamp_column wired to event_datetime: Feast's PIT join uses this
+# as the tie-breaker when multiple rows share the same (entity_id, as_of_ts).
+# Under the lag-1 cutoff, ALL intraday events for one ticker on one ET
+# trading day collapse onto a single as_of_ts (the next session's close), so
+# without a tie-breaker the served row is non-deterministic. Using
+# event_datetime means Feast picks the LATEST intraday snapshot (ORDER BY
+# created_timestamp DESC, keep first) — the correct PIT-conservative reading.
+# Feast docs nominally describe this field as ingestion-time; we're using it
+# as a same-day-recency tie-breaker. Documented in docs/DATA_MODEL.md §3.5.
 price_features_source = FileSource(
     name="price_features_source",
     path=str(_DATA_DIR / "price_features.parquet"),
     timestamp_field="as_of_ts",
+    created_timestamp_column="event_datetime",
 )
 
 # ttl=timedelta(0) is Feast's documented sentinel for "unbounded retention" —

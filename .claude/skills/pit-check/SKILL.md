@@ -114,19 +114,29 @@ The property test must use the shared structural-invariant helper, NOT
 re-compare `materialize_my_view(events)["as_of_ts"]` to
 `events.map(next_trading_day_cutoff)` — that pattern is tautological
 (both sides shift identically under any regression in the cutoff function).
-Correct shape:
+Each FeatureView owns its own per-view frame builder; the strategy and
+assertion helper are shared:
 
 ```python
-from tests.feast._pit_invariants import assert_pit_invariants
+from tests.feast._pit_invariants import assert_pit_invariants, event_datetimes_strategy
+
+def _ten_k_events_frame(events):
+    """ten_k_features-specific frame builder; constructs the columns this
+    FeatureView's materializer expects (entity_id, event_datetime, plus the
+    six TenKFeatures fields). See tests/feast/test_pit_properties.py for
+    the price_features analog."""
+    ...
 
 @given(events=event_datetimes_strategy())
-def test_my_view_pit_invariants(events):
-    assert_pit_invariants(materialize_my_view(_events_frame(events)))
+def test_ten_k_features_pit_invariants(events):
+    assert_pit_invariants(materialize_ten_k_features(_ten_k_events_frame(events)))
 ```
 
 The helper checks five structural properties via `exchange_calendars`
 directly (different code path from the impl), so a regression in
 `next_trading_day_cutoff` itself surfaces as a property failure.
+`event_datetimes_strategy()` is calendar-clamped (against the NYSE
+last_session) so cutoffs never fall past the calendar bound.
 
 **5. Grep for naive-timestamp producers writing to Feast.** Tz-naive
 `event_datetime` columns are silently re-interpreted as UTC by downstream
@@ -134,29 +144,41 @@ code and produce one-trading-day-too-early cutoffs for any ET-centric
 producer:
 
 ```bash
-rg -nP 'pd\.(Timestamp|to_datetime)\(' \
+rg -nP '(?:^|[^.\w])(?:pd|pandas)\.(?:Timestamp|to_datetime)\(' \
    feast_repo/ src/auto_research/ingest/ src/auto_research/extract/ \
-   --type py | rg -v 'utc=True|tz=|tz_localize|tz_convert|# naive ok:'
+   src/auto_research/signals/ src/auto_research/backtest/ \
+   --type py 2>/dev/null \
+   | rg -v "utc=True|tz=['\"]\w|tz_localize|tz_convert|Z['\"]\)|# naive ok:"
 ```
 
-Every match must either pass `utc=True`, chain `.tz_localize(...)` /
-`.tz_convert(...)`, or carry an explicit `# naive ok:` comment justifying
-why the producer's naive convention is correct here (e.g. test fixture
-that exercises the rejection path).
+(Path list is best-effort; some dirs may not exist yet — the `2>/dev/null`
+swallows that. Extend the list when new producer paths land.)
+Every match must either: pass `utc=True`; chain `.tz_localize(...)` /
+`.tz_convert(...)`; pass a quoted timezone name via `tz="..."`; use an
+ISO-8601 `Z` suffix (`pd.Timestamp("...Z")`); or carry an explicit
+`# naive ok:` comment justifying why the producer's naive convention is
+correct here. Note the allowlist explicitly excludes `tz=None` (a naive
+producer) — only quoted-name `tz="UTC"` style passes.
 
-**6. Grep for tautological PIT property tests.** Any `tests/feast/*`
-file that calls `next_trading_day_cutoff` on both sides of a comparison
-is the failure mode that almost shipped on PR #38 (the property reduces
-to `events.map(f) == events.map(f)`, true regardless of `f`):
+**6. Grep for tautological PIT property tests.** The failure mode that
+almost shipped on PR #38 was a property test that computed both sides
+of its equality with the same function — `events.map(next_trading_day_cutoff)`
+vs `materialize_my_view(events)["as_of_ts"]` (which the materializer also
+populates via `.map(next_trading_day_cutoff)`). The property reduces to
+`events.map(f) == events.map(f)`, true regardless of `f`. Catch the
+canonical shape:
 
 ```bash
-rg -nP 'next_trading_day_cutoff.*next_trading_day_cutoff' tests/feast/ \
-   --multiline-dotall
+rg -nP '\.(map|apply)\(next_trading_day_cutoff\b' tests/feast/
 ```
 
-Zero hits expected. Property tests should call only `assert_pit_invariants`
-(structural assertions via `exchange_calendars`) plus explicit-anchor
-parametrized cases.
+Zero hits expected. (Property tests inside `materialize_*` and inside
+`assert_pit_invariants` itself ARE allowed to call `.map(cutoff)` — but
+not in *test* files, since tests must verify the function from a path
+independent of the function under test.) For the broader anti-pattern
+("two unrelated calls compared"), trust the structural-assertions checklist
+(grep #4 + assert_pit_invariants) — a parser-level check is the only way
+to do this reliably and it's not worth the false-positive cost.
 
 ## Pre-submit checklist
 

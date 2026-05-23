@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -25,10 +26,21 @@ from feast_repo._materialize import PRICE_FEATURE_COLUMNS, materialize_price_fea
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _FEAST_REPO_SRC = _REPO_ROOT / "feast_repo"
-# shutil.which is portable across venv layouts and OSes (resolves to
-# `feast.exe` on Windows). Falls back to a venv-bin guess only if PATH
-# lookup fails — the test skips cleanly in that case.
-_FEAST_BIN = shutil.which("feast")
+
+
+def _resolve_feast_bin() -> str | None:
+    """Resolve the feast CLI: prefer the venv's binary (guarantees the
+    project-pinned version), fall back to PATH for non-venv pytest runs.
+    Cross-platform (handles `feast.exe` on Windows).
+    """
+    bin_name = "feast.exe" if sys.platform == "win32" else "feast"
+    venv_bin = Path(sys.executable).parent / bin_name
+    if venv_bin.is_file():
+        return str(venv_bin)
+    return shutil.which("feast")
+
+
+_FEAST_BIN = _resolve_feast_bin()
 
 # Synthetic universe of 3 tickers x 30 wall-calendar days starting 2024-01-02
 # (so 30 event_datetimes spanning ~22 NYSE sessions plus weekends/MLK Day).
@@ -126,3 +138,34 @@ def test_materialized_parquet_carries_pit_columns(feast_workspace: Path) -> None
     # PIT invariant on the materialized parquet: as_of_ts > event_datetime for every row.
     assert (df["as_of_ts"] > df["event_datetime"]).all()
     assert len(df) == len(_TICKERS) * 30
+
+
+def test_price_features_source_has_pit_tiebreaker(feast_workspace: Path) -> None:
+    """Intraday events on the same NYSE trading day collapse to identical
+    (entity_id, as_of_ts) under the lag-1 cutoff, so Feast's PIT join needs
+    a tie-breaker to be deterministic. We use event_datetime as the
+    tie-breaker — the later intraday snapshot wins, which is the correct
+    PIT-conservative reading.
+    """
+    result = _run_feast_apply(feast_workspace)
+    assert result.returncode == 0, (
+        f"feast apply failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    from feast import FeatureStore
+
+    fs = FeatureStore(repo_path=str(feast_workspace))
+    fv = fs.get_feature_view("price_features")
+    source = fv.batch_source
+    assert source is not None
+    assert source.created_timestamp_column == "event_datetime"
+
+
+def test_feature_views_importable_via_package_path() -> None:
+    """`from feast_repo.feature_views import price_features` must work from
+    the project root, not just under `feast apply`'s chdir context — future
+    programmatic FeatureStore.apply, unit tests that introspect the FV
+    object, and tooling all rely on this canonical import path.
+    """
+    from feast_repo.feature_views import price_features
+
+    assert price_features.name == "price_features"
