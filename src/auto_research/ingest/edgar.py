@@ -24,8 +24,8 @@ User-Agent required) is honored at every request:
   backoff + jitter. Retry-After is honored *via tenacity's wait
   callback* (not double-slept by `_do_request`), and supports both
   delta-seconds and HTTP-date forms (RFC 7231 §7.1.3). The wait is
-  clamped to `_MAX_RETRY_AFTER_SECONDS` so a runaway upstream can't
-  pin a worker for an unbounded interval.
+  clamped to `_http.MAX_RETRY_AFTER_SECONDS` so a runaway upstream
+  can't pin a worker for an unbounded interval.
 - Both a sync `EdgarClient` and an `AsyncEdgarClient` are provided;
   they share the same `TokenBucket` instance when both are used in
   the same process (SEC throttles per-IP).
@@ -48,16 +48,13 @@ pool.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import logging
 import os
 import re
-import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Final
 from zoneinfo import ZoneInfo
@@ -65,29 +62,22 @@ from zoneinfo import ZoneInfo
 import httpx
 from tenacity import (
     AsyncRetrying,
-    RetryCallState,
     Retrying,
     retry_if_exception_type,
     stop_after_attempt,
-    wait_exponential_jitter,
 )
 
-from auto_research.ingest import manifest
+from auto_research.ingest import _http, manifest
 from auto_research.ingest.rate_limit import TokenBucket, sec_rate_limiter
 
 DEFAULT_FORM_TYPES: tuple[str, ...] = ("10-K", "10-Q", "8-K", "S-1", "S-3")
 SOURCE: str = "edgar"
+SOURCE_LABEL: Final = "SEC"
 
 _SUBMISSIONS_BASE = "https://data.sec.gov"
 _ARCHIVES_BASE = "https://www.sec.gov"
 _ET = ZoneInfo("America/New_York")  # SEC documents naive timestamps as Eastern
 
-_DEFAULT_MAX_ATTEMPTS: Final = 5
-_DEFAULT_INITIAL_BACKOFF: Final = 1.0
-_DEFAULT_MAX_BACKOFF: Final = 30.0
-# Clamp Retry-After so a runaway upstream can't deadlock a worker. SEC's
-# observed Retry-After is single-digit seconds; 300s is a generous cap.
-_MAX_RETRY_AFTER_SECONDS: Final = 300.0
 # Async fan-out concurrency default. Matches the rate limit (8 r/s) so the
 # semaphore isn't the bottleneck — see _one() comments. Adjust per-call if
 # the downstream HTTP latency profile changes.
@@ -103,46 +93,22 @@ class EdgarConfigError(RuntimeError):
     """`SEC_USER_AGENT` env var is missing or blank."""
 
 
-class EdgarRateLimited(httpx.HTTPStatusError):
-    """SEC returned 429. Carries the parsed `Retry-After` hint if present.
-
-    `retry_after` is the seconds-until-retry the server requested, or
-    None if absent / unparseable. The retry policy honors it via the
-    tenacity wait callback.
-    """
-
-    def __init__(self, response: httpx.Response, retry_after: float | None) -> None:
-        super().__init__("SEC rate-limited (429)", request=response.request, response=response)
-        self.retry_after = retry_after
+class EdgarRateLimited(_http.RateLimited):
+    """SEC returned 429. See `_http.RateLimited` for the carried `retry_after`."""
 
 
-class EdgarServerError(httpx.HTTPStatusError):
+class EdgarServerError(_http.ServerError):
     """SEC returned a 5xx — transient by assumption, eligible for retry."""
 
 
-class EdgarEmptyResponseError(httpx.HTTPStatusError):
-    """200 OK with zero-byte body — almost always a transient CDN /
-    propagation issue. Retry-eligible so a brief edge inconsistency
-    doesn't poison the manifest with a sha256-of-empty cache hit.
-    """
+class EdgarEmptyResponseError(_http.EmptyResponseError):
+    """SEC returned 200 with empty body — retried per `_http.EmptyResponseError`."""
 
 
-# Network errors that warrant a retry. ReadError/WriteError covers connection
-# resets; ConnectError covers DNS / TCP problems; TimeoutException covers
-# all of httpx's timeout subclasses.
-_TRANSIENT_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
-    httpx.ConnectError,
-    httpx.ReadError,
-    httpx.WriteError,
-    httpx.RemoteProtocolError,
-    httpx.TimeoutException,
-)
-
-_RETRYABLE: tuple[type[BaseException], ...] = (
-    *_TRANSIENT_NETWORK_ERRORS,
-    EdgarRateLimited,
-    EdgarServerError,
-    EdgarEmptyResponseError,
+_RETRYABLE = _http.retryable_exceptions(
+    rate_limited=EdgarRateLimited,
+    server_error=EdgarServerError,
+    empty_response=EdgarEmptyResponseError,
 )
 
 
@@ -197,134 +163,15 @@ def _resolve_user_agent(user_agent: str | None) -> str:
     return cleaned
 
 
-def _default_headers(user_agent: str) -> dict[str, str]:
-    return {
-        "User-Agent": user_agent,
-        "Accept-Encoding": "gzip, deflate",
-        "Accept": "application/json,text/html,application/xhtml+xml,*/*;q=0.8",
-    }
-
-
-def _parse_retry_after(value: str | None) -> float | None:
-    """Parse a Retry-After header value.
-
-    RFC 7231 §7.1.3 permits two forms: delta-seconds (e.g., `120`) or
-    HTTP-date (e.g., `Wed, 21 Oct 2026 07:28:00 GMT`). Returns the
-    seconds to wait, or None if the header is absent or unparseable.
-    Result is always clamped to `_MAX_RETRY_AFTER_SECONDS` before
-    being returned.
-    """
-    if value is None:
-        return None
-    stripped = value.strip()
-    if not stripped:
-        return None
-    # Try delta-seconds first.
-    try:
-        seconds = float(stripped)
-    except ValueError:
-        # Fall back to HTTP-date.
-        try:
-            target = parsedate_to_datetime(stripped)
-        except (TypeError, ValueError):
-            return None
-        if target is None:
-            return None
-        if target.tzinfo is None:
-            target = target.replace(tzinfo=UTC)
-        seconds = (target - datetime.now(UTC)).total_seconds()
-    return min(max(0.0, seconds), _MAX_RETRY_AFTER_SECONDS)
-
-
 def _classify_response(response: httpx.Response) -> None:
-    """Raise a typed retryable error on 429 / 5xx / empty 200; leave others alone.
-
-    Empty 200s are reclassified because a sha256-of-empty manifest row
-    would otherwise become a permanent cache hit on what's almost
-    always a transient CDN/propagation gap. Triggered for both
-    `data.sec.gov` (submissions JSON) and `www.sec.gov` (Archives) —
-    neither should ever legitimately serve a 0-byte body for the
-    endpoints this client hits.
-    """
-    if response.status_code == 429:
-        retry_after = _parse_retry_after(response.headers.get("Retry-After"))
-        raise EdgarRateLimited(response, retry_after)
-    if 500 <= response.status_code < 600:
-        raise EdgarServerError(
-            f"SEC returned {response.status_code}",
-            request=response.request,
-            response=response,
-        )
-    if response.status_code == 200 and not response.content:
-        raise EdgarEmptyResponseError(
-            f"SEC returned 200 with empty body for {response.request.url}",
-            request=response.request,
-            response=response,
-        )
-
-
-def _retry_wait(
-    *,
-    initial: float = _DEFAULT_INITIAL_BACKOFF,
-    max_wait: float = _DEFAULT_MAX_BACKOFF,
-) -> Any:
-    """Tenacity wait callback that honors EdgarRateLimited.retry_after.
-
-    For a 429 with a server-provided Retry-After, waits at least that
-    long (clamped to `_MAX_RETRY_AFTER_SECONDS`). For any other
-    retryable failure, falls back to exponential jitter. This
-    eliminates the double-sleep that would otherwise occur if
-    `_do_request` slept for Retry-After and then tenacity slept again
-    for its exponential backoff.
-    """
-    fallback = wait_exponential_jitter(initial=initial, max=max_wait)
-
-    def wait(retry_state: RetryCallState) -> float:
-        base = float(fallback(retry_state))
-        outcome = retry_state.outcome
-        exc = outcome.exception() if outcome is not None else None
-        if isinstance(exc, EdgarRateLimited) and exc.retry_after is not None:
-            return max(exc.retry_after, base)
-        return base
-
-    return wait
-
-
-def _atomic_write_bytes(dest: Path, content: bytes) -> None:
-    """Write bytes to `dest` atomically and durably.
-
-    Mirrors `manifest.append`'s discipline: tmp file + fsync of both
-    the file and the parent directory before the rename, so a power
-    loss can't leave a 0-byte canonical file when the manifest row
-    is already durably committed. Tmp is removed on any failure
-    between `write_bytes` and `os.replace` to avoid leaking hidden
-    dotfiles into the destination directory.
-    """
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    # Tmp name namespaces by both PID and thread id so multiple worker
-    # threads under `asyncio.to_thread` writing to the same dest (e.g., a
-    # future deliberate-retry pattern) can't collide on the tmp filename.
-    tmp = dest.parent / f".{dest.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    try:
-        tmp.write_bytes(content)
-        fd = os.open(tmp, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(tmp, dest)
-    except BaseException:
-        # Cleanup must NOT mask the original exception. unlink can itself
-        # raise (PermissionError on read-only fs, EIO on a dying disk) —
-        # swallow OSError from cleanup and re-raise the original failure.
-        with contextlib.suppress(OSError):
-            tmp.unlink(missing_ok=True)
-        raise
-    dir_fd = os.open(dest.parent, os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+    """SEC-specific wrapper around `_http.classify_response`."""
+    _http.classify_response(
+        response,
+        rate_limited=EdgarRateLimited,
+        server_error=EdgarServerError,
+        empty_response=EdgarEmptyResponseError,
+        source_label=SOURCE_LABEL,
+    )
 
 
 class EdgarClient:
@@ -341,14 +188,14 @@ class EdgarClient:
         user_agent: str | None = None,
         timeout: float = 30.0,
         rate_limiter: TokenBucket | None = None,
-        max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+        max_attempts: int = _http.DEFAULT_MAX_ATTEMPTS,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         ua = _resolve_user_agent(user_agent)
         self.rate_limiter = rate_limiter or sec_rate_limiter()
         self._max_attempts = max_attempts
         self._client = httpx.Client(
-            headers=_default_headers(ua),
+            headers=_http.default_headers(user_agent=ua),
             timeout=timeout,
             transport=transport,
             follow_redirects=True,
@@ -380,7 +227,7 @@ class EdgarClient:
         """Rate-limited GET with retries on transient failures."""
         for attempt in Retrying(
             stop=stop_after_attempt(self._max_attempts),
-            wait=_retry_wait(),
+            wait=_http.make_retry_wait(),
             retry=retry_if_exception_type(_RETRYABLE),
             reraise=True,
         ):
@@ -414,7 +261,7 @@ class EdgarClient:
         content = resp.content
         sha = hashlib.sha256(content).hexdigest()
         dest = _destination_path(filing, raw_root)
-        _atomic_write_bytes(dest, content)
+        _http.atomic_write_bytes(dest, content)
         return dest, sha, content
 
 
@@ -438,14 +285,14 @@ class AsyncEdgarClient:
         user_agent: str | None = None,
         timeout: float = 30.0,
         rate_limiter: TokenBucket | None = None,
-        max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+        max_attempts: int = _http.DEFAULT_MAX_ATTEMPTS,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         ua = _resolve_user_agent(user_agent)
         self.rate_limiter = rate_limiter or sec_rate_limiter()
         self._max_attempts = max_attempts
         self._client = httpx.AsyncClient(
-            headers=_default_headers(ua),
+            headers=_http.default_headers(user_agent=ua),
             timeout=timeout,
             transport=transport,
             follow_redirects=True,
@@ -469,7 +316,7 @@ class AsyncEdgarClient:
     async def _get(self, url: str) -> httpx.Response:
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(self._max_attempts),
-            wait=_retry_wait(),
+            wait=_http.make_retry_wait(),
             retry=retry_if_exception_type(_RETRYABLE),
             reraise=True,
         ):
@@ -504,7 +351,7 @@ class AsyncEdgarClient:
         content = resp.content
         sha = hashlib.sha256(content).hexdigest()
         dest = _destination_path(filing, raw_root)
-        await asyncio.to_thread(_atomic_write_bytes, dest, content)
+        await asyncio.to_thread(_http.atomic_write_bytes, dest, content)
         return dest, sha, content
 
 

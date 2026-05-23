@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -579,32 +578,6 @@ def test_parse_recent_skips_empty_accession(monkeypatch: pytest.MonkeyPatch, tmp
     assert [r.accession_number for r in results] == ["0001045810-24-000200"]
 
 
-def test_parse_retry_after_delta_seconds() -> None:
-    assert edgar._parse_retry_after("30") == 30.0
-    assert edgar._parse_retry_after("  120  ") == 120.0
-    assert edgar._parse_retry_after(None) is None
-    assert edgar._parse_retry_after("") is None
-
-
-def test_parse_retry_after_http_date() -> None:
-    """RFC 7231 HTTP-date form parses to a positive delta-seconds value."""
-    # 2099-01-01 — well in the future, will be ~years from now.
-    parsed = edgar._parse_retry_after("Thu, 01 Jan 2099 00:00:00 GMT")
-    assert parsed is not None
-    assert parsed > 0
-    # Clamped at the upper bound.
-    assert parsed <= edgar._MAX_RETRY_AFTER_SECONDS
-
-
-def test_parse_retry_after_clamps_to_max() -> None:
-    """A runaway server value clamps to _MAX_RETRY_AFTER_SECONDS."""
-    assert edgar._parse_retry_after("999999") == edgar._MAX_RETRY_AFTER_SECONDS
-
-
-def test_parse_retry_after_garbage_returns_none() -> None:
-    assert edgar._parse_retry_after("not-a-thing") is None
-
-
 def test_429_does_not_double_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     """Retry-After is applied via tenacity wait, not inside _do_request.
 
@@ -801,8 +774,8 @@ def test_async_io_dispatched_via_to_thread(
     """Sync I/O in the async path runs via asyncio.to_thread AND outcomes are correct.
 
     Asserts both:
-    - `_atomic_write_bytes` and `manifest.append` were dispatched to
-      `asyncio.to_thread` (not invoked synchronously on the loop).
+    - `_http.atomic_write_bytes` and `manifest.append` were dispatched
+      to `asyncio.to_thread` (not invoked synchronously on the loop).
     - The files landed on disk with the expected bytes and the
       manifest reflects every successful fetch. A regression that
       passes the right function with wrong args would fail outcome
@@ -852,9 +825,10 @@ def test_async_io_dispatched_via_to_thread(
     asyncio.run(runner())
 
     # Dispatch assertions: both sync-IO entrypoints went through to_thread.
+    from auto_research.ingest import _http
     from auto_research.ingest import manifest as manifest_mod
 
-    assert edgar._atomic_write_bytes in to_thread_calls
+    assert _http.atomic_write_bytes in to_thread_calls
     assert manifest_mod.append in to_thread_calls
 
     # Outcome assertions: the threaded calls actually did the right thing.
@@ -934,20 +908,6 @@ def test_afetch_finally_flush_failure_doesnt_swallow_gather_exceptions(
     assert any(isinstance(e, OSError) and "simulated disk-full" in str(e) for e in captured)
 
 
-def test_atomic_write_bytes_cleans_tmp_on_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A fsync/replace error must not leak the hidden tmp file."""
-    dest = tmp_path / "subdir" / "x.htm"
-    import auto_research.ingest.edgar as edgar_mod
-
-    def boom_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
-        raise OSError("simulated disk-full")
-
-    monkeypatch.setattr(os, "replace", boom_replace)
-    with pytest.raises(OSError, match="simulated disk-full"):
-        edgar_mod._atomic_write_bytes(dest, b"hello")
-
-    # The tmp file (hidden, in dest.parent) must NOT exist after the failure.
-    leftovers = list(dest.parent.glob(".*.tmp"))
-    assert leftovers == [], f"tmp file leaked: {leftovers}"
+# `test_atomic_write_bytes_cleans_tmp_on_failure` moved to test_http.py
+# along with the helper itself when `_atomic_write_bytes` was extracted
+# from edgar.py into the shared `_http.py` module.
