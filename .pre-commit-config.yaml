@@ -1,0 +1,43 @@
+# Pre-commit hooks — fast mechanical checks before every commit.
+# Heavier checks (mypy, pytest) run via `make check` and CI.
+#
+# Install once per machine:
+#     uv run pre-commit install
+#
+# Run against all files (e.g., first time after install):
+#     uv run pre-commit run --all-files
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+        exclude: ^uv\.lock$  # lockfile is allowed to grow with deps
+      - id: detect-private-key  # catches PEM/OpenSSH only; LLM API keys
+        # use prefix detection in the local hook below
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.14  # keep in sync with pyproject.toml dev deps
+    hooks:
+      - id: ruff
+        args: ["--fix", "--exit-non-zero-on-fix"]
+
+  # Custom LLM-API-key detection — defends INV-7. detect-private-key
+  # only matches PEM/OpenSSH headers; LLM tokens have their own prefixes.
+  - repo: local
+    hooks:
+      - id: detect-llm-api-keys
+        name: detect LLM API keys (anthropic / langfuse)
+        entry: '(sk-ant-[A-Za-z0-9_-]{20,}|pk-lf-[a-f0-9-]{30,}|sk-lf-[a-f0-9-]{30,})'
+        language: pygrep
+        types: [text]
+        exclude: ^(\.env\.example|docs/.*\.md|tests/.*)$

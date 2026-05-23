@@ -9,7 +9,11 @@ license = { text = "MIT" }
 # Runtime dependencies are added per-issue as features land. See the
 # implementation plan; subsequent issues will `uv add` the packages
 # they introduce (anthropic, feast, langgraph, pydantic-ai, ...).
-dependencies = []
+dependencies = [
+    "anthropic>=0.104.0",
+    "langfuse>=2,<3",
+    "traceloop-sdk>=0.30",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -27,8 +31,10 @@ packages = ["src/auto_research"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--strict-markers"
 # Markers used to scope which tests run in CI vs locally. See Makefile
-# and .github/workflows/ci.yml.
+# and .github/workflows/ci.yml. Tests under tests/integration/ are
+# auto-marked via tests/integration/conftest.py.
 markers = [
     "eval: tests that hit external LLM/eval APIs (excluded from CI by default)",
     "integration: tests that hit external services (excluded from CI by default)",
@@ -61,4 +67,15 @@ warn_unused_configs = true
 warn_return_any = true
 warn_unused_ignores = true
 no_implicit_optional = true
-files = ["src/auto_research"]
+files = ["src/auto_research", "tests"]
+
+# Third-party libs without type stubs. Keep this list short; each entry
+# means we're trusting an untyped surface.
+[[tool.mypy.overrides]]
+module = "langfuse.*"
+ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.0",
+]
