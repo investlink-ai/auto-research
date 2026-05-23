@@ -115,6 +115,13 @@ class EdgarServerError(httpx.HTTPStatusError):
     """SEC returned a 5xx — transient by assumption, eligible for retry."""
 
 
+class EdgarEmptyResponseError(httpx.HTTPStatusError):
+    """200 OK with zero-byte body — almost always a transient CDN /
+    propagation issue. Retry-eligible so a brief edge inconsistency
+    doesn't poison the manifest with a sha256-of-empty cache hit.
+    """
+
+
 # Network errors that warrant a retry. ReadError/WriteError covers connection
 # resets; ConnectError covers DNS / TCP problems; TimeoutException covers
 # all of httpx's timeout subclasses.
@@ -130,6 +137,7 @@ _RETRYABLE: tuple[type[BaseException], ...] = (
     *_TRANSIENT_NETWORK_ERRORS,
     EdgarRateLimited,
     EdgarServerError,
+    EdgarEmptyResponseError,
 )
 
 
@@ -224,13 +232,27 @@ def _parse_retry_after(value: str | None) -> float | None:
 
 
 def _classify_response(response: httpx.Response) -> None:
-    """Raise a typed retryable error on 429/5xx; leave other status codes alone."""
+    """Raise a typed retryable error on 429 / 5xx / empty 200; leave others alone.
+
+    Empty 200s are reclassified because a sha256-of-empty manifest row
+    would otherwise become a permanent cache hit on what's almost
+    always a transient CDN/propagation gap. Triggered for both
+    `data.sec.gov` (submissions JSON) and `www.sec.gov` (Archives) —
+    neither should ever legitimately serve a 0-byte body for the
+    endpoints this client hits.
+    """
     if response.status_code == 429:
         retry_after = _parse_retry_after(response.headers.get("Retry-After"))
         raise EdgarRateLimited(response, retry_after)
     if 500 <= response.status_code < 600:
         raise EdgarServerError(
             f"SEC returned {response.status_code}",
+            request=response.request,
+            response=response,
+        )
+    if response.status_code == 200 and not response.content:
+        raise EdgarEmptyResponseError(
+            f"SEC returned 200 with empty body for {response.request.url}",
             request=response.request,
             response=response,
         )
@@ -266,20 +288,26 @@ def _retry_wait(
 def _atomic_write_bytes(dest: Path, content: bytes) -> None:
     """Write bytes to `dest` atomically and durably.
 
-    Mirrors `manifest._fsync_path` discipline: tmp file + fsync of
-    both the file and the parent directory before the rename, so a
-    power loss can't leave a 0-byte canonical file when the manifest
-    row is already durably committed.
+    Mirrors `manifest.append`'s discipline: tmp file + fsync of both
+    the file and the parent directory before the rename, so a power
+    loss can't leave a 0-byte canonical file when the manifest row
+    is already durably committed. Tmp is removed on any failure
+    between `write_bytes` and `os.replace` to avoid leaking hidden
+    dotfiles into the destination directory.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.parent / f".{dest.name}.{os.getpid()}.tmp"
-    tmp.write_bytes(content)
-    fd = os.open(tmp, os.O_RDONLY)
     try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(tmp, dest)
+        tmp.write_bytes(content)
+        fd = os.open(tmp, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     dir_fd = os.open(dest.parent, os.O_RDONLY)
     try:
         os.fsync(dir_fd)
@@ -362,7 +390,12 @@ class EdgarClient:
         return _parse_recent(cik_padded, recent, form_types)
 
     def fetch_filing(self, filing: Filing, *, raw_root: Path) -> tuple[Path, str, bytes]:
-        """Download the filing's primary document. Atomic + durable on disk."""
+        """Download the filing's primary document. Atomic + durable on disk.
+
+        Empty-body 200s are retried automatically by `_get` (see
+        `_classify_response`); by the time this function sees the
+        response, the body is non-empty.
+        """
         url = _archives_url(filing)
         resp = self._get(url)
         resp.raise_for_status()
@@ -445,13 +478,21 @@ class AsyncEdgarClient:
         return _parse_recent(cik_padded, body["filings"]["recent"], form_types)
 
     async def fetch_filing(self, filing: Filing, *, raw_root: Path) -> tuple[Path, str, bytes]:
+        """Async counterpart to sync EdgarClient.fetch_filing.
+
+        The atomic write + fsync sequence is sync I/O, so we dispatch
+        it to a thread (`asyncio.to_thread`) to keep the event loop
+        responsive — otherwise a multi-MB filing's fsync would stall
+        every other coroutine on the same loop. Empty-body 200s are
+        retried automatically by `_get` (see `_classify_response`).
+        """
         url = _archives_url(filing)
         resp = await self._get(url)
         resp.raise_for_status()
         content = resp.content
         sha = hashlib.sha256(content).hexdigest()
         dest = _destination_path(filing, raw_root)
-        _atomic_write_bytes(dest, content)
+        await asyncio.to_thread(_atomic_write_bytes, dest, content)
         return dest, sha, content
 
 
@@ -527,18 +568,28 @@ async def afetch_filings_for_cik(
 ) -> list[FetchResult]:
     """Async fan-out variant. Fetches up to `concurrency` filings in parallel.
 
-    Uses `asyncio.gather(return_exceptions=True)` so siblings of a
-    failing coroutine still complete and persist their work before
-    the finally flush — without this, Python's gather (with the
-    default `return_exceptions=False`) propagates the first exception
-    immediately but lets siblings keep running as detached tasks,
-    whose `new_rows.append` calls would arrive after the manifest had
-    already been flushed and would be lost.
+    Uses `asyncio.gather(return_exceptions=True)` so the gather call
+    only returns after EVERY child coroutine has either appended its
+    row to `new_rows` or raised — which is the load-bearing property
+    that lets the `finally` flush capture all successful work. The
+    `return_exceptions` name suggests "swallow errors", but its real
+    value here is the await-all-children semantics; failures are
+    re-raised as a `BaseExceptionGroup` so callers see every failure
+    mode, not just the first.
+
+    Manifest append and the per-filing atomic-write are sync I/O,
+    so both are dispatched via `asyncio.to_thread` to keep the event
+    loop responsive during the (potentially hundreds of ms of)
+    `fcntl.flock` + `pq.write_table` + `os.fsync` work.
 
     The shared rate limiter still caps total throughput at SEC's
     8 r/s; the semaphore caps simultaneously in-flight downloads.
     `concurrency` defaults to match the rate limit so the semaphore
     isn't the bottleneck for typical HTTP latencies.
+
+    `asyncio.CancelledError` from any child or from outer cancellation
+    is re-raised immediately (preserving structured-concurrency
+    semantics), bypassing the group wrap.
     """
     if concurrency < 1:
         raise ValueError(f"concurrency must be >= 1, got {concurrency}")
@@ -587,19 +638,23 @@ async def afetch_filings_for_cik(
             )
             new_rows.append(_manifest_row(filing, path, sha, status="ok"))
 
-        first_exception: BaseException | None = None
+        exceptions: list[BaseException] = []
         try:
             results = await asyncio.gather(
                 *(_one(f) for f in deduped), return_exceptions=True
             )
-            for r in results:
-                if isinstance(r, BaseException) and first_exception is None:
-                    first_exception = r
+            exceptions = [r for r in results if isinstance(r, BaseException)]
         finally:
             if new_rows:
-                manifest.append(manifest_path, new_rows)
-        if first_exception is not None:
-            raise first_exception
+                await asyncio.to_thread(manifest.append, manifest_path, new_rows)
+        # Honor structured cancellation: surface CancelledError directly,
+        # without group-wrapping, so outer task-group / wait_for semantics
+        # stay intact.
+        for exc in exceptions:
+            if isinstance(exc, asyncio.CancelledError):
+                raise exc
+        if exceptions:
+            raise BaseExceptionGroup("EDGAR fetches failed", exceptions)
 
         return [*cached_results, *fetched_results]
     finally:
@@ -676,6 +731,8 @@ def _parse_recent(
         if not (isinstance(accession, str) and accession.strip()):
             continue
         if not (isinstance(primary, str) and primary.strip()):
+            continue
+        if not (isinstance(accepted, str) and accepted.strip()):
             continue
         out.append(
             Filing(

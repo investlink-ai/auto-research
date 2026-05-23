@@ -69,8 +69,17 @@ jobs:
           script: |
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const today = new Date().toISOString().slice(0, 10);
-            const title = `Live smoke failed (${today})`;
-            // Dedup: if an open issue with the same title already exists, comment instead of duplicating.
+            // Stable title so a multi-day persistent failure folds into a
+            // single tracking issue. The per-run date / link goes in the
+            // body, where it can accumulate as comments.
+            const title = "Live smoke failed";
+            const body = [
+              `Live smoke (${context.workflow}) failed on ${today}.`,
+              ``,
+              `Run: ${runUrl}`,
+              ``,
+              `Likely causes: upstream schema drift (SEC, FMP, …), expired credentials, or a real regression in the smoke suite. Investigate the failing test name in the run logs and either re-record cassettes or fix the regression.`,
+            ].join("\n");
             const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -79,7 +88,6 @@ jobs:
               per_page: 100,
             });
             const match = existing.data.find(i => i.title === title);
-            const body = `Live smoke (${context.workflow}) failed.\n\nRun: ${runUrl}\n\nLikely causes: upstream schema drift (SEC, FMP, …), expired credentials, or a real regression in the smoke suite. Investigate the failing test name in the run logs and either re-record cassettes or fix the regression.`;
             if (match) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,

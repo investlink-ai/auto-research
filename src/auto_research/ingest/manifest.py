@@ -51,7 +51,12 @@ SCHEMA: pa.Schema = pa.schema(
 )
 
 DEFAULT_OK_STATUSES: tuple[str, ...] = ("ok",)
-DEFAULT_UNIQUE_KEYS: tuple[str, ...] = ("source", "doc_id")
+# Dedup key includes `status` so a later successful row can be appended after
+# a prior error/quarantine row for the same `(source, doc_id)`. Otherwise
+# `existing_doc_ids(status=("ok",))` would report the slot empty (caller
+# proceeds to fetch) while `append`'s lock-time dedup would silently drop
+# the new ok-row against the old error-row — a permanent retry trap.
+DEFAULT_UNIQUE_KEYS: tuple[str, ...] = ("source", "doc_id", "status")
 
 
 def _empty_table() -> pa.Table:
@@ -108,14 +113,29 @@ def append(
     """Append rows to the manifest. Atomic + durable + process-safe.
 
     Inside the file lock, drops any incoming row whose `unique_keys`
-    tuple already exists on disk — so two concurrent processes that
-    both snapshot an empty existing-set and both try to append the
-    same `(source, doc_id)` can't produce duplicate ledger rows. Pass
-    `unique_keys=None` to skip the dedup (rarely useful — only for
-    append-only audit logs where every row really is unique).
+    tuple already exists on disk. Default `unique_keys=("source",
+    "doc_id", "status")` means same-status duplicates are deduped
+    while a transition (e.g., `error → ok` after a successful retry)
+    appends a new row instead of being silently swallowed. Pass
+    `unique_keys=None` to skip the dedup.
+
+    Raises `ValueError` if `unique_keys` references a column not in
+    `SCHEMA` (otherwise a typo would silently corrupt the first
+    write and crash on subsequent reads).
+
+    Tmp file is removed on any failure between `tmp.write_bytes` and
+    `os.replace` — so a partial fsync/disk-full doesn't leak hidden
+    dotfiles into the parent directory.
     """
     if not rows:
         return
+    if unique_keys is not None:
+        unknown = [k for k in unique_keys if k not in SCHEMA.names]
+        if unknown:
+            raise ValueError(
+                f"unique_keys contains columns not in SCHEMA: {unknown}; "
+                f"valid columns are {SCHEMA.names}"
+            )
     path.parent.mkdir(parents=True, exist_ok=True)
     with _exclusive_lock(path):
         existing = read(path)
@@ -135,9 +155,15 @@ def append(
             pa.concat_tables([existing, new_table]) if existing.num_rows > 0 else new_table
         )
         tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
-        pq.write_table(combined, tmp)
-        _fsync_path(tmp)
-        os.replace(tmp, path)
+        try:
+            pq.write_table(combined, tmp)
+            _fsync_path(tmp)
+            os.replace(tmp, path)
+        except BaseException:
+            # tmp may or may not exist; unlink defensively. If os.replace
+            # already succeeded, the tmp name no longer resolves.
+            tmp.unlink(missing_ok=True)
+            raise
         # Re-fsync the parent dir to persist the rename itself.
         dir_fd = os.open(path.parent, os.O_RDONLY)
         try:

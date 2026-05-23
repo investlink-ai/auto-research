@@ -13,6 +13,11 @@ or paid-API budgets we don't want to spend on every push.
 
 This conftest:
 - Auto-applies `@pytest.mark.live` to every test file in this folder.
+- **Opt-in by default**: live tests are skipped unless the run
+  explicitly selects them via `-m live` (the marker expression the
+  Makefile's `live-smoke` target passes). Without this, a contributor
+  who has `SEC_USER_AGENT` exported from unrelated work could fire
+  real SEC traffic during a routine `pytest tests/` run.
 - Skips collection when the test's required credential env vars
   aren't set (declared via `live_requires_env` on the test or module).
   This makes `make live-smoke` safe to run with partial credentials —
@@ -54,8 +59,21 @@ def pytest_collection_modifyitems(
     live_items = [item for item in items if _is_live_item(item)]
     if not live_items:
         return
+
+    markexpr = config.getoption("markexpr", default="") or ""
+    explicit_opt_in = "live" in markexpr
+
     for item in live_items:
         item.add_marker(pytest.mark.live)
+        if not explicit_opt_in:
+            item.add_marker(
+                pytest.mark.skip(
+                    reason="live tests require explicit `-m live` opt-in "
+                    "(use `make live-smoke`); skipped to avoid firing real "
+                    "external API traffic during a generic test run"
+                )
+            )
+            continue
         missing = [v for v in _required_env(item) if not os.environ.get(v, "").strip()]
         if missing:
             item.add_marker(

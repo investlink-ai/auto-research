@@ -6,6 +6,8 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from auto_research.ingest import manifest
 
 
@@ -199,3 +201,79 @@ def test_append_with_unique_keys_none_allows_duplicates(tmp_path: Path) -> None:
     manifest.append(path, [_row(doc_id="X")])
     manifest.append(path, [_row(doc_id="X")], unique_keys=None)
     assert manifest.read(path).num_rows == 2
+
+
+def test_status_transitions_append_new_row(tmp_path: Path) -> None:
+    """An error row followed by an ok row for the same (source,doc_id) MUST both land.
+
+    Closes the retry trap where existing_doc_ids(status=('ok',))
+    sees no ok-row for an error-only doc_id (so the caller fetches),
+    but append's dedup silently drops the new row against the
+    existing error row. Default unique_keys=('source','doc_id','status')
+    treats different statuses as distinct, so the transition is
+    recorded as a fresh row.
+    """
+    path = tmp_path / "m.parquet"
+    manifest.append(path, [_row(doc_id="X", status="error", sha="a" * 64)])
+    # Retry succeeds; same doc_id, status flips to ok. Must be appended, not dropped.
+    manifest.append(path, [_row(doc_id="X", status="ok", sha="b" * 64)])
+    table = manifest.read(path)
+    assert table.num_rows == 2
+    statuses = table.column("status").to_pylist()
+    assert sorted(statuses) == ["error", "ok"]
+    # existing_doc_ids (default status=('ok',)) now finds X.
+    assert manifest.existing_doc_ids(path, source="edgar") == {"X"}
+
+
+def test_same_status_duplicates_still_dedup(tmp_path: Path) -> None:
+    """A second 'ok' row for the same doc_id is still deduplicated."""
+    path = tmp_path / "m.parquet"
+    manifest.append(path, [_row(doc_id="X", status="ok", sha="a" * 64)])
+    manifest.append(path, [_row(doc_id="X", status="ok", sha="b" * 64)])
+    table = manifest.read(path)
+    assert table.num_rows == 1
+    assert table.column("content_sha256").to_pylist() == ["a" * 64]
+
+
+def test_unique_keys_typo_raises_value_error(tmp_path: Path) -> None:
+    """Asymmetric failure mode caught up-front: typo'd unique_keys raises immediately.
+
+    Without this guard, a typo would silently skip the dedup branch
+    on the first write (empty manifest) and only crash on subsequent
+    writes when the existing-table column projection blew up under
+    the file lock.
+    """
+    path = tmp_path / "m.parquet"
+    with pytest.raises(ValueError, match="unique_keys contains columns not in SCHEMA"):
+        manifest.append(
+            path,
+            [_row(doc_id="X")],
+            unique_keys=("source", "document_id"),  # typo: should be doc_id
+        )
+
+
+def test_append_cleans_tmp_on_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pq.write_table / fsync / replace failure must not leak the hidden tmp file."""
+    import os
+
+    import pyarrow.parquet as pq_mod
+
+    path = tmp_path / "m.parquet"
+    real_replace = os.replace
+
+    def boom(src: str | Path, dst: str | Path, *args: object, **kwargs: object) -> None:
+        raise OSError("simulated disk-full")
+
+    try:
+        monkeypatch.setattr(os, "replace", boom)
+        with pytest.raises(OSError, match="simulated disk-full"):
+            manifest.append(path, [_row(doc_id="X")])
+    finally:
+        monkeypatch.setattr(os, "replace", real_replace)
+
+    leftovers = list(path.parent.glob(".*.tmp"))
+    assert leftovers == [], f"tmp file leaked: {leftovers}"
+    # And pq is still usable (no module-level corruption).
+    assert callable(pq_mod.write_table)

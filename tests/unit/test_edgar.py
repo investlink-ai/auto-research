@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -649,11 +650,8 @@ def test_async_partial_failure_flushes_completed_siblings(
 ) -> None:
     """gather(return_exceptions=True) lets siblings finish before the flush.
 
-    Regression: prior code used the default gather() which lets
-    siblings continue running as DETACHED tasks while propagating the
-    first exception; the finally block would flush before siblings
-    appended their rows, silently losing manifest entries for filings
-    that successfully wrote to disk.
+    Also verifies that failures are surfaced as a BaseExceptionGroup
+    so callers see every failure mode, not just the first one.
     """
     monkeypatch.setenv("SEC_USER_AGENT", "Test test@example.com")
     submissions = _submissions_payload(
@@ -673,6 +671,8 @@ def test_async_partial_failure_flushes_completed_siblings(
             return httpx.Response(200, content=b"B")
         return httpx.Response(500, text="boom")
 
+    captured: list[BaseException] = []
+
     async def runner() -> None:
         client = edgar.AsyncEdgarClient(
             transport=httpx.MockTransport(handler),
@@ -680,7 +680,7 @@ def test_async_partial_failure_flushes_completed_siblings(
             max_attempts=2,
         )
         try:
-            with pytest.raises(edgar.EdgarServerError):
+            try:
                 await edgar.afetch_filings_for_cik(
                     NVDA_CIK,
                     client=client,
@@ -689,10 +689,14 @@ def test_async_partial_failure_flushes_completed_siblings(
                     form_types=("10-K",),
                     concurrency=3,
                 )
+            except BaseExceptionGroup as eg:
+                captured.extend(eg.exceptions)
         finally:
             await client.aclose()
 
     asyncio.run(runner())
+    assert captured, "afetch should have raised an ExceptionGroup"
+    assert any(isinstance(e, edgar.EdgarServerError) for e in captured)
     # A1 and A2 completed; A3 raised. Both completed rows must be in the manifest.
     table = manifest.read(tmp_path / "manifest.parquet")
     recorded = set(table.column("doc_id").to_pylist())
@@ -714,3 +718,156 @@ def test_async_concurrency_zero_raises(tmp_path: Path, monkeypatch: pytest.Monke
             )
 
     asyncio.run(runner())
+
+
+# ---------- second-round P1/P2 fixes ----------
+
+
+def test_parse_recent_skips_empty_acceptance_datetime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A blank acceptanceDateTime must skip just that row, not crash the whole parse."""
+    monkeypatch.setenv("SEC_USER_AGENT", "Test test@example.com")
+    submissions = _submissions_payload(
+        accessions=["0001045810-24-000001", "0001045810-24-000002"],
+        forms=["10-K", "10-K"],
+        primary_docs=["bad.htm", "good.htm"],
+        acceptance_dts=["", "2024-02-21T16:31:00Z"],
+    )
+    docs = {"good.htm": b"<html>good</html>"}
+    client = edgar.EdgarClient(
+        transport=_fake_transport(submissions, docs),
+        rate_limiter=_fast_limiter(),
+    )
+    results = edgar.fetch_filings_for_cik(
+        NVDA_CIK,
+        client=client,
+        raw_root=tmp_path / "raw",
+        manifest_path=tmp_path / "manifest.parquet",
+        form_types=("10-K",),
+    )
+    assert [r.accession_number for r in results] == ["0001045810-24-000002"]
+
+
+def test_empty_response_body_raises_retryable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """200 OK + 0 bytes is treated as a transient SEC/CDN propagation issue.
+
+    Without this guard, the manifest would record a sha256-of-empty
+    row that becomes a permanent cache hit, blocking future retries.
+    """
+    monkeypatch.setenv("SEC_USER_AGENT", "Test test@example.com")
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "submissions" in url:
+            return httpx.Response(
+                200,
+                json=_submissions_payload(
+                    accessions=["0001045810-24-000001"],
+                    forms=["10-K"],
+                    primary_docs=["a.htm"],
+                    acceptance_dts=["2024-02-21T16:31:00Z"],
+                ),
+            )
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(200, content=b"")  # transient empty body
+        return httpx.Response(200, content=b"<html>real</html>")
+
+    client = edgar.EdgarClient(
+        transport=_scripted_transport(handler),
+        rate_limiter=_fast_limiter(),
+        max_attempts=5,
+    )
+    results = edgar.fetch_filings_for_cik(
+        NVDA_CIK,
+        client=client,
+        raw_root=tmp_path / "raw",
+        manifest_path=tmp_path / "manifest.parquet",
+        form_types=("10-K",),
+    )
+    assert len(results) == 1
+    assert results[0].cache_hit is False
+    # Subsequent runs must see the cached row (sha is of real content, not empty).
+    assert results[0].content_sha256 == hashlib.sha256(b"<html>real</html>").hexdigest()
+    # Retries actually fired before success.
+    assert calls["n"] == 3
+
+
+def test_async_io_dispatched_via_to_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Sync I/O in the async path must run via asyncio.to_thread, not the loop.
+
+    Smoke check: asyncio.to_thread is called at least once during a
+    fan-out. If a future refactor reverts to inline sync I/O, this
+    test catches it.
+    """
+    monkeypatch.setenv("SEC_USER_AGENT", "Test test@example.com")
+    submissions = _submissions_payload(
+        accessions=["A", "B"],
+        forms=["10-K", "10-K"],
+        primary_docs=["a.htm", "b.htm"],
+        acceptance_dts=["2024-02-21T16:31:00Z"] * 2,
+    )
+    docs = {"a.htm": b"A", "b.htm": b"B"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "submissions" in url:
+            return httpx.Response(200, json=submissions)
+        return httpx.Response(200, content=docs.get(url.rsplit("/", 1)[-1], b""))
+
+    to_thread_calls: list[Any] = []
+    real_to_thread = asyncio.to_thread
+
+    async def spy_to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        to_thread_calls.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy_to_thread)
+
+    async def runner() -> None:
+        client = edgar.AsyncEdgarClient(
+            transport=httpx.MockTransport(handler),
+            rate_limiter=_fast_limiter(),
+        )
+        try:
+            await edgar.afetch_filings_for_cik(
+                NVDA_CIK,
+                client=client,
+                raw_root=tmp_path / "raw",
+                manifest_path=tmp_path / "manifest.parquet",
+                form_types=("10-K",),
+                concurrency=2,
+            )
+        finally:
+            await client.aclose()
+
+    asyncio.run(runner())
+    # _atomic_write_bytes is dispatched per filing; manifest.append once at the end.
+    assert edgar._atomic_write_bytes in to_thread_calls
+    # manifest.append also offloaded
+    from auto_research.ingest import manifest as manifest_mod
+
+    assert manifest_mod.append in to_thread_calls
+
+
+def test_atomic_write_bytes_cleans_tmp_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fsync/replace error must not leak the hidden tmp file."""
+    dest = tmp_path / "subdir" / "x.htm"
+    import auto_research.ingest.edgar as edgar_mod
+
+    def boom_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        raise OSError("simulated disk-full")
+
+    monkeypatch.setattr(os, "replace", boom_replace)
+    with pytest.raises(OSError, match="simulated disk-full"):
+        edgar_mod._atomic_write_bytes(dest, b"hello")
+
+    # The tmp file (hidden, in dest.parent) must NOT exist after the failure.
+    leftovers = list(dest.parent.glob(".*.tmp"))
+    assert leftovers == [], f"tmp file leaked: {leftovers}"
