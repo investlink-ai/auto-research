@@ -108,3 +108,23 @@ def test_load_universe_unknown_market_cap_tier_raises(tmp_path: Path) -> None:
     bad.write_text(json.dumps([_entry(market_cap_tier="gigantic")]))
     with pytest.raises(ValidationError):
         load_universe(path=bad)
+
+
+def test_default_path_raises_when_project_root_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-editable installs (wheel) won't find pyproject.toml — fail loudly.
+
+    Codex P2 review on #35 flagged the previous silent `Path.cwd()` fallback.
+    The replacement raises FileNotFoundError pointing at the `path=` override.
+    """
+    import auto_research.universe as universe_mod
+
+    # Pretend the module lives somewhere with no pyproject.toml above it.
+    fake_module = tmp_path / "site-packages" / "auto_research" / "universe" / "__init__.py"
+    fake_module.parent.mkdir(parents=True)
+    fake_module.write_text("")
+    monkeypatch.setattr(universe_mod, "__file__", str(fake_module))
+
+    with pytest.raises(FileNotFoundError, match="project root"):
+        load_universe()
