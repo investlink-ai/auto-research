@@ -20,14 +20,14 @@ from auto_research._models import route_model
 
 def test_route_model_returns_sonnet_for_cross_doc_reasoning() -> None:
     # Spec §7.3: cross-doc supplier mapping + Q&A evasiveness ⇒ Sonnet 4.6.
-    assert route_model("ten_k", "supplier_mapping") == "claude-sonnet-4-6"
-    assert route_model("transcript", "evasiveness") == "claude-sonnet-4-6"
+    assert route_model("ten_k", "supplier_mentions") == "claude-sonnet-4-6"
+    assert route_model("transcript", "q_and_a_evasiveness") == "claude-sonnet-4-6"
 
 
 def test_route_model_returns_haiku_for_pattern_recognition() -> None:
     # Spec §7.3: high-volume pattern recognition ⇒ Haiku 4.5.
     assert route_model("eight_k", "event_classification") == "claude-haiku-4-5"
-    assert route_model("s_filings", "dilution_language") == "claude-haiku-4-5"
+    assert route_model("s_filings", "dilution_event") == "claude-haiku-4-5"
 
 
 def test_route_model_returns_haiku_for_routine_extraction() -> None:

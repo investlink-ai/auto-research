@@ -111,7 +111,7 @@ def test_call_routes_model_via_route_model() -> None:
         usd_cap=10.00,
         anthropic_client=_as_sdk(fake),
     )
-    client(task="dilution_language", system_prompt="sys", user_content="doc")
+    client(task="dilution_event", system_prompt="sys", user_content="doc")
     # `s_filings.dilution_language` ⇒ Haiku 4.5 per spec §7.3.
     assert fake.messages.calls[0]["model"] == "claude-haiku-4-5"
 
@@ -125,7 +125,7 @@ def test_call_routes_sonnet_for_cross_doc_task() -> None:
         usd_cap=10.00,
         anthropic_client=_as_sdk(fake),
     )
-    client(task="supplier_mapping", system_prompt="sys", user_content="doc")
+    client(task="supplier_mentions", system_prompt="sys", user_content="doc")
     assert fake.messages.calls[0]["model"] == "claude-sonnet-4-6"
 
 
@@ -160,7 +160,7 @@ def test_system_prompt_marked_ephemeral_by_default() -> None:
         usd_cap=10.00,
         anthropic_client=_as_sdk(fake),
     )
-    client(task="dilution_language", system_prompt="long stable prompt", user_content="doc")
+    client(task="dilution_event", system_prompt="long stable prompt", user_content="doc")
     system = fake.messages.calls[0]["system"]
     # Shape: list[{"type": "text", "text": "...", "cache_control": {"type": "ephemeral"}}]
     assert isinstance(system, list)
@@ -177,7 +177,7 @@ def test_user_content_not_marked_cacheable() -> None:
         usd_cap=10.00,
         anthropic_client=_as_sdk(fake),
     )
-    client(task="dilution_language", system_prompt="sys", user_content="doc text")
+    client(task="dilution_event", system_prompt="sys", user_content="doc text")
     messages = fake.messages.calls[0]["messages"]
     # User message is plain — caching it would be wasteful because each
     # doc differs.
@@ -212,7 +212,7 @@ def test_emits_est_usd_to_active_span() -> None:
             usd_cap=1000.00,  # don't care about cap here
             anthropic_client=_as_sdk(fake),
         )
-        client(task="dilution_language", system_prompt="sys", user_content="doc")
+        client(task="dilution_event", system_prompt="sys", user_content="doc")
 
     # Haiku 4.5: \$1/MTok input + \$5/MTok output = 1 * 1.0 + 0.5 * 5.0 = \$3.50
     mock_span.set_attribute.assert_any_call("llm.cost.est_usd", pytest.approx(3.50))
@@ -236,9 +236,9 @@ def test_cost_cap_trips_after_threshold_exceeded() -> None:
         usd_cap=5.00,
         anthropic_client=_as_sdk(fake),
     )
-    client(task="supplier_mapping", system_prompt="sys", user_content="doc")
+    client(task="supplier_mentions", system_prompt="sys", user_content="doc")
     with pytest.raises(CostCapExceeded):
-        client(task="supplier_mapping", system_prompt="sys", user_content="doc")
+        client(task="supplier_mentions", system_prompt="sys", user_content="doc")
 
 
 def test_circuit_breaker_opens_after_consecutive_failures() -> None:
@@ -259,9 +259,9 @@ def test_circuit_breaker_opens_after_consecutive_failures() -> None:
     )
     for _ in range(2):
         with pytest.raises(RuntimeError):
-            client(task="dilution_language", system_prompt="sys", user_content="doc")
+            client(task="dilution_event", system_prompt="sys", user_content="doc")
     with pytest.raises(CircuitOpen):
-        client(task="dilution_language", system_prompt="sys", user_content="doc")
+        client(task="dilution_event", system_prompt="sys", user_content="doc")
 
 
 # --- factory ergonomics ----------------------------------------------------
@@ -285,9 +285,9 @@ def test_factory_per_worker_state_is_isolated() -> None:
         worker="s_filings", usd_cap=5.00, anthropic_client=_as_sdk(fake_s_filings)
     )
     # Blow ten_k's cap.
-    ten_k(task="supplier_mapping", system_prompt="sys", user_content="doc")
+    ten_k(task="supplier_mentions", system_prompt="sys", user_content="doc")
     with pytest.raises(CostCapExceeded):
-        ten_k(task="supplier_mapping", system_prompt="sys", user_content="doc")
+        ten_k(task="supplier_mentions", system_prompt="sys", user_content="doc")
     # s_filings is unaffected.
-    s_filings(task="dilution_language", system_prompt="sys", user_content="doc")
+    s_filings(task="dilution_event", system_prompt="sys", user_content="doc")
     assert len(fake_s_filings.messages.calls) == 1

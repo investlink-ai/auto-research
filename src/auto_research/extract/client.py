@@ -40,7 +40,7 @@ Production callers compose:
 
     def extract_s_filing(raw_doc, prompt_version):
         response = _CLIENT(
-            task="dilution_language",
+            task="dilution_event",
             system_prompt=PROMPT.text,
             user_content=raw_doc.text,
         )

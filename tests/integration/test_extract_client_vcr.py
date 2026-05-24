@@ -79,12 +79,12 @@ def test_cache_create_then_read_against_recorded_response(
 
     with cassette.use_cassette(CASSETTE_PATH.name):
         first = client(
-            task="dilution_language",
+            task="dilution_event",
             system_prompt="A long stable system prompt that should be cached.",
             user_content="document A: dilution language sample",
         )
         second = client(
-            task="dilution_language",
+            task="dilution_event",
             system_prompt="A long stable system prompt that should be cached.",
             user_content="document B: different dilution language",
         )
