@@ -1,4 +1,4 @@
-.PHONY: quick check check-full test integration eval live-smoke lint typecheck
+.PHONY: quick check check-full test integration eval live-smoke lint typecheck smoke
 
 # Fast pre-commit gate — run constantly during development.
 quick: lint typecheck
@@ -37,3 +37,14 @@ eval:
 # (declared per-module via `live_requires_env`) aren't set.
 live-smoke:
 	uv run pytest tests/live -m live
+
+# W1 acceptance smoke - one ticker, one S-3, end-to-end.
+# Requires SEC_USER_AGENT + ANTHROPIC_API_KEY in env.
+# Idempotent against the manifest + extract cache - re-runs are no-ops.
+# Default ticker is NVDA (CIK 0001045810); override with SMOKE_CIK=...
+SMOKE_CIK ?= 0001045810
+smoke:
+	uv run auto-research ingest edgar --cik $(SMOKE_CIK) --form-types S-3
+	uv run auto-research extract s-filings --cik $(SMOKE_CIK)
+	uv run auto-research feast apply
+	uv run auto-research status

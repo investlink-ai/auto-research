@@ -11,6 +11,7 @@ license = { text = "MIT" }
 # they introduce (anthropic, feast, langgraph, pydantic-ai, ...).
 dependencies = [
     "anthropic>=0.104.0",
+    "click>=8.1,<9",
     "exchange-calendars>=4.5",
     "feast>=0.50,<1",
     "httpx>=0.28.1",
@@ -33,6 +34,9 @@ dev = [
     "mypy>=1.13",
     "vcrpy>=8.1.1",
 ]
+
+[project.scripts]
+auto-research = "auto_research.cli:cli"
 
 [build-system]
 requires = ["hatchling"]
