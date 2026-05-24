@@ -156,19 +156,30 @@ manifest at `data/manifest.parquet`.
 
 **Labels.** `infra`, `small` **Milestone.** W1 **Blocked by.** #1, #4
 
-### Issue 6 — `feat(ingest): FMP transcript client + manifest integration`
+### Issue 6 — `feat(ingest): earnings transcript client + manifest integration`
 
-**Objective.** `auto_research.ingest.fmp` fetches earnings call transcripts
-from FMP. Records `event_datetime` (call start). Coverage gaps on smallest
-frontier-tech names recorded as `null` + provenance metadata, not retried
-into degraded data.
+**Status.** Shipped (PRs #43, #49). Source pivoted from FMP →
+Whisper + YouTube/yt-dlp + direct_mp3 per
+`docs/decisions/2026-05-23-transcripts-source.md`.
 
-**Acceptance criteria.**
-- Returns frozen `Transcript` model with `event_datetime`, `ticker`,
+**Landed shape.** `auto_research.ingest.transcripts` fetches earnings
+call audio per ticker via the configured source (`config/transcripts/
+sources.toml`), transcribes via the OpenAI Whisper API, and persists
+both audio + transcript with manifest provenance. Coverage gaps and
+transient failures get distinct manifest statuses (`no_coverage` vs.
+retryable `error`).
+
+**Acceptance criteria — final state.**
+- ✅ Returns frozen `Transcript` model with `event_datetime`, `ticker`,
   `prepared_remarks`, `q_and_a`.
-- Missing coverage returns `None` + writes manifest row with `status="no_coverage"`.
-- Manifest entries are idempotent (rerun is no-op).
-- VCR-recorded test covers one populated transcript and one gap case.
+- ✅ Missing coverage returns `None` + writes manifest row with
+  `status="no_coverage"` (permanent).
+- ✅ Manifest entries are idempotent (rerun is no-op for `ok` /
+  `no_coverage`; retryable for `error`).
+- ✅ Live-smoke test against real YouTube replaces the VCR AC — the
+  multi-hop HLS-fetch + Whisper API flow is not VCR-friendly. The
+  per-source unit tests (~114) use injected fakes; the live smoke
+  catches upstream drift nightly.
 
 **Labels.** `infra`, `small` **Milestone.** W1 **Blocked by.** #5
 
