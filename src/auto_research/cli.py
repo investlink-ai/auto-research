@@ -190,3 +190,30 @@ def feast_materialize(start: str, end: str) -> None:
         check=False,
     )
     raise SystemExit(proc.returncode)
+
+
+def _not_implemented(name: str, follow_up: str) -> click.UsageError:
+    return click.UsageError(f"{name} is not yet implemented. {follow_up}")
+
+
+@ingest.command("fmp", help="Fetch from Financial Modeling Prep (not yet implemented).")
+@click.option("--ticker", required=False, help="Ticker symbol (e.g., NVDA).")
+def ingest_fmp(ticker: str | None) -> None:
+    raise _not_implemented(
+        "ingest fmp",
+        "FMP ingest module is planned for a follow-up issue; "
+        "the EDGAR path covers W1 acceptance.",
+    )
+
+
+@cli.group(name="eval", help="Run eval suites against extracted outputs.")
+def eval_group() -> None: ...
+
+
+@eval_group.command("extract", help="DeepEval on extraction outputs (not yet implemented).")
+def eval_extract() -> None:
+    raise _not_implemented(
+        "eval extract",
+        "DeepEval suite for extraction is planned for the W1 wrap-up; "
+        "see docs/plans/2026-05-22-auto-research-implementation.md.",
+    )

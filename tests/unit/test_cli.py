@@ -25,7 +25,7 @@ def runner() -> CliRunner:
 
 
 @pytest.mark.xfail(
-    reason="cumulative - passes once Tasks 4-7 register extract/feast/eval/status",
+    reason="cumulative - passes once Task 7 registers the status subcommand",
     strict=True,
 )
 def test_root_help_lists_every_subcommand(runner: CliRunner) -> None:
@@ -33,6 +33,8 @@ def test_root_help_lists_every_subcommand(runner: CliRunner) -> None:
     assert result.exit_code == 0, result.output
     for expected in ("ingest", "extract", "feast", "eval", "status"):
         assert expected in result.output, f"{expected!r} missing from --help"
+    # Verify status is a registered subcommand, not just mentioned in epilog text.
+    assert runner.invoke(cli, ["status", "--help"]).exit_code == 0
 
 
 def test_root_help_documents_required_env_vars(runner: CliRunner) -> None:
@@ -265,3 +267,22 @@ def test_feast_materialize_missing_args_errors(runner: CliRunner) -> None:
     result = runner.invoke(cli, ["feast", "materialize"])
     assert result.exit_code != 0
     assert "--start" in result.output
+
+
+def test_ingest_fmp_is_not_yet_implemented(runner: CliRunner) -> None:
+    result = runner.invoke(cli, ["ingest", "fmp", "--ticker", "NVDA"])
+    assert result.exit_code != 0
+    assert "not yet implemented" in result.output.lower()
+
+
+def test_eval_extract_is_not_yet_implemented(runner: CliRunner) -> None:
+    result = runner.invoke(cli, ["eval", "extract"])
+    assert result.exit_code != 0
+    assert "not yet implemented" in result.output.lower()
+
+
+def test_help_still_lists_fmp_and_eval_subcommands(runner: CliRunner) -> None:
+    ingest_help = runner.invoke(cli, ["ingest", "--help"])
+    assert "fmp" in ingest_help.output
+    eval_help = runner.invoke(cli, ["eval", "--help"])
+    assert "extract" in eval_help.output
