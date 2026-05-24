@@ -1,9 +1,9 @@
 """Per-ticker mapping to its `AudioSource` implementation.
 
-Loaded from `data/transcripts/sources.toml` at import time — that
+Loaded from `config/transcripts/sources.toml` at import time — that
 file is the single source of truth for which transcript source
 handles each ticker, plus per-source overrides. See
-`_config.py` for the schema and `data/transcripts/sources.toml`
+`_config.py` for the schema and `config/transcripts/sources.toml`
 for the data.
 
 Tickers absent from the registry are written to the manifest as a

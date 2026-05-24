@@ -1,6 +1,6 @@
 """Unit tests for the transcripts TOML config loader.
 
-The loader reads `data/transcripts/sources.toml` and validates each
+The loader reads `config/transcripts/sources.toml` and validates each
 row via Pydantic. Tests cover (a) the happy path against the
 checked-in file, (b) per-source invariants enforced at load time,
 (c) override path injection for test isolation.

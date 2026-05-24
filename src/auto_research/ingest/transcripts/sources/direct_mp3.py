@@ -28,7 +28,7 @@ from auto_research.ingest.transcripts._config import load_sources_config
 SOURCE_NAME: Final = "direct_mp3"
 SOURCE_LABEL: Final = "direct-MP3"
 
-# Per-ticker URL templates. Loaded from `data/transcripts/sources.
+# Per-ticker URL templates. Loaded from `config/transcripts/sources.
 # toml` (the `[tickers]` table's `url` field on rows whose source is
 # `direct_mp3`). Each value is a Python format string with named
 # placeholders `{year}` and `{quarter}` — the source substitutes

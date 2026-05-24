@@ -1,6 +1,6 @@
 """TOML-backed transcripts source configuration.
 
-Loads `data/transcripts/sources.toml` and exposes typed per-ticker
+Loads `config/transcripts/sources.toml` and exposes typed per-ticker
 config to the rest of the `transcripts/` module. One source of truth
 for:
 
@@ -77,7 +77,7 @@ _FILENAME: Final = "sources.toml"
 
 
 def _default_path() -> Path:
-    """Anchor `data/transcripts/sources.toml` on the project root.
+    """Anchor `config/transcripts/sources.toml` on the project root.
 
     Walks up from this module looking for `pyproject.toml` — same
     pattern as the universe loader. Editable installs (`uv sync`)
@@ -88,7 +88,7 @@ def _default_path() -> Path:
     here = Path(__file__).resolve()
     for parent in (here, *here.parents):
         if (parent / "pyproject.toml").exists():
-            return parent / "data" / "transcripts" / _FILENAME
+            return parent / "config" / "transcripts" / _FILENAME
     raise FileNotFoundError(
         f"Could not locate the auto-research project root above {here} "
         f"(no pyproject.toml in any parent directory). Pass "
@@ -98,7 +98,7 @@ def _default_path() -> Path:
 
 
 def load_sources_config(path: Path | None = None) -> TranscriptsSourcesConfig:
-    """Load + validate `data/transcripts/sources.toml`.
+    """Load + validate `config/transcripts/sources.toml`.
 
     Raises `FileNotFoundError` if the file is missing, `ValueError`
     for empty tables, Pydantic `ValidationError` for typed shape

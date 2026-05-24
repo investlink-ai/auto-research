@@ -1,6 +1,6 @@
 # 8-K transcript survey
 
-Surveyed 81 tickers from `data/universe/universe_v1.json`.
+Surveyed 81 tickers from `config/universe/universe_v1.json`.
 
 ## Classification counts
 

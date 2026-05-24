@@ -82,7 +82,7 @@ entity_id = Entity(
 ```
 
 Single entity across all FeatureViews. Universe lives at
-`data/universe/universe_v1.json` and is git-tracked. Changes are explicit and
+`config/universe/universe_v1.json` and is git-tracked. Changes are explicit and
 versioned.
 
 ---

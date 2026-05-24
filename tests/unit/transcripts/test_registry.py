@@ -9,7 +9,7 @@ import pytest
 
 from auto_research.ingest.transcripts import registry
 
-_UNIVERSE_PATH = Path("data/universe/universe_v1.json")
+_UNIVERSE_PATH = Path("config/universe/universe_v1.json")
 
 
 def _universe_tickers() -> set[str]:
@@ -19,7 +19,7 @@ def _universe_tickers() -> set[str]:
 
 def test_registry_covers_full_universe() -> None:
     """Every universe ticker has a source registered. If a new ticker
-    is added to `data/universe/universe_v1.json`, this test fails
+    is added to `config/universe/universe_v1.json`, this test fails
     until the registry maps it to a source — the right place to fix
     coverage gaps, since unmapped tickers fall through to retryable
     `status='error'` rows in the orchestrator's manifest."""

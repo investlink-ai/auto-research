@@ -73,7 +73,7 @@ Starter includes the endpoint. The original spec estimate was wrong by
 
 ### SEC 8-K is empirically not a transcript source
 
-Direct survey against `data/universe/universe_v1.json`:
+Direct survey against `config/universe/universe_v1.json`:
 
 - Scanned the most-recent earnings 8-K (Item 2.02 or 7.01) for every
   ticker in the 81-name universe.

@@ -259,7 +259,7 @@ def main() -> int:
     lines = [
         "# 8-K transcript survey",
         "",
-        f"Surveyed {len(tickers)} tickers from `data/universe/universe_v1.json`.",
+        f"Surveyed {len(tickers)} tickers from `config/universe/universe_v1.json`.",
         "",
         "## Classification counts",
         "",

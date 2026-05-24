@@ -50,7 +50,7 @@ from auto_research.ingest.transcripts._config import load_sources_config
 
 SOURCE_NAME: Final = "youtube"
 
-# Per-ticker search query override. Loaded from `data/transcripts/
+# Per-ticker search query override. Loaded from `config/transcripts/
 # sources.toml` (the `[tickers]` table's `query` field on rows
 # whose source is `youtube`). The default query is `{ticker}
 # earnings call`; an override replaces the ticker portion with the
@@ -65,7 +65,7 @@ SOURCE_NAME: Final = "youtube"
 #
 # Override values come from SEC's official `company_tickers.json`,
 # verified by inspecting matched titles. See `_config.py` for the
-# schema and the docstring on `data/transcripts/sources.toml`.
+# schema and the docstring on `config/transcripts/sources.toml`.
 TICKER_QUERIES: dict[str, str] = {
     ticker: cfg.query
     for ticker, cfg in load_sources_config().tickers.items()
