@@ -343,6 +343,20 @@ def test_check_mlflow_reports_configured_uri(
     assert "mlruns" in res.detail
 
 
+def test_check_mlflow_single_slash_uri_warns_on_missing_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Single-slash file: URI must still trigger the dir-existence check."""
+    from auto_research.cli import _check_mlflow
+
+    missing = tmp_path / "absent" / "mlruns"
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"file:{missing}")
+    res = _check_mlflow()
+    assert res.name == "mlflow"
+    assert res.status == "warn"
+    assert "not yet created" in res.detail
+
+
 def test_check_feast_returns_warn_when_registry_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

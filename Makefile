@@ -38,8 +38,8 @@ eval:
 live-smoke:
 	uv run pytest tests/live -m live
 
-# W1 acceptance smoke (Issue 12 AC2). Runs the full one-ticker, one-S-3
-# pipeline end-to-end. Requires SEC_USER_AGENT + ANTHROPIC_API_KEY in env.
+# W1 acceptance smoke - one ticker, one S-3, end-to-end.
+# Requires SEC_USER_AGENT + ANTHROPIC_API_KEY in env.
 # Idempotent against the manifest + extract cache - re-runs are no-ops.
 # Default ticker is NVDA (CIK 0001045810); override with SMOKE_CIK=...
 SMOKE_CIK ?= 0001045810

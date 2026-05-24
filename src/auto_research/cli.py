@@ -243,8 +243,8 @@ def _check_mlflow() -> CheckResult:
     from auto_research.experiment import configured_tracking_uri
 
     uri = configured_tracking_uri()
-    if uri.startswith("file://"):
-        path = Path(uri.removeprefix("file://"))
+    if uri.startswith("file:"):
+        path = Path(uri.removeprefix("file://").removeprefix("file:"))
         if path.exists():
             return CheckResult("mlflow", "ok", uri)
         return CheckResult("mlflow", "warn", f"{uri} (directory not yet created)")
