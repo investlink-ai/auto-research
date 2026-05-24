@@ -1,4 +1,4 @@
-"""Unit tests for the token-bucket rate limiter (Issue #5)."""
+"""Unit tests for the token-bucket rate limiter."""
 
 from __future__ import annotations
 

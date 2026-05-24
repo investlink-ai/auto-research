@@ -320,8 +320,8 @@ def test_midnight_et_boundary_cliff_is_intentional() -> None:
     00:00:01 ET event was Wednesday. This is the conservative reading of
     "next trading day cutoff" and is the failure mode the property test's
     "minimality" invariant pins. Future maintainers should not "fix" this
-    by switching to a wall-clock-delta semantics — Codex flagged it on
-    PR #38 and the resolution was to document the intent, not change it.
+    by switching to wall-clock-delta semantics — the cliff is intentional,
+    documented here as the canonical decision rather than relitigated.
     """
     just_before = pd.Timestamp(datetime(2024, 6, 4, 23, 59, 59, tzinfo=_ET))
     just_after = pd.Timestamp(datetime(2024, 6, 5, 0, 0, 1, tzinfo=_ET))

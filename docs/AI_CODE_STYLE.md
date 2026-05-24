@@ -82,7 +82,54 @@ adapter for the Voyage/BGE fallback).
 
 ---
 
-## 4. Research-Specific Anti-Patterns
+## 4. Library-First
+
+Before writing custom logic for a non-trivial concern (retries, HTTP, parsing,
+scheduling, observability, audio/video, format conversion, async plumbing,
+etc.), check whether a reliable SDK or stdlib module already does it. **Don't
+rebuild the wheel.**
+
+Custom paths that duplicate a library's surface add traceback indirection,
+drift risk on upgrades, and silently fall behind the library on edge cases
+(missed retry conditions, headers, corner cases).
+
+- Read the relevant SDK / module docs before writing the code path.
+- If a library exists and fits, use it.
+- If you reject it, justify in the PR body in one line.
+
+If the codebase already uses a library for the same concern elsewhere, the
+new call site uses it too. Consistency beats local cleverness.
+
+---
+
+## 5. Comments And Docstrings
+
+Docstrings and comments describe **what the code does and the stable rationale
+behind it** — they stand on their own when the original PR is forgotten.
+
+**No PR numbers, Issue numbers, ticket IDs, sprint names, or review-bot
+findings in docstrings or comments.** Those belong in commit messages, PR
+bodies, and ADRs under `docs/decisions/`.
+
+```python
+# ❌ "Unit tests for the rate limiter (Issue #5)."
+# ✅ "Unit tests for the rate limiter."
+
+# ❌ "Per PR #43 review, no_coverage rows are permanent."
+# ✅ "no_coverage rows are permanent — the past doesn't change."
+```
+
+If a constraint exists because of a specific incident, describe the symptom
+directly rather than linking the incident:
+
+```python
+# ❌ "x must be > 0 (see PR #34)"
+# ✅ "x must be > 0; x == 0 puts ffmpeg into a chunk-per-frame loop."
+```
+
+---
+
+## 6. Research-Specific Anti-Patterns
 
 These are the high-cost mistakes a coding agent will make in this repo if
 unconstrained. Do not generate:
@@ -133,7 +180,7 @@ frontier-tech names are *real signal* about coverage, not a value to impute. Use
 
 ---
 
-## 5. Sensitive-Code Generation Style
+## 7. Sensitive-Code Generation Style
 
 For Tier 2 work, the implementation should make the correctness case obvious:
 
@@ -152,7 +199,7 @@ outcomes are better than a compact generic dispatcher that obscures behavior.
 
 ---
 
-## 6. Pre-Submit Checklist
+## 8. Pre-Submit Checklist
 
 Before claiming a generated patch is ready:
 
@@ -160,6 +207,8 @@ Before claiming a generated patch is ready:
 - Did behavior changes get a failing test first?
 - Is every new abstraction justified by current duplication or a stable domain
   concept from the spec?
+- For non-trivial logic, did you check for an existing SDK / library (§4)?
+- Are docstrings and comments free of PR / Issue refs (§5)?
 - Are docs synced without duplicating policy? (Link, don't restate.)
 - For Tier 2, did the relevant `AGENTS.md` §2 invariant get an explicit test
   or eval citation in the PR body?
