@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from auto_research.extract.cache import cache_key, read, write
 
 
@@ -33,30 +31,66 @@ def test_cache_key_is_stable_for_same_inputs() -> None:
     assert len(k1) == 64  # sha256 hex
 
 
-@pytest.mark.parametrize(
-    "field",
-    ["raw_doc", "prompt_version", "schema_version", "model_id", "decoding_params"],
-)
-def test_cache_key_changes_when_any_completion_config_input_changes(field: str) -> None:
-    """The interview-grade test: tiered routing (Haiku→Sonnet swap) must
-    not silently reuse stale cache. Each of the five inputs is a cache-key
-    component; flip any one and the key changes."""
-    base: dict = dict(
+def _base_key() -> str:
+    return cache_key(
         raw_doc=b"hello",
         prompt_version="v1",
         schema_version="v1",
         model_id="claude-haiku-4-5",
         decoding_params={"max_tokens": 4096},
     )
-    mutated: dict = {
-        "raw_doc": b"hello world",
-        "prompt_version": "v2",
-        "schema_version": "v2",
-        "model_id": "claude-sonnet-4-6",
-        "decoding_params": {"max_tokens": 8192},
-    }
-    other = dict(base) | {field: mutated[field]}
-    assert cache_key(**base) != cache_key(**other), f"changing {field} must change the cache key"
+
+
+def test_cache_key_changes_on_raw_doc() -> None:
+    assert _base_key() != cache_key(
+        raw_doc=b"hello world",
+        prompt_version="v1",
+        schema_version="v1",
+        model_id="claude-haiku-4-5",
+        decoding_params={"max_tokens": 4096},
+    )
+
+
+def test_cache_key_changes_on_prompt_version() -> None:
+    assert _base_key() != cache_key(
+        raw_doc=b"hello",
+        prompt_version="v2",
+        schema_version="v1",
+        model_id="claude-haiku-4-5",
+        decoding_params={"max_tokens": 4096},
+    )
+
+
+def test_cache_key_changes_on_schema_version() -> None:
+    assert _base_key() != cache_key(
+        raw_doc=b"hello",
+        prompt_version="v1",
+        schema_version="v2",
+        model_id="claude-haiku-4-5",
+        decoding_params={"max_tokens": 4096},
+    )
+
+
+def test_cache_key_changes_on_model_id() -> None:
+    """The interview-grade test: tiered routing (Haiku->Sonnet swap) must
+    not silently reuse stale cache."""
+    assert _base_key() != cache_key(
+        raw_doc=b"hello",
+        prompt_version="v1",
+        schema_version="v1",
+        model_id="claude-sonnet-4-6",
+        decoding_params={"max_tokens": 4096},
+    )
+
+
+def test_cache_key_changes_on_decoding_params() -> None:
+    assert _base_key() != cache_key(
+        raw_doc=b"hello",
+        prompt_version="v1",
+        schema_version="v1",
+        model_id="claude-haiku-4-5",
+        decoding_params={"max_tokens": 8192},
+    )
 
 
 def test_decoding_params_dict_ordering_does_not_affect_key() -> None:
