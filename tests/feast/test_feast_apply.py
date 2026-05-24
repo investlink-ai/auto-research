@@ -1,7 +1,8 @@
 """Smoke test for ``feast apply`` over a synthetic 30-day price window.
 
-Covers Issue #7 acceptance criterion: "``feast apply`` succeeds; ``price_features``
-materialized for a synthetic 30-day window."
+End-to-end: ``feast apply`` succeeds, ``price_features`` is materialized
+for the synthetic window, and the registry holds the FeatureView with
+the expected schema.
 
 The test copies ``feast_repo/`` into a tmp dir, seeds the offline parquet via
 the production materializer (so the PIT cutoff is baked in by the same code

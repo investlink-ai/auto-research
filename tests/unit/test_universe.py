@@ -1,4 +1,4 @@
-"""Unit tests for the universe loader (Issue #4)."""
+"""Unit tests for the universe loader."""
 
 from __future__ import annotations
 

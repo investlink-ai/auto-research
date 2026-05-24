@@ -1,7 +1,7 @@
-"""VCR-recorded integration test for `@cost_cap` (Issue #8 AC).
+"""VCR-recorded integration test for `@cost_cap`.
 
-Acceptance criterion: `cost_cap` reads token counts from Anthropic response
-metadata (real), not a mock; uses VCR.
+`cost_cap` reads token counts from real Anthropic response metadata
+(never a mock), and the VCR cassette pins a real-shape response.
 
 The committed cassette captures one real-shape `POST /v1/messages` response
 with a populated `usage` block (`input_tokens=1.5M`, `output_tokens=0.9M`).

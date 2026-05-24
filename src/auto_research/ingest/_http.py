@@ -1,6 +1,6 @@
 """Shared HTTP retry / classification / atomic-write helpers for ingest modules.
 
-EDGAR (Issue #5) and FMP (Issue #6) share the same HTTP discipline:
+Every ingest source shares the same HTTP discipline:
 
 - rate-limited via `auto_research.ingest.rate_limit.TokenBucket`
 - 429 / 5xx / empty-200 reclassified as typed retryable errors
@@ -8,7 +8,7 @@ EDGAR (Issue #5) and FMP (Issue #6) share the same HTTP discipline:
 - atomic write to disk via tmp + fsync + rename
 
 Per-source modules subclass `RateLimited`, `ServerError`, `EmptyResponseError`
-for catch-site ergonomics (`except FmpRateLimited:` reads better than a
+for catch-site ergonomics (`except EdgarRateLimited:` reads better than a
 generic `RateLimited` at the call site). The shared `classify_response`
 and `make_retry_wait` helpers operate on the BASE classes — they work
 across sources without parameterization on the wait callback, and only
