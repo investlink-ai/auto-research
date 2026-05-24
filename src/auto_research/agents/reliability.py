@@ -22,8 +22,12 @@ Composite order (outermost → innermost):
 by retries.
 
 State is per-wrapper instance: each decorator application creates a fresh
-closure. The wrappers are thread-safe via an internal `Lock` — required
-because the LangGraph research agent dispatches nodes from a thread pool.
+closure. The wrappers carry an internal `threading.Lock` to protect the
+read-modify-write of their counters in case nodes are dispatched
+concurrently. Whether LangGraph runs nodes via threadpool (`graph.invoke`)
+or asyncio (`graph.ainvoke`) is a W2 decision; `threading.Lock` is
+correct for the sync case and a no-op-cost forward bet — if the first
+real caller turns out to be async, swap to `asyncio.Lock` then.
 
 Removed in this v1, vs the original CONTRACTS §5 surface:
 - `@max_iterations` — the research-graph cycle cap belongs in LangGraph's
@@ -200,7 +204,10 @@ def circuit_breaker(*, failures: int) -> Callable[[F], F]:
                     )
             try:
                 result = func(*args, **kwargs)
-            except BaseException:
+            except Exception:
+                # `Exception`, not `BaseException`: a user `KeyboardInterrupt`
+                # or `SystemExit` mid-call shouldn't burn a circuit slot. Those
+                # signal "the process is going away," not "the API is sick."
                 with lock:
                     state["consecutive_failures"] += 1
                     if state["consecutive_failures"] >= failures:
