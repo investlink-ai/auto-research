@@ -2,16 +2,51 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from auto_research.ingest.transcripts import registry
 
+_UNIVERSE_PATH = Path("data/universe/universe_v1.json")
 
-def test_registry_seeds_only_nvda_canary() -> None:
-    """NVDA is the youtube canary; broader coverage is populated by
-    the coverage-survey worker. If this changes, update this test
-    with the rationale (and likely the parent issue's scope)."""
-    assert registry.REGISTRY == {"NVDA": "youtube"}
+
+def _universe_tickers() -> set[str]:
+    with _UNIVERSE_PATH.open() as f:
+        return {entry["ticker"] for entry in json.load(f)}
+
+
+def test_registry_covers_full_universe() -> None:
+    """Every universe ticker has a source registered. If a new ticker
+    is added to `data/universe/universe_v1.json`, this test fails
+    until the registry maps it to a source — the right place to fix
+    coverage gaps, since unmapped tickers fall through to retryable
+    `status='error'` rows in the orchestrator's manifest."""
+    universe = _universe_tickers()
+    missing = universe - registry.REGISTRY.keys()
+    assert not missing, (
+        f"Universe tickers missing from REGISTRY: {sorted(missing)}. "
+        "Either map them to a source or remove them from the universe."
+    )
+
+
+def test_registry_has_no_orphan_tickers() -> None:
+    """Conversely, REGISTRY shouldn't carry tickers that aren't in the
+    universe — orphans drift over time and confuse coverage audits."""
+    universe = _universe_tickers()
+    orphans = registry.REGISTRY.keys() - universe
+    assert not orphans, (
+        f"REGISTRY contains tickers not in universe: {sorted(orphans)}. "
+        "Either add them to the universe or drop the registry rows."
+    )
+
+
+def test_registry_values_are_all_known_sources() -> None:
+    """Defense-in-depth for the runtime `validate()` — catches typos
+    at test time, not at first fetch."""
+    unknown = set(registry.REGISTRY.values()) - registry.KNOWN_SOURCES
+    assert not unknown, f"REGISTRY references unknown sources: {sorted(unknown)}"
 
 
 def test_known_sources_contains_implemented_platforms() -> None:

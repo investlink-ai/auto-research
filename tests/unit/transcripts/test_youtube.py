@@ -586,14 +586,29 @@ def test_source_name_is_youtube() -> None:
 
 
 def test_nvda_registered_to_youtube() -> None:
-    """NVDA is the canary; its registry entry must point to `youtube`."""
+    """NVDA is the live-smoke target; its registry entry must point
+    to `youtube` so the smoke actually exercises this source."""
     from auto_research.ingest.transcripts import registry
 
     assert registry.REGISTRY["NVDA"] == "youtube"
 
 
 def test_nvda_has_query_override() -> None:
-    """The canary's query override must be configured; otherwise the
-    ticker symbol clashes with unrelated content on YouTube."""
+    """NVDA's query override (`NVIDIA`) must be configured;
+    otherwise the ticker symbol could clash with unrelated YouTube
+    content on certain quarters."""
     assert "NVDA" in youtube.TICKER_QUERIES
     assert youtube.TICKER_QUERIES["NVDA"].strip()
+
+
+def test_short_ticker_overrides_present() -> None:
+    """Short tickers whose symbols are common English substrings
+    (e.g. 'ON' in 'Conference', 'BE' in 'Adobe') MUST have overrides
+    — without them, the title gate's substring check false-matches
+    unrelated companies' earnings calls. Verified by the SEC-anchored
+    universe-wide validation; this test pins the lesson."""
+    for ticker in ("ON", "BE"):
+        assert ticker in youtube.TICKER_QUERIES, (
+            f"{ticker} needs an override — its symbol is a common "
+            "English substring and bare-symbol queries false-match."
+        )
