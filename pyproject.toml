@@ -11,13 +11,17 @@ license = { text = "MIT" }
 # they introduce (anthropic, feast, langgraph, pydantic-ai, ...).
 dependencies = [
     "anthropic>=0.104.0",
+    "exchange-calendars>=4.5",
+    "feast>=0.50,<1",
     "httpx>=0.28.1",
     "langfuse>=2,<3",
     "mlflow-skinny>=3.0",
+    "numpy>=2.0",
     "openai>=2.38.0",
+    "pandas>=2.2",
     "pyarrow>=23.0.1",
     "pydantic>=2.13.4",
-    "tenacity>=9.1.4",
+    "tenacity>=8.5,<9",
     "traceloop-sdk>=0.30",
 ]
 
@@ -39,6 +43,10 @@ packages = ["src/auto_research"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers"
+# feast_repo/ is a Feast feature repository at the project root (not under
+# src/auto_research). Add the project root so `from feast_repo...` resolves
+# in tests.
+pythonpath = ["."]
 # Markers used to scope which tests run in CI vs locally. See Makefile
 # and .github/workflows/ci.yml. Tests under tests/integration/ are
 # auto-marked via tests/integration/conftest.py.
@@ -51,7 +59,7 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src", "tests", "feast_repo"]
 
 [tool.ruff.lint]
 select = [
@@ -68,6 +76,13 @@ ignore = [
     "E501", # line length (handled by formatter)
 ]
 
+[tool.ruff.lint.isort]
+known-first-party = ["auto_research", "feast_repo", "tests"]
+# `feast` (the third-party package) is otherwise misclassified as first-party
+# because ruff's auto-detection sees `feast_repo` in src and treats the prefix
+# as a package root.
+known-third-party = ["feast"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
@@ -75,7 +90,14 @@ warn_unused_configs = true
 warn_return_any = true
 warn_unused_ignores = true
 no_implicit_optional = true
-files = ["src/auto_research", "tests"]
+files = ["src/auto_research", "feast_repo", "tests"]
+mypy_path = "."
+# tests/feast/_pit_invariants.py is a shared test helper that mypy sees
+# under two module names (with and without the tests.feast prefix) because
+# tests/feast/ has no __init__.py — adding one shadows the feast package
+# at pytest import time. Skip strict typecheck on the helper file
+# (it's six lines of asserts; the runtime tests cover its behavior).
+exclude = ["tests/feast/_pit_invariants\\.py$"]
 
 # Third-party libs without type stubs. Keep this list short; each entry
 # means we're trusting an untyped surface.
@@ -95,9 +117,19 @@ ignore_missing_imports = true
 module = "vcr.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "feast.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "exchange_calendars.*"
+ignore_missing_imports = true
+
 [dependency-groups]
 dev = [
+    "hypothesis>=6.152.9",
     "mlflow>=3.0",
+    "pandas-stubs>=3.0.0.260204",
     "pre-commit>=4.6.0",
     "pytest-randomly>=4.1.0",
 ]
