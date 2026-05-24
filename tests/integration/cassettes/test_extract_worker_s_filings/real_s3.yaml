@@ -1,0 +1,219 @@
+interactions:
+- request:
+    body: "{\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":\"Form
+      S-3 \u2014 Shelf Registration Statement Issuer: Acme Therapeutics, Inc. (CIK
+      0001234567) Accession Number: 0001234567-25-000042 Filed: 2026-03-15 PROSPECTUS
+      SUMMARY We may offer and sell from time to time, in one or more offerings, up
+      to $300 million in aggregate offering amount of our common stock, preferred
+      stock, debt securities, warrants, and units. We refer to our common stock, preferred
+      stock, debt securities, warrants, and units collectively as the \\\"securities.\\\"
+      This prospectus describes some of the general terms that may apply to these
+      securities and the general manner in which they may be offered. The specific
+      terms of any securities to be offered, and the specific manner in which they
+      may be offered, will be described in one or more supplements to this prospectus.
+      USE OF PROCEEDS Unless we specify otherwise in the applicable prospectus supplement,
+      we intend to use the net proceeds from the sale of the securities for general
+      corporate purposes, including working capital, research and development activities,
+      capital expenditures, and to fund the Phase II clinical trial of our lead therapeutic
+      candidate ACM-101 in patients with relapsed multiple myeloma. PLAN OF DISTRIBUTION
+      We may offer the securities directly, through agents, or through underwriters
+      or dealers, including in at-the-market offerings as defined in Rule 415(a)(4)
+      under the Securities Act, on the Nasdaq Global Select Market or other exchanges.
+      Any underwriters, dealers, or agents will be identified, and any compensation
+      they receive will be described, in the applicable prospectus supplement. The
+      securities may be sold for cash or other consideration. The securities may be
+      sold at fixed prices, at market prices prevailing at the time of sale, at prices
+      related to such prevailing market prices, or at negotiated prices. DILUTION
+      The sale of the securities offered hereby will result in dilution of the ownership
+      interest of our existing stockholders. To the extent that we issue and sell
+      additional shares of common stock or securities convertible into or exercisable
+      for shares of common stock, including through registered direct offerings or
+      at-the-market offerings, our existing stockholders may experience substantial
+      dilution. The exact amount of dilution will depend on the number of shares sold
+      and the price at which they are sold. RISK FACTORS Investing in our securities
+      involves a high degree of risk. You should carefully consider the risks and
+      uncertainties described under the heading \\\"Risk Factors\\\" contained in
+      our most recent Annual Report on Form 10-K, as updated by our subsequent Quarterly
+      Reports on Form 10-Q, which are incorporated by reference herein.\"}],\"model\":\"claude-haiku-4-5\",\"system\":[{\"type\":\"text\",\"text\":\"You
+      are extracting structured dilution and capital-raise signals from an SEC\\nS-1
+      or S-3 registration statement.\\n\\nRead <source_text> carefully and return
+      a single JSON object matching the\\nSFilingOutput schema. Every claim MUST include:\\n-
+      source_quote: a verbatim substring of <source_text> that supports the\\n  claim.
+      The substring will be located in <source_text> by exact match; if\\n  any character
+      (including whitespace, punctuation, capitalization) differs,\\n  the claim will
+      be rejected and the entire output quarantined.\\n\\nDO NOT include `source_span`.
+      Character offsets are computed in code from\\nyour `source_quote` \u2014 counting
+      characters is the worker's job, not yours.\\n\\nFields to populate:\\n- cik:
+      the issuer's CIK (10-digit, leading zeros).\\n- accession_number: the filing's
+      SEC accession number.\\n- form_type: \\\"S-1\\\" or \\\"S-3\\\".\\n- dilution_event:
+      a single Claim describing the headline dilution event\\n  (e.g., \\\"shelf takedown
+      of $200M common stock\\\"), with confidence in [0, 1].\\n- capital_raise_language:
+      list of Claims for each distinct capital-raise\\n  phrase in the filing (e.g.,
+      \\\"at-the-market offering\\\", \\\"registered direct\\\").\\n- use_of_proceeds:
+      list of Claims describing intended uses (e.g.,\\n  \\\"general corporate purposes\\\",
+      \\\"fund Phase II clinical trial\\\").\\n\\nA Claim is an object with EXACTLY
+      two fields: `citation` (an object with\\n`source_quote`) and `confidence` (a
+      float in [0, 1]). No other fields are\\nallowed inside a Claim or Citation.
+      Example of the required shape for a\\nsingle Claim:\\n\\n  {\\n    \\\"citation\\\":
+      {\\n      \\\"source_quote\\\": \\\"shelf takedown of $200 million of common
+      stock\\\"\\n    },\\n    \\\"confidence\\\": 0.9\\n  }\\n\\nDo not invent quotes.
+      If a field has no support in source_text, return an\\nempty list rather than
+      fabricating a citation.\\n\\nReturn ONLY the JSON object. Do not wrap it in
+      markdown code fences. Do not\\nprepend or append any commentary. The response
+      must start with an opening\\ncurly brace and end with a closing curly brace.\\n\\n<source_text>\\nForm
+      S-3 \u2014 Shelf Registration Statement Issuer: Acme Therapeutics, Inc. (CIK
+      0001234567) Accession Number: 0001234567-25-000042 Filed: 2026-03-15 PROSPECTUS
+      SUMMARY We may offer and sell from time to time, in one or more offerings, up
+      to $300 million in aggregate offering amount of our common stock, preferred
+      stock, debt securities, warrants, and units. We refer to our common stock, preferred
+      stock, debt securities, warrants, and units collectively as the \\\"securities.\\\"
+      This prospectus describes some of the general terms that may apply to these
+      securities and the general manner in which they may be offered. The specific
+      terms of any securities to be offered, and the specific manner in which they
+      may be offered, will be described in one or more supplements to this prospectus.
+      USE OF PROCEEDS Unless we specify otherwise in the applicable prospectus supplement,
+      we intend to use the net proceeds from the sale of the securities for general
+      corporate purposes, including working capital, research and development activities,
+      capital expenditures, and to fund the Phase II clinical trial of our lead therapeutic
+      candidate ACM-101 in patients with relapsed multiple myeloma. PLAN OF DISTRIBUTION
+      We may offer the securities directly, through agents, or through underwriters
+      or dealers, including in at-the-market offerings as defined in Rule 415(a)(4)
+      under the Securities Act, on the Nasdaq Global Select Market or other exchanges.
+      Any underwriters, dealers, or agents will be identified, and any compensation
+      they receive will be described, in the applicable prospectus supplement. The
+      securities may be sold for cash or other consideration. The securities may be
+      sold at fixed prices, at market prices prevailing at the time of sale, at prices
+      related to such prevailing market prices, or at negotiated prices. DILUTION
+      The sale of the securities offered hereby will result in dilution of the ownership
+      interest of our existing stockholders. To the extent that we issue and sell
+      additional shares of common stock or securities convertible into or exercisable
+      for shares of common stock, including through registered direct offerings or
+      at-the-market offerings, our existing stockholders may experience substantial
+      dilution. The exact amount of dilution will depend on the number of shares sold
+      and the price at which they are sold. RISK FACTORS Investing in our securities
+      involves a high degree of risk. You should carefully consider the risks and
+      uncertainties described under the heading \\\"Risk Factors\\\" contained in
+      our most recent Annual Report on Form 10-K, as updated by our subsequent Quarterly
+      Reports on Form 10-Q, which are incorporated by reference herein.\\n</source_text>\\n\",\"cache_control\":{\"type\":\"ephemeral\"}}]}"
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '7566'
+      Content-Type:
+      - application/json
+      Host:
+      - api.anthropic.com
+      User-Agent:
+      - auto-research-test
+      X-Stainless-Arch:
+      - arm64
+      X-Stainless-Async:
+      - 'false'
+      X-Stainless-Lang:
+      - python
+      X-Stainless-OS:
+      - MacOS
+      X-Stainless-Package-Version:
+      - 0.104.0
+      X-Stainless-Runtime:
+      - CPython
+      X-Stainless-Runtime-Version:
+      - 3.12.11
+      anthropic-version:
+      - '2023-06-01'
+      x-api-key:
+      - REDACTED
+      x-stainless-read-timeout:
+      - '600'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-timeout:
+      - '600'
+    method: POST
+    uri: https://api.anthropic.com/v1/messages
+  response:
+    body:
+      string: '{"model":"claude-haiku-4-5-20251001","id":"msg_01EHspox49b9SjadNHX6uhUZ","type":"message","role":"assistant","content":[{"type":"text","text":"```json\n{\n  \"cik\":
+        \"0001234567\",\n  \"accession_number\": \"0001234567-25-000042\",\n  \"form_type\":
+        \"S-3\",\n  \"dilution_event\": {\n    \"citation\": {\n      \"source_quote\":
+        \"up to $300 million in aggregate offering amount of our common stock, preferred
+        stock, debt securities, warrants, and units\"\n    },\n    \"confidence\":
+        0.92\n  },\n  \"capital_raise_language\": [\n    {\n      \"citation\": {\n        \"source_quote\":
+        \"at-the-market offerings as defined in Rule 415(a)(4) under the Securities
+        Act\"\n      },\n      \"confidence\": 0.95\n    },\n    {\n      \"citation\":
+        {\n        \"source_quote\": \"registered direct offerings\"\n      },\n      \"confidence\":
+        0.95\n    }\n  ],\n  \"use_of_proceeds\": [\n    {\n      \"citation\": {\n        \"source_quote\":
+        \"general corporate purposes, including working capital, research and development
+        activities, capital expenditures\"\n      },\n      \"confidence\": 0.94\n    },\n    {\n      \"citation\":
+        {\n        \"source_quote\": \"to fund the Phase II clinical trial of our
+        lead therapeutic candidate ACM-101 in patients with relapsed multiple myeloma\"\n      },\n      \"confidence\":
+        0.94\n    }\n  ]\n}\n```"}],"stop_reason":"end_turn","stop_sequence":null,"stop_details":null,"usage":{"input_tokens":1697,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":344,"service_tier":"standard","inference_geo":"not_available"}}'
+    headers:
+      CF-RAY:
+      - a00aeb06680bb923-MEL
+      Connection:
+      - keep-alive
+      Content-Security-Policy:
+      - default-src 'none'; frame-ancestors 'none'
+      Content-Type:
+      - application/json
+      Date:
+      - Sun, 24 May 2026 08:26:57 GMT
+      Server:
+      - cloudflare
+      Transfer-Encoding:
+      - chunked
+      X-Robots-Tag:
+      - none
+      anthropic-organization-id:
+      - 502608b4-e4d8-4d24-b97a-f402286040dd
+      anthropic-ratelimit-input-tokens-limit:
+      - '450000'
+      anthropic-ratelimit-input-tokens-remaining:
+      - '449000'
+      anthropic-ratelimit-input-tokens-reset:
+      - '2026-05-24T08:26:55Z'
+      anthropic-ratelimit-output-tokens-limit:
+      - '90000'
+      anthropic-ratelimit-output-tokens-remaining:
+      - '90000'
+      anthropic-ratelimit-output-tokens-reset:
+      - '2026-05-24T08:26:57Z'
+      anthropic-ratelimit-requests-limit:
+      - '1000'
+      anthropic-ratelimit-requests-remaining:
+      - '999'
+      anthropic-ratelimit-requests-reset:
+      - '2026-05-24T08:26:54Z'
+      anthropic-ratelimit-tokens-limit:
+      - '540000'
+      anthropic-ratelimit-tokens-remaining:
+      - '539000'
+      anthropic-ratelimit-tokens-reset:
+      - '2026-05-24T08:26:55Z'
+      cf-cache-status:
+      - DYNAMIC
+      content-length:
+      - '1658'
+      request-id:
+      - req_011CbM5P2iLYkSQ76JyiPzdF
+      set-cookie:
+      - _cfuvid=B.OtVTtUUKSpVS_3EdutnoTontF_JKT05FCHvi9EbDg-1779611213.8220375-1.0.1.1-XNED.5xVBdcfQkoPzYHrt9P7Z_tb4fWZXws.VC5XWmM;
+        HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com
+      strict-transport-security:
+      - max-age=31536000; includeSubDomains; preload
+      traceresponse:
+      - 00-de8958068cf7b1b7f8c54049aca2804b-2fd2fc3ed1677ea5-01
+      vary:
+      - Accept-Encoding
+      x-envoy-upstream-service-time:
+      - '2973'
+    status:
+      code: 200
+      message: OK
+version: 1
