@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import anthropic
+from opentelemetry import trace
 from pydantic import ValidationError
 
 from auto_research._io import atomic_write_text
@@ -60,6 +61,7 @@ _WORKER = "s_filings"
 _TASK = "dilution_event"  # matches SFilingOutput.dilution_event field name
 _MAX_TOKENS = 4096
 _DECODING_PARAMS: dict[str, object] = {"max_tokens": _MAX_TOKENS}
+_tracer = trace.get_tracer(__name__)
 
 # Module-level lazy client so per-worker cost_cap + circuit_breaker state
 # accumulates across calls. Each call site that passes its own
@@ -216,80 +218,90 @@ def extract_s_filing(
         decoding_params=_DECODING_PARAMS,
     )
 
-    cached = content_cache.read(effective_cache_root, _WORKER, key)
-    if cached is not None:
-        return SFilingOutput.model_validate(cached)
+    with _tracer.start_as_current_span("extract.s_filings") as span:
+        span.set_attribute("extract.worker", _WORKER)
+        span.set_attribute("extract.doc_id", doc_id)
 
-    client = _get_client(anthropic_client)
-    response = client(
-        task=_TASK,
-        system_prompt=S_FILINGS_DILUTION_PROMPT,
-        user_content=raw_doc,
-        max_tokens=_MAX_TOKENS,
-    )
+        cached = content_cache.read(effective_cache_root, _WORKER, key)
+        if cached is not None:
+            span.set_attribute("extract.outcome", "cache_hit")
+            return SFilingOutput.model_validate(cached)
 
-    # Extract the text content. An empty content list or a non-text-block
-    # response (e.g. refusal, max_tokens before any text) leaves `text` as
-    # the empty string — treat as a parse failure so the model's response
-    # shape is auditable rather than crashing the batch.
-    text = _strip_fence(
-        "".join(b.text for b in response.content if b.type == "text").strip()
-    )
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
-        _write_quarantine(
-            quarantine_root=effective_quarantine_root,
-            doc_id=doc_id,
-            parsed={"raw_text": text},
-            error=f"json decode failed: {exc}",
+        client = _get_client(anthropic_client)
+        response = client(
+            task=_TASK,
+            system_prompt=S_FILINGS_DILUTION_PROMPT,
+            user_content=raw_doc,
+            max_tokens=_MAX_TOKENS,
         )
-        return None
 
-    # Snapshot BEFORE _resolve_spans builds its mutated copy, so a quarantine
-    # write on the next branch persists the model's actual output.
-    parsed_snapshot = copy.deepcopy(parsed)
-
-    resolved, problem_quotes = _resolve_spans(parsed, raw_doc)
-    if problem_quotes:
-        _write_quarantine(
-            quarantine_root=effective_quarantine_root,
-            doc_id=doc_id,
-            parsed=parsed_snapshot,
-            error=f"source_quote(s) unresolvable in raw_doc: {problem_quotes!r}",
+        # Extract the text content. An empty content list or a non-text-block
+        # response (e.g. refusal, max_tokens before any text) leaves `text` as
+        # the empty string — treat as a parse failure so the model's response
+        # shape is auditable rather than crashing the batch.
+        text = _strip_fence(
+            "".join(b.text for b in response.content if b.type == "text").strip()
         )
-        return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            span.set_attribute("extract.outcome", "quarantined")
+            _write_quarantine(
+                quarantine_root=effective_quarantine_root,
+                doc_id=doc_id,
+                parsed={"raw_text": text},
+                error=f"json decode failed: {exc}",
+            )
+            return None
 
-    try:
-        output = SFilingOutput.model_validate(resolved)
-    except ValidationError as exc:
-        _write_quarantine(
-            quarantine_root=effective_quarantine_root,
+        # Snapshot BEFORE _resolve_spans builds its mutated copy, so a quarantine
+        # write on the next branch persists the model's actual output.
+        parsed_snapshot = copy.deepcopy(parsed)
+
+        resolved, problem_quotes = _resolve_spans(parsed, raw_doc)
+        if problem_quotes:
+            span.set_attribute("extract.outcome", "quarantined")
+            _write_quarantine(
+                quarantine_root=effective_quarantine_root,
+                doc_id=doc_id,
+                parsed=parsed_snapshot,
+                error=f"source_quote(s) unresolvable in raw_doc: {problem_quotes!r}",
+            )
+            return None
+
+        try:
+            output = SFilingOutput.model_validate(resolved)
+        except ValidationError as exc:
+            span.set_attribute("extract.outcome", "quarantined")
+            _write_quarantine(
+                quarantine_root=effective_quarantine_root,
+                doc_id=doc_id,
+                parsed=parsed_snapshot,
+                error=f"schema validation failed: {exc}",
+            )
+            return None
+
+        # Defense in depth — even though spans were just computed by the worker
+        # against `raw_doc`, run the validator: catches future worker bugs
+        # (e.g., a refactor that changes _resolve_spans without re-running it)
+        # before the bad output reaches the cache.
+        validated = validate_or_quarantine(
+            output,
+            source_text=raw_doc,
             doc_id=doc_id,
-            parsed=parsed_snapshot,
-            error=f"schema validation failed: {exc}",
+            worker=_WORKER,
+            prompt_version=S_FILINGS_DILUTION_PROMPT_VERSION,
+            quarantine_root=effective_quarantine_root,
         )
-        return None
+        if validated is None:
+            span.set_attribute("extract.outcome", "quarantined")
+            return None
 
-    # Defense in depth — even though spans were just computed by the worker
-    # against `raw_doc`, run the validator: catches future worker bugs
-    # (e.g., a refactor that changes _resolve_spans without re-running it)
-    # before the bad output reaches the cache.
-    validated = validate_or_quarantine(
-        output,
-        source_text=raw_doc,
-        doc_id=doc_id,
-        worker=_WORKER,
-        prompt_version=S_FILINGS_DILUTION_PROMPT_VERSION,
-        quarantine_root=effective_quarantine_root,
-    )
-    if validated is None:
-        return None
-
-    content_cache.write(
-        effective_cache_root, _WORKER, key, validated.model_dump(mode="json")
-    )
-    return validated
+        content_cache.write(
+            effective_cache_root, _WORKER, key, validated.model_dump(mode="json")
+        )
+        span.set_attribute("extract.outcome", "persisted")
+        return validated
 
 
 __all__ = ["extract_s_filing"]

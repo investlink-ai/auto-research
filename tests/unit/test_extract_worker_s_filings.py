@@ -304,3 +304,69 @@ def test_quarantine_captures_original_parsed_not_mutated(tmp_path: Path) -> None
     assert captured_citation["source_quote"] == "not-in-doc"
     # The model's original span survives — not a sentinel injected by the worker
     assert captured_citation["source_span"] == [99, 100]
+
+
+# ---------- OTel instrumentation (refs #52) ----------
+
+
+def test_extract_s_filing_emits_span_persisted(
+    span_recorder, tmp_path: Path  # type: ignore[no-untyped-def]
+) -> None:
+    """Successful extraction → outcome=persisted (parents the existing
+    llm.cost.est_usd attribute set by extract/client.py:151)."""
+    client = _fake_client(json.dumps(_valid_output()))
+    extract_s_filing(
+        raw_doc=_SAMPLE_S3,
+        doc_id="doc-persist",
+        cache_root=tmp_path,
+        quarantine_root=tmp_path / "quar",
+        anthropic_client=client,
+    )
+    span = span_recorder.one("extract.s_filings")
+    assert span.attributes["extract.worker"] == "s_filings"
+    assert span.attributes["extract.doc_id"] == "doc-persist"
+    assert span.attributes["extract.outcome"] == "persisted"
+
+
+def test_extract_s_filing_emits_span_cache_hit(
+    span_recorder, tmp_path: Path  # type: ignore[no-untyped-def]
+) -> None:
+    """A second invocation should record outcome=cache_hit."""
+    client = _fake_client(json.dumps(_valid_output()))
+    # Seed the cache via a first call.
+    extract_s_filing(
+        raw_doc=_SAMPLE_S3,
+        doc_id="doc-cache",
+        cache_root=tmp_path,
+        quarantine_root=tmp_path / "quar",
+        anthropic_client=client,
+    )
+    # Second call should hit cache without invoking the LLM.
+    extract_s_filing(
+        raw_doc=_SAMPLE_S3,
+        doc_id="doc-cache",
+        cache_root=tmp_path,
+        quarantine_root=tmp_path / "quar",
+        anthropic_client=client,
+    )
+    spans = span_recorder.by_name("extract.s_filings")
+    assert len(spans) == 2
+    assert spans[0].attributes["extract.outcome"] == "persisted"
+    assert spans[1].attributes["extract.outcome"] == "cache_hit"
+
+
+def test_extract_s_filing_emits_span_quarantined_on_bad_json(
+    span_recorder, tmp_path: Path  # type: ignore[no-untyped-def]
+) -> None:
+    """JSON-decode failure → outcome=quarantined."""
+    client = _fake_client("this is not JSON, it is prose")
+    out = extract_s_filing(
+        raw_doc=_SAMPLE_S3,
+        doc_id="doc-bad-json",
+        cache_root=tmp_path,
+        quarantine_root=tmp_path / "quar",
+        anthropic_client=client,
+    )
+    assert out is None
+    span = span_recorder.one("extract.s_filings")
+    assert span.attributes["extract.outcome"] == "quarantined"
