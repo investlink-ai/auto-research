@@ -50,15 +50,29 @@ SOURCE_NAME: Final = "youtube"
 
 # Per-ticker search query override. The default query is
 # `{ticker} earnings call`, which works for most tickers but
-# false-positives on short tickers whose symbols collide with crypto
-# tokens, file extensions, etc. Override here when the ticker's
-# symbol is ambiguous; the value is appended with ` earnings call`.
+# misses tickers whose symbol doesn't match the company name used
+# by aggregator uploaders (e.g., GOOGL → 'Alphabet', LEU → 'Centrus
+# Energy'). Override here; the value is appended with `earnings call
+# Q{quarter} {year}` before search.
 #
-# Adding a ticker = adding a row here. The coverage-survey worker
-# is the canonical place to populate this en masse; one entry is
-# seeded as a canary for the live path.
+# Seeded with the tickers whose bare-symbol query failed the title-
+# gated probe in the universe-wide coverage measurement. Each
+# override below was empirically verified to recover the ticker
+# (find_audio_url returns an in-band, title-matching URL on a recent
+# quarter). The coverage-survey worker can populate additional rows
+# as the universe expands or aggregator naming patterns shift.
 TICKER_QUERIES: dict[str, str] = {
+    "AAOI": "Applied Optoelectronics",
+    "CBRS": "CoreWeave",
+    "FORM": "FormFactor",
+    "GOOGL": "Alphabet",
+    "LEU": "Centrus Energy",
+    "MIR": "Mirion Technologies",
     "NVDA": "NVIDIA",
+    "NVMI": "Nova",
+    "SATS": "EchoStar",
+    "STRL": "Sterling Infrastructure",
+    "TLN": "Talen Energy",
 }
 
 # Earnings calls are typically 40-90 minutes (2400-5400 sec). We use a
