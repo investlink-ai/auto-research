@@ -46,7 +46,7 @@ def test_compute_f1_empty_on_both_sides_is_perfect() -> None:
 def test_promote_refuses_below_f1_threshold(tmp_path: Path) -> None:
     gold = {
         "prompt_name": "s_filings_dilution",
-        "thresholds": {"min_f1": 0.9, "max_usd_per_doc": 1.0},
+        "thresholds": {"min_f1": 0.9, "max_usd_per_doc": None},
         "samples": [],  # no samples -> early-return refusal
     }
     gold_path = tmp_path / "gold.json"
@@ -80,7 +80,7 @@ def test_promote_handles_none_worker_output(tmp_path: Path) -> None:
     }
     gold = {
         "prompt_name": "s_filings_dilution",
-        "thresholds": {"min_f1": 0.5, "max_usd_per_doc": 1.0},
+        "thresholds": {"min_f1": 0.5, "max_usd_per_doc": None},
         "samples": [sample],
     }
     gold_path = tmp_path / "gold.json"
@@ -111,7 +111,7 @@ def test_promote_flips_tag_when_threshold_met(tmp_path: Path) -> None:
     }
     gold = {
         "prompt_name": "s_filings_dilution",
-        "thresholds": {"min_f1": 0.5, "max_usd_per_doc": 1.0},
+        "thresholds": {"min_f1": 0.5, "max_usd_per_doc": None},
         "samples": [sample],
     }
     gold_path = tmp_path / "gold.json"
@@ -141,6 +141,42 @@ def test_promote_flips_tag_when_threshold_met(tmp_path: Path) -> None:
         version=5,
         new_labels=["production"],
     )
+
+
+def test_promote_refuses_when_cost_gate_requested_but_unsupported(
+    tmp_path: Path,
+) -> None:
+    """A positive `max_usd_per_doc` value is a loud refusal because per-doc
+    cost telemetry is not yet wired through the cache layer; previously
+    this check was dead code (`usd_per_doc` hardcoded to 0.0) and
+    silently passed. Codex code-review finding."""
+    sample = {
+        "doc_id": "g1",
+        "raw_doc": "x",
+        "expected": {"dilution_event_quote": None, "use_of_proceeds_phrases": []},
+    }
+    gold = {
+        "prompt_name": "s_filings_dilution",
+        "thresholds": {"min_f1": 0.0, "max_usd_per_doc": 0.05},
+        "samples": [sample],
+    }
+    gold_path = tmp_path / "gold.json"
+    gold_path.write_text(json.dumps(gold))
+    client = MagicMock()
+
+    def empty_worker(raw: str, doc_id: str) -> dict[str, Any]:
+        return {"dilution_event": None, "use_of_proceeds": []}
+
+    result = promote(
+        prompt_name="s_filings_dilution",
+        version="v1",
+        gold_path=gold_path,
+        worker_fn=empty_worker,
+        langfuse_client=client,
+    )
+    assert result.promoted is False
+    assert "cost gating not yet implemented" in result.reason
+    client.update_prompt.assert_not_called()
 
 
 def test_main_uses_in_code_version_not_a_cli_arg(monkeypatch: pytest.MonkeyPatch) -> None:

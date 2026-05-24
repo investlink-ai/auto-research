@@ -2,7 +2,7 @@
   "prompt_name": "s_filings_dilution",
   "thresholds": {
     "min_f1": 0.7,
-    "max_usd_per_doc": 0.05
+    "max_usd_per_doc": null
   },
   "samples": [
     {

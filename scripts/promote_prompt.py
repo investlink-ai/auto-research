@@ -119,7 +119,12 @@ def promote(
     samples = gold.get("samples", [])
     thresholds = gold["thresholds"]
     min_f1 = float(thresholds["min_f1"])
-    max_usd = float(thresholds["max_usd_per_doc"])
+    # `max_usd_per_doc` is intentionally Optional[float]: `null` means
+    # "don't gate on cost" (the only currently-supported mode). A positive
+    # value is honored only as a loud refusal — see the NOTE in the
+    # eval loop below.
+    raw_max_usd = thresholds.get("max_usd_per_doc")
+    max_usd: float | None = float(raw_max_usd) if raw_max_usd is not None else None
 
     if not samples:
         return PromotionResult(
@@ -144,24 +149,31 @@ def promote(
         f1_scores.append(compute_f1(sample["expected"], actual_dict))
     mean_f1 = sum(f1_scores) / len(f1_scores)
 
-    # v1 doesn't compute live USD; the worker handles caching and the script
-    # doesn't want to re-invoke the cost-cap layer. Reserve the ceiling
-    # check for when we add per-call cost telemetry from the cache record.
-    usd_per_doc = 0.0
+    # NOTE: per-doc USD cost telemetry is not yet wired through the cache
+    # layer; the gold-set's `max_usd_per_doc` field is honored only if it
+    # is `null` (meaning "don't gate on cost"). Any positive value is
+    # rejected loudly so an operator cannot accidentally rely on a check
+    # that has no input — a previous revision of this script hardcoded
+    # `usd_per_doc = 0.0`, making the ceiling check dead code that passed
+    # silently regardless of actual spend. Wiring cost via cache-record
+    # metadata is tracked as follow-up work.
+    if max_usd is not None:
+        return PromotionResult(
+            promoted=False,
+            f1=mean_f1,
+            usd_per_doc=0.0,
+            reason=(
+                "cost gating not yet implemented; set "
+                "thresholds.max_usd_per_doc to null to bypass"
+            ),
+        )
 
     if mean_f1 < min_f1:
         return PromotionResult(
             promoted=False,
             f1=mean_f1,
-            usd_per_doc=usd_per_doc,
+            usd_per_doc=0.0,
             reason=f"f1={mean_f1:.3f} below f1 threshold {min_f1}",
-        )
-    if usd_per_doc > max_usd:
-        return PromotionResult(
-            promoted=False,
-            f1=mean_f1,
-            usd_per_doc=usd_per_doc,
-            reason=f"usd_per_doc={usd_per_doc:.4f} above ceiling {max_usd}",
         )
 
     set_prompt_tag(
@@ -173,7 +185,7 @@ def promote(
     return PromotionResult(
         promoted=True,
         f1=mean_f1,
-        usd_per_doc=usd_per_doc,
+        usd_per_doc=0.0,
         reason=f"promoted: f1={mean_f1:.3f} >= {min_f1}",
     )
 
