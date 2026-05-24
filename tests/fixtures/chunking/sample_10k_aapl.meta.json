@@ -1,0 +1,15 @@
+{
+  "ticker": "AAPL",
+  "filing_date": "2021-10-29",
+  "fiscal_period": "FY2021",
+  "doc_type": "10-K",
+  "doc_id": "0000320193-21-000105",
+  "expected_sections": [
+    "Item 1A",
+    "Item 7",
+    "Item 8"
+  ],
+  "source_url": "https://www.sec.gov/Archives/edgar/data/320193/000032019321000105/aapl-20210925.htm",
+  "filename_convention": "Uses .htm extension per SEC EDGAR's 25+-year convention. Production input from EDGAR always ends in .htm; fixture matches so any extension-aware tooling behaves identically in tests and live.",
+  "note": "Real EDGAR 10-K for AAPL, fiscal period FY2021, filed 2021-10-29. Public-domain SEC filing. Trimmed via scripts/build_chunking_fixture.py to fit the 500 KB pre-commit cap while preserving real section headers for Item 1A, Item 7, Item 8 in document order and at least one inline financial table for Item 8 table-policy tests."
+}

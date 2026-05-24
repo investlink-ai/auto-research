@@ -486,11 +486,13 @@ _HEADER_DENSITY_MIN_ALPHA: Final[int] = 80
 # entity-encoded space-then-period), optional whitespace, then a
 # capitalized title (Risk Factors, Management's Discussion, etc.).
 # Cross-references say "Item 7 above" / "Item 7 of this Form" — no
-# period, lowercase preposition. Inspected in the ~250 chars
-# immediately following the candidate, after stripping HTML tags and
-# entities, so the title check works regardless of how the filer
-# styled the heading.
-_HEADER_TITLE_LOOKAHEAD: Final[int] = 250
+# period, lowercase preposition. Inspected after stripping HTML tags
+# and entities so the title check works regardless of how the filer
+# styled the heading. The 800-char raw-HTML window is sized to capture
+# the closing `>` of multi-line `<p style="...">` openings common in
+# MSFT-template filings (style attribute can run 100+ characters
+# before the tag closes).
+_HEADER_TITLE_LOOKAHEAD: Final[int] = 800
 _TITLE_PATTERN = re.compile(r"^\s*[.:]\s*[A-Z]")
 
 
@@ -678,12 +680,26 @@ def _detect_sections(html: str) -> list[_DetectedSection]:
     masked = _mask_comments(html)
 
     # Collect first qualifying occurrence of each valid Item.
+    #
+    # Filter strategy:
+    #   1. Whitelist filter (`_VALID_10K_ITEMS`) — drops rule
+    #      references like "Item 408 of Regulation S-K".
+    #   2. Title-pattern check (`_is_real_section_header`) — requires
+    #      ". <Capitalized Title>" after the Item-N number. This is
+    #      the primary filter; it rejects cross-references like
+    #      "Item 7 above" / "Item 7 of this Form" mechanically.
+    #
+    # We do NOT require `_looks_like_block_header` (block/styled
+    # preceding tag). Filers' header styling varies dramatically —
+    # NVDA uses `<div>` wrappers, AMD/AVGO use bold styled `<span>`,
+    # MSFT puts headers in `<td>` cells of layout tables with
+    # `font-weight:normal`. A structural pre-filter that handles all
+    # templates would need per-filer special cases; the title-pattern
+    # check filters out cross-references regardless of styling.
     by_name: dict[str, int] = {}
     for m in _ITEM_HEADER.finditer(masked):
         num = m.group(1).upper()
         if num not in _VALID_10K_ITEMS:
-            continue
-        if not _looks_like_block_header(html, m.start()):
             continue
         if not _is_real_section_header(html, m.start()):
             continue

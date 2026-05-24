@@ -483,15 +483,31 @@ def test_financial_section_emits_chunks_with_table_html(filing: _LoadedFixture) 
     )
 
 
-def test_narrative_parents_have_no_table_html(filing: _LoadedFixture) -> None:
-    """Item 1A (Risk Factors) is pure narrative — no tables. All Item 1A
-    chunks must have `table_html=None`."""
+def test_item_1a_has_at_least_some_narrative_chunks(filing: _LoadedFixture) -> None:
+    """Item 1A (Risk Factors) is *primarily* narrative across all filers.
+
+    Some filers (e.g., MSFT) format bulleted risk-factor lists using
+    HTML layout tables — `<table>` with no real numeric data, used
+    only for visual indentation. Those chunks carry `table_html`
+    legitimately. The chunker's table policy (ADR D5) emits any
+    `<table>` as a table chunk regardless of whether it's a data
+    table or a layout table — downstream `pandas.read_html` handles
+    the discrimination by either successfully parsing the structured
+    data or rejecting unstructured layout content.
+
+    The test asserts the weaker, filer-portable invariant: at least
+    SOME Item 1A chunks must be narrative (`table_html=None`). If
+    every Item 1A chunk has `table_html`, either detection assigned
+    a wrong section_name or the section is entirely tabular (not
+    plausible for risk factors).
+    """
     item_1a = [p for p in filing.parsed.parents if p.section_name == "Item 1A"]
     assert item_1a, f"[{filing.stem}] expected Item 1A parents"
-    for p in item_1a:
-        assert p.table_html is None, (
-            f"[{filing.stem}] Item 1A chunk should not carry table_html"
-        )
+    narrative_chunks = [p for p in item_1a if p.table_html is None]
+    assert narrative_chunks, (
+        f"[{filing.stem}] expected ≥1 narrative Item 1A chunk; "
+        f"all {len(item_1a)} have table_html (suspicious)"
+    )
 
 
 def test_at_least_one_table_html_is_pandas_readable(filing: _LoadedFixture) -> None:

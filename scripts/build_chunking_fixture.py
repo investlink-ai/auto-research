@@ -243,10 +243,8 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    print("Writing fixture …")
-    FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
-    htm_path.write_text(trimmed, encoding="utf-8")
-
+    # Validate BEFORE writing so a failed build never leaves a broken
+    # fixture behind for the parameterized test suite to pick up.
     expected = [s.strip() for s in args.expected_sections.split(",") if s.strip()]
     print(f"Validating chunker detection (expected: {expected}) …")
     detected = _validate_trimmed(trimmed, expected)
@@ -254,8 +252,17 @@ def main() -> int:
     if missing:
         print(f"  ✗ MISSING sections: {missing}", file=sys.stderr)
         print(f"  detected: {sorted(detected)}", file=sys.stderr)
+        print(
+            f"  fixture NOT written to {htm_path.relative_to(REPO_ROOT)} — "
+            "fix the chunker or the trim heuristics first.",
+            file=sys.stderr,
+        )
         return 2
     print(f"  ✓ detected: {sorted(detected)}")
+
+    print("Writing fixture …")
+    FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
+    htm_path.write_text(trimmed, encoding="utf-8")
 
     meta = {
         "ticker": args.ticker,
