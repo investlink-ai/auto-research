@@ -29,6 +29,8 @@ from typing import Any, Final
 import httpx
 from tenacity import RetryCallState, wait_exponential_jitter
 
+from auto_research._transport import TRANSIENT_NETWORK_ERRORS
+
 # Tunables. Sources may pass overrides (e.g., a slower upstream might
 # want a higher max_attempts; a faster one a tighter backoff).
 DEFAULT_MAX_ATTEMPTS: Final = 5
@@ -38,17 +40,6 @@ DEFAULT_MAX_BACKOFF: Final = 30.0
 # real-world Retry-After values are single-digit seconds; 300s is a
 # generous cap.
 MAX_RETRY_AFTER_SECONDS: Final = 300.0
-
-# httpx-level transient errors that warrant a retry. ReadError/WriteError
-# covers connection resets; ConnectError covers DNS / TCP problems;
-# TimeoutException covers all of httpx's timeout subclasses.
-TRANSIENT_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
-    httpx.ConnectError,
-    httpx.ReadError,
-    httpx.WriteError,
-    httpx.RemoteProtocolError,
-    httpx.TimeoutException,
-)
 
 
 class RateLimited(httpx.HTTPStatusError):
