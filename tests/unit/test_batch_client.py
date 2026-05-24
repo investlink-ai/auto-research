@@ -28,6 +28,7 @@ documented as a test-double cast.
 from __future__ import annotations
 
 from typing import Any, cast
+from unittest.mock import MagicMock, patch
 
 import anthropic
 import pytest
@@ -542,3 +543,75 @@ def test_wait_raises_timeout_when_batch_never_ends() -> None:
     # Tiny timeout + zero poll interval so the test runs fast.
     with pytest.raises(TimeoutError):
         client.wait(handle, poll_interval=0.0, timeout=0.0)
+
+
+# --- OTel cost emission (parity with sync client) --------------------------
+
+
+def test_results_emits_aggregate_est_usd_to_active_span() -> None:
+    """The sync client emits `llm.cost.est_usd` per call; the batch client
+    emits it per *batch* (aggregated across all succeeded messages).
+    Without this, Langfuse / Grafana would see token counts for the
+    batch but no dollar figure — a real gap when comparing sync and
+    batch backfill cost in dashboards.
+    """
+    big_msg = _make_message(
+        model="claude-sonnet-4-6", input_tokens=1_000_000, output_tokens=1_000_000
+    )
+    batches = _FakeBatches(
+        results_returns=[
+            _make_individual_response(custom_id="r1", message=big_msg),
+            _make_individual_response(custom_id="r2", message=big_msg),
+        ],
+    )
+    fake = _FakeAnthropicClient(batches)
+    mock_span = MagicMock()
+    with patch(
+        "auto_research.extract.batch_client.trace.get_current_span",
+        return_value=mock_span,
+    ):
+        client = make_batch_client(
+            worker="ten_k",
+            usd_cap=1000.00,
+            anthropic_client=_as_sdk(fake),
+        )
+        handle = client.submit(
+            task="supplier_mentions",
+            requests=[BatchRequest(custom_id="x", system_prompt="s", user_content="d")],
+        )
+        client.results(handle)
+
+    # 2 * \$9 (batch-discounted Sonnet 4.6 * 1M+1M tokens) = \$18.
+    mock_span.set_attribute.assert_any_call("llm.cost.est_usd", pytest.approx(18.0))
+
+
+def test_results_emits_zero_when_no_succeeded_messages() -> None:
+    """Defensive: a batch where everything errored should still emit the
+    attribute, but with value 0.0. Skipping the emit would make
+    dashboards confused between "no batch happened" and "batch
+    happened but all-errored".
+    """
+    batches = _FakeBatches(
+        results_returns=[
+            _make_individual_response(custom_id="a", result_type="errored"),
+            _make_individual_response(custom_id="b", result_type="expired"),
+        ],
+    )
+    fake = _FakeAnthropicClient(batches)
+    mock_span = MagicMock()
+    with patch(
+        "auto_research.extract.batch_client.trace.get_current_span",
+        return_value=mock_span,
+    ):
+        client = make_batch_client(
+            worker="s_filings",
+            usd_cap=1000.00,
+            anthropic_client=_as_sdk(fake),
+        )
+        handle = client.submit(
+            task="dilution_event",
+            requests=[BatchRequest(custom_id="x", system_prompt="s", user_content="d")],
+        )
+        client.results(handle)
+
+    mock_span.set_attribute.assert_any_call("llm.cost.est_usd", 0.0)

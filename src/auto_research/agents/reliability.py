@@ -175,51 +175,108 @@ def circuit_breaker(*, failures: int) -> Callable[[F], F]:
     return decorate
 
 
-# --- @cost_cap ---------------------------------------------------------------
+# --- CostTracker + @cost_cap -------------------------------------------------
+#
+# The decorator shape (wrap a single Message-returning call) doesn't fit every
+# caller. The batch client (`extract/batch_client.py`) accumulates cost across
+# N messages emitted at once by `results()` — there's no single call to
+# decorate. Both callers want the same primitive: a thread-safe USD
+# accumulator with a hard cap that raises `CostCapExceeded` on overage.
+# `CostTracker` is that primitive; `cost_cap` is the decorator wiring for the
+# Message-returning call site.
+
+
+class CostTracker:
+    """Thread-safe USD accumulator with a hard cap.
+
+    Used by both the `@cost_cap` decorator (closure state) and the batch
+    client's `BatchClient` (instance state). The shared implementation
+    means the lock discipline, threshold check, and error message format
+    are pinned in one place; the decorator and the batch client just
+    differ in *when* they call `add_message` vs `check_or_raise`.
+
+    `check_or_raise` is on the *past* spend, not a forecast: we never
+    preview the next call's cost (we'd be guessing). This is what makes
+    `cost_cap` a "hard ceiling on past spend" rather than a budget.
+    """
+
+    def __init__(self, *, usd_cap: float) -> None:
+        if usd_cap <= 0:
+            raise ValueError("`usd_cap` must be > 0")
+        self._cap = usd_cap
+        self._running = 0.0
+        self._lock = threading.Lock()
+
+    def check_or_raise(self, *, where: str = "") -> None:
+        """Raise `CostCapExceeded` if the accumulated spend already crossed
+        the cap. Safe to call before every billable operation.
+        """
+        with self._lock:
+            running = self._running
+        if running > self._cap:
+            qualifier = f" on {where}" if where else ""
+            raise CostCapExceeded(
+                f"cost_cap exceeded{qualifier}: "
+                f"${running:.4f} > ${self._cap:.2f}"
+            )
+
+    def add_message(self, message: Message) -> float:
+        """Accumulate the USD cost of `message` (via `usd_for_message`) into
+        the running total. Returns the delta added — convenient for
+        callers that also want to emit it as telemetry without computing
+        the figure twice.
+        """
+        delta = usd_for_message(message)
+        with self._lock:
+            self._running += delta
+        return delta
+
+    def reset(self) -> None:
+        """Zero the running total. For tests and explicit session
+        boundaries; production code should rely on per-worker cap
+        enforcement rather than calling this.
+        """
+        with self._lock:
+            self._running = 0.0
+
+    def running_usd(self) -> float:
+        with self._lock:
+            return self._running
 
 
 def cost_cap(*, usd: float) -> Callable[[F], F]:
     """Hard USD limit on cumulative spend for the decorated callable.
 
     The inner function must return an `anthropic.types.Message`. After each
-    call, the response's `usage` is converted to USD via `_PRICING_PER_MTOK`
-    and added to the running total. Once `running_total > usd`, every
-    subsequent call raises `CostCapExceeded` without invoking the inner —
-    *the cap is a ceiling on past spend*, not a budget for the current
-    call. (The contract's "hard $ limit" guarantee depends on this:
-    if we previewed the next call's cost we'd be guessing.)
+    call, the response's `usage` is converted to USD via `usd_for_message`
+    and added to the running total via a `CostTracker`. Once the running
+    total crosses `usd`, every subsequent call raises `CostCapExceeded`
+    without invoking the inner — the cap is a ceiling on past spend, not
+    a budget for the current call.
+
+    For non-Message return shapes (e.g., the batch client's
+    `BatchClient.results()` emits N messages from one call), instantiate
+    `CostTracker` directly instead of using this decorator.
     """
     if usd <= 0:
         raise ValueError("`usd` must be > 0")
 
     def decorate(func: F) -> F:
-        state = {"running_usd": 0.0}
-        lock = threading.Lock()
+        tracker = CostTracker(usd_cap=usd)
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            with lock:
-                if state["running_usd"] > usd:
-                    raise CostCapExceeded(
-                        f"cost_cap exceeded on {func.__qualname__}: "
-                        f"${state['running_usd']:.4f} > ${usd:.2f}"
-                    )
+            tracker.check_or_raise(where=func.__qualname__)
             result = func(*args, **kwargs)
             if isinstance(result, Message):
-                with lock:
-                    state["running_usd"] += usd_for_message(result)
+                tracker.add_message(result)
             return result
 
-        def reset() -> None:
-            with lock:
-                state["running_usd"] = 0.0
-
-        def running_usd() -> float:
-            with lock:
-                return state["running_usd"]
-
-        wrapper.reset = reset  # type: ignore[attr-defined]
-        wrapper.running_usd = running_usd  # type: ignore[attr-defined]
+        # Expose the tracker's introspection / reset methods on the
+        # wrapper for parity with the pre-CostTracker API. Production
+        # code rarely uses these; tests do.
+        wrapper.reset = tracker.reset  # type: ignore[attr-defined]
+        wrapper.running_usd = tracker.running_usd  # type: ignore[attr-defined]
         return cast(F, wrapper)
 
     return decorate
@@ -294,6 +351,7 @@ def reliable_agent_node(
 __all__ = [
     "CircuitOpen",
     "CostCapExceeded",
+    "CostTracker",
     "circuit_breaker",
     "cost_cap",
     "reliable_agent_node",

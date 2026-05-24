@@ -38,10 +38,12 @@ one `Message`. That doesn't fit batch shape:
   no mechanism to do so without losing partial work.
 - **`poll()`** is a status read with no cost implication; not wrapped.
 
-The cost tracker is implemented inline as a small `_CostTracker` class
-rather than reusing `cost_cap`'s decorator. Two callers (sync + batch)
-isn't enough to justify pulling that out yet — rule of three says wait
-for a third caller before extracting.
+Cost accounting is shared with the sync client via
+`reliability.CostTracker` — the same accumulator powers the
+`@cost_cap` decorator (sync) and the `BatchClient` instance state
+(batch). Lock discipline, threshold check, and error format live in
+one place, so the only thing that differs between sync and batch is
+*when* `add_message` and `check_or_raise` get called.
 
 ### Error handling
 
@@ -60,7 +62,6 @@ honest representation.
 
 from __future__ import annotations
 
-import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -68,14 +69,15 @@ from typing import Any
 import anthropic
 from anthropic.types import Message
 from anthropic.types.messages import MessageBatch, MessageBatchIndividualResponse
+from opentelemetry import trace
 
 from auto_research._models import route_model
-from auto_research._pricing import usd_for_message
 from auto_research.agents.reliability import (
-    CostCapExceeded,
+    CostTracker,
     circuit_breaker,
     retry_with_backoff,
 )
+from auto_research.extract._caching import cached_system_block
 
 # --- value objects ---------------------------------------------------------
 
@@ -126,44 +128,6 @@ class BatchResults:
         return not self.failed
 
 
-# --- cost tracking (inline; rule-of-two — not yet pulled into reliability) -
-
-
-class _CostTracker:
-    """Per-`BatchClient` running USD cost with thread-safe accumulation.
-
-    Implemented inline rather than via `reliability.cost_cap` because the
-    decorator semantics (wrap a single Message-returning call) don't fit
-    batch shape (cost accrues across N messages emitted by `results()`).
-    See module docstring for the rule-of-two rationale.
-    """
-
-    def __init__(self, *, usd_cap: float) -> None:
-        if usd_cap <= 0:
-            raise ValueError("`usd_cap` must be > 0")
-        self._cap = usd_cap
-        self._running = 0.0
-        self._lock = threading.Lock()
-
-    def check_or_raise(self, *, where: str) -> None:
-        with self._lock:
-            running = self._running
-        if running > self._cap:
-            raise CostCapExceeded(
-                f"cost_cap exceeded on {where}: "
-                f"${running:.4f} > ${self._cap:.2f}"
-            )
-
-    def add_message(self, message: Message) -> None:
-        delta = usd_for_message(message)
-        with self._lock:
-            self._running += delta
-
-    def running_usd(self) -> float:
-        with self._lock:
-            return self._running
-
-
 # --- BatchClient ----------------------------------------------------------
 
 
@@ -181,7 +145,7 @@ class BatchClient:
         *,
         worker: str,
         sdk: anthropic.Anthropic,
-        cost: _CostTracker,
+        cost: CostTracker,
         submit_wrapped: Any,  # callable wrapped with reliability decorators
     ) -> None:
         self._worker = worker
@@ -218,16 +182,25 @@ class BatchClient:
         the `result.type` discriminator and accumulates the per-message
         USD into the cost tracker — the cap will block the *next*
         `submit()` if the running total crossed the threshold.
+
+        Also emits the *aggregate* USD spent on this batch as the OTel
+        span attribute `llm.cost.est_usd`. OpenLLMetry's auto-
+        instrumentation captures per-message token counts on the
+        underlying HTTP-call spans; we add the dollar figure on the
+        active span so traces / dashboards have a single per-batch
+        number without needing a join across N child spans.
         """
         succeeded: dict[str, Message] = {}
         failed: dict[str, MessageBatchIndividualResponse] = {}
+        batch_usd = 0.0
         for response in self._sdk.messages.batches.results(handle.batch_id):
             if response.result.type == "succeeded":
                 message = response.result.message
                 succeeded[response.custom_id] = message
-                self._cost.add_message(message)
+                batch_usd += self._cost.add_message(message)
             else:
                 failed[response.custom_id] = response
+        trace.get_current_span().set_attribute("llm.cost.est_usd", batch_usd)
         return BatchResults(succeeded=succeeded, failed=failed)
 
     def wait(
@@ -268,24 +241,17 @@ class BatchClient:
 def _build_sdk_request(model: str, request: BatchRequest) -> dict[str, Any]:
     """Translate a `BatchRequest` into the SDK's per-request dict shape.
 
-    Every request gets the same caching policy as the sync client:
-    `system` is a single text block marked
-    `cache_control: {"type": "ephemeral"}`. The long stable prefix is
-    cached across the whole batch — same economics as the sync path,
-    just amortized differently.
+    `cached_system_block` (shared with the sync client in
+    `extract/client.py`) wraps the system prompt with the
+    `cache_control: ephemeral` hint. Same caching policy across both
+    extraction regimes; changes apply consistently.
     """
     return {
         "custom_id": request.custom_id,
         "params": {
             "model": model,
             "max_tokens": 4096,
-            "system": [
-                {
-                    "type": "text",
-                    "text": request.system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
+            "system": cached_system_block(request.system_prompt),
             "messages": [{"role": "user", "content": request.user_content}],
         },
     }
@@ -321,7 +287,7 @@ def make_batch_client(
             callers omit it and get a real `anthropic.Anthropic()`.
     """
     sdk = anthropic_client if anthropic_client is not None else anthropic.Anthropic()
-    cost = _CostTracker(usd_cap=usd_cap)
+    cost = CostTracker(usd_cap=usd_cap)
 
     def raw_submit(sdk_requests: list[dict[str, Any]]) -> MessageBatch:
         # Check the cap BEFORE the network call. The cap is on already-
@@ -331,7 +297,9 @@ def make_batch_client(
         return sdk.messages.batches.create(requests=sdk_requests)  # type: ignore[arg-type]
 
     # circuit_breaker outer, retry inner — same composition as the sync
-    # client's `@reliable_agent_node`, minus cost_cap (handled inline).
+    # client's `@reliable_agent_node`, minus the cost_cap decorator
+    # (the `CostTracker` does the same job; the decorator just wouldn't
+    # fit the batch shape — see module docstring).
     submit_with_retry = retry_with_backoff(
         max_retries=max_retries,
         initial_wait=initial_wait,
