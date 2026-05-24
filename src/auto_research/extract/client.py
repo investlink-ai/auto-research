@@ -58,6 +58,7 @@ from opentelemetry import trace
 from auto_research._models import route_model
 from auto_research._pricing import usd_for_message
 from auto_research.agents.reliability import reliable_agent_node
+from auto_research.extract._caching import cached_system_block
 
 
 class ExtractionFn(Protocol):
@@ -132,23 +133,14 @@ def make_extraction_client(
         # message naming the bad (worker, task) pair.
         model = route_model(worker, task)
 
-        # Mark the system prompt as ephemeral. This is the W1 opinionated
-        # default: the long stable prefix is always the system prompt;
-        # per-doc user content is the variable part. Any worker needing
-        # different caching breakpoints (rare — only the chunked-RAG flow
-        # in W2) bypasses this wrapper and calls the SDK directly.
-        system_blocks = [
-            {
-                "type": "text",
-                "text": system_prompt,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
-
+        # `cached_system_block` builds the structured-block form with
+        # `cache_control: ephemeral` — same helper as the batch client
+        # uses, so the W1 caching policy (system always cacheable, user
+        # content uncached) stays consistent across both regimes.
         response = sdk.messages.create(
             model=model,
             max_tokens=max_tokens,
-            system=system_blocks,  # type: ignore[arg-type]
+            system=cached_system_block(system_prompt),  # type: ignore[arg-type]
             messages=[{"role": "user", "content": user_content}],
         )
 

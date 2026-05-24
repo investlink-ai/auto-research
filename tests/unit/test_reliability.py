@@ -20,6 +20,7 @@ from anthropic.types import Message, TextBlock, Usage
 from auto_research.agents.reliability import (
     CircuitOpen,
     CostCapExceeded,
+    CostTracker,
     circuit_breaker,
     cost_cap,
     reliable_agent_node,
@@ -341,3 +342,52 @@ def test_composite_applies_circuit_breaker_inside_cost_cap() -> None:
             call()
     with pytest.raises(CircuitOpen):
         call()
+
+
+# --- CostTracker (public, used by both @cost_cap and BatchClient) ----------
+
+
+def test_cost_tracker_accumulates_usd_from_messages() -> None:
+    tracker = CostTracker(usd_cap=100.00)
+    msg = _msg(input_tokens=1_000_000, output_tokens=500_000, model="claude-haiku-4-5")
+    # Haiku 4.5: \$1/MTok + \$5/MTok = 1.0 + 2.5 = \$3.50
+    delta = tracker.add_message(msg)
+    assert delta == pytest.approx(3.50)
+    assert tracker.running_usd() == pytest.approx(3.50)
+
+
+def test_cost_tracker_check_raises_after_threshold() -> None:
+    tracker = CostTracker(usd_cap=5.00)
+    msg = _msg(input_tokens=1_000_000, output_tokens=1_000_000, model="claude-sonnet-4-6")
+    tracker.add_message(msg)  # \$18, blows the \$5 cap
+    with pytest.raises(CostCapExceeded) as exc_info:
+        tracker.check_or_raise(where="test")
+    assert "test" in str(exc_info.value)
+    # Underlying USD value surfaced in the message — investigators reading
+    # logs shouldn't have to dig elsewhere for the numbers.
+    assert "18" in str(exc_info.value)
+    assert "5" in str(exc_info.value)
+
+
+def test_cost_tracker_check_silent_before_threshold() -> None:
+    tracker = CostTracker(usd_cap=100.00)
+    msg = _msg(input_tokens=1_000_000, output_tokens=500_000, model="claude-haiku-4-5")
+    tracker.add_message(msg)
+    # \$3.50 < \$100 cap → no raise.
+    tracker.check_or_raise(where="test")
+
+
+def test_cost_tracker_reset() -> None:
+    tracker = CostTracker(usd_cap=5.00)
+    msg = _msg(input_tokens=1_000_000, output_tokens=1_000_000, model="claude-sonnet-4-6")
+    tracker.add_message(msg)
+    assert tracker.running_usd() > 0
+    tracker.reset()
+    assert tracker.running_usd() == 0.0
+
+
+def test_cost_tracker_rejects_non_positive_cap() -> None:
+    with pytest.raises(ValueError):
+        CostTracker(usd_cap=0)
+    with pytest.raises(ValueError):
+        CostTracker(usd_cap=-1)
