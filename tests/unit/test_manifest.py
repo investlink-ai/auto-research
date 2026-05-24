@@ -1,4 +1,4 @@
-"""Unit tests for the append-only manifest ledger (Issue #5)."""
+"""Unit tests for the append-only manifest ledger."""
 
 from __future__ import annotations
 
@@ -122,11 +122,12 @@ def test_existing_doc_ids_on_missing_manifest_returns_empty(tmp_path: Path) -> N
     assert manifest.existing_doc_ids(tmp_path / "nope.parquet", source="edgar") == set()
 
 
-# ---------- nullable event_datetime (forward-compat for FMP no-coverage rows) ----------
+# ---------- nullable event_datetime (sources with no PIT stamp) ----------
 
 
 def test_append_accepts_null_event_datetime(tmp_path: Path) -> None:
-    """Issue #6 (FMP) will write rows with event_datetime=None for gap-cases."""
+    """Sources that record gap-cases (no_coverage / error rows) write
+    event_datetime=None because there's no PIT stamp for a non-existent doc."""
     path = tmp_path / "m.parquet"
     row = _row(doc_id="X")
     row["event_datetime"] = None

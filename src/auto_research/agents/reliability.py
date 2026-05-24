@@ -65,11 +65,10 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 # --- Typed trip exceptions ---------------------------------------------------
 #
-# The class names below are mandated by `docs/CONTRACTS.md` §5 and Issue #8's
-# acceptance criteria ("Failing cost_cap raises CostCapExceeded; failing
-# circuit_breaker raises CircuitOpen — both are typed, not generic.").
-# Ruff's N818 ("Exception name should end in Error") is suppressed because the
-# contract is the source of truth.
+# Class names are mandated by `docs/CONTRACTS.md` §5: a failing `cost_cap`
+# raises `CostCapExceeded`; a failing `circuit_breaker` raises `CircuitOpen`
+# — both typed, not generic. Ruff's N818 ("Exception name should end in
+# Error") is suppressed because the contract is the source of truth.
 
 
 class CircuitOpen(Exception):  # noqa: N818  # contract-mandated name (CONTRACTS §5)

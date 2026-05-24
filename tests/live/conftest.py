@@ -37,7 +37,7 @@ import pytest
 
 # Token-aware opt-in check: `live` must appear as a standalone token AND
 # not be negated. Substring matching (`"live" in markexpr`) false-positives
-# on `not live`, `alive`, `livedb`, etc. — see code review pass on PR #37.
+# on `not live`, `alive`, `livedb`, etc.
 _LIVE_TOKEN = re.compile(r"\blive\b")
 _NOT_LIVE = re.compile(r"\bnot\s+live\b")
 

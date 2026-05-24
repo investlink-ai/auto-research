@@ -1,4 +1,4 @@
-"""Unit tests for `auto_research.agents.reliability` decorators (Issue #8).
+"""Unit tests for `auto_research.agents.reliability` decorators.
 
 One test per decorator's trip condition. Composite-ordering tests assert
 that `cost_cap` short-circuits before `circuit_breaker` so the documented

@@ -48,7 +48,6 @@ def test_configured_tracking_uri_stable_across_cwds(
 
     Defends against worktree-vs-main-checkout data fragmentation: calling
     configured_tracking_uri() from any CWD must return the same store URI.
-    Regression test for the Codex P2 finding on PR #34.
     """
     monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
     uri_from_repo_root = configured_tracking_uri()

@@ -1,4 +1,4 @@
-"""VCR-recorded integration test for the EDGAR client (Issue #5 AC).
+"""VCR-recorded integration test for the EDGAR client.
 
 Covers one 10-K, one 8-K, and one S-3 (or S-3 variant) for a known
 public issuer. The cassette is committed; CI replays it offline. To

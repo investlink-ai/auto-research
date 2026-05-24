@@ -1,4 +1,4 @@
-"""Unit tests for the SEC EDGAR client (Issue #5).
+"""Unit tests for the SEC EDGAR client.
 
 HTTP layer is faked via `httpx.MockTransport`; only the unit logic
 (idempotency, path layout, SHA-256, env validation, dedup, retries,

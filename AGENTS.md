@@ -144,6 +144,12 @@ gate for sensitive paths is the corresponding test/eval; for ordinary code it's
 for single-use code, no "flexibility" that wasn't requested, no error handling
 for impossible scenarios. See `docs/AI_CODE_STYLE.md` for the full rules.
 
+**Library-first.** Check for a reliable SDK or stdlib module before writing
+custom logic for any non-trivial concern. See `docs/AI_CODE_STYLE.md` §4.
+
+**Stable docstrings.** No PR/Issue numbers or ticket IDs in docstrings or
+comments — that's commit-message territory. See `docs/AI_CODE_STYLE.md` §5.
+
 ---
 
 ## 5. Operational Prohibitions
