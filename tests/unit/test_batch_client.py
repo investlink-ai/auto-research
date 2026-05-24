@@ -545,6 +545,120 @@ def test_wait_raises_timeout_when_batch_never_ends() -> None:
         client.wait(handle, poll_interval=0.0, timeout=0.0)
 
 
+# --- idempotent results() — cost accumulates exactly once per batch -------
+
+
+def test_results_called_twice_accumulates_cost_only_once() -> None:
+    """The API spend on a batch happens once when Anthropic processes it.
+    Re-fetching the JSONL (whether deliberately, via `wait()` then
+    `results()`, or after a partial read) incurs no additional LLM
+    cost. Double-counting here would falsely trip `CostCapExceeded`
+    and block legitimate follow-up submissions.
+    """
+    big_msg = _make_message(
+        model="claude-sonnet-4-6", input_tokens=1_000_000, output_tokens=1_000_000
+    )
+    # The fake's `results()` returns the same list on every call — that
+    # mirrors the real SDK, which serves the same JSONL stream for the
+    # same batch_id until the batch is archived.
+    batches = _FakeBatches(
+        results_returns=[
+            _make_individual_response(custom_id="r1", message=big_msg),
+            _make_individual_response(custom_id="r2", message=big_msg),
+        ],
+    )
+    fake = _FakeAnthropicClient(batches)
+    client = make_batch_client(
+        worker="ten_k",
+        usd_cap=1000.00,
+        anthropic_client=_as_sdk(fake),
+    )
+    handle = client.submit(
+        task="supplier_mentions",
+        requests=[BatchRequest(custom_id="x", system_prompt="s", user_content="d")],
+    )
+    # First fetch: 2 * $9 (batch-discounted Sonnet 4.6 * 1M+1M) = $18.
+    client.results(handle)
+    assert client.running_usd() == pytest.approx(18.0)
+    # Second fetch on the SAME handle: same data, no additional cost.
+    client.results(handle)
+    assert client.running_usd() == pytest.approx(18.0)
+    # Third for good measure.
+    client.results(handle)
+    assert client.running_usd() == pytest.approx(18.0)
+
+
+def test_wait_then_results_does_not_double_count() -> None:
+    """`wait()` internally calls `results()`. A caller that uses
+    `wait()` and then inspects via `results()` later should see the
+    same data without paying for it twice.
+    """
+    big_msg = _make_message(
+        model="claude-sonnet-4-6", input_tokens=1_000_000, output_tokens=1_000_000
+    )
+    batches = _FakeBatches(
+        retrieve_sequence=[_make_batch(processing_status="ended")],
+        results_returns=[
+            _make_individual_response(custom_id="r1", message=big_msg),
+        ],
+    )
+    fake = _FakeAnthropicClient(batches)
+    client = make_batch_client(
+        worker="ten_k",
+        usd_cap=1000.00,
+        anthropic_client=_as_sdk(fake),
+    )
+    handle = client.submit(
+        task="supplier_mentions",
+        requests=[BatchRequest(custom_id="x", system_prompt="s", user_content="d")],
+    )
+    # 1 * $9 = $9 incurred during `wait()`.
+    client.wait(handle, poll_interval=0.0)
+    assert client.running_usd() == pytest.approx(9.0)
+    # Re-inspection via `results()` does NOT add more spend.
+    client.results(handle)
+    assert client.running_usd() == pytest.approx(9.0)
+
+
+def test_refetch_emits_zero_est_usd_to_otel() -> None:
+    """On re-fetch, `llm.cost.est_usd` is emitted as 0.0 (not omitted,
+    not the cached batch total). 0.0 means "this trace re-read
+    existing results"; a non-zero figure means "this trace caused new
+    LLM spend". Distinguishable in dashboards.
+    """
+    big_msg = _make_message(
+        model="claude-sonnet-4-6", input_tokens=1_000_000, output_tokens=1_000_000
+    )
+    batches = _FakeBatches(
+        results_returns=[
+            _make_individual_response(custom_id="r1", message=big_msg),
+        ],
+    )
+    fake = _FakeAnthropicClient(batches)
+    mock_span = MagicMock()
+    with patch(
+        "auto_research.extract.batch_client.trace.get_current_span",
+        return_value=mock_span,
+    ):
+        client = make_batch_client(
+            worker="ten_k",
+            usd_cap=1000.00,
+            anthropic_client=_as_sdk(fake),
+        )
+        handle = client.submit(
+            task="supplier_mentions",
+            requests=[BatchRequest(custom_id="x", system_prompt="s", user_content="d")],
+        )
+        client.results(handle)  # first fetch
+        client.results(handle)  # re-fetch
+
+    # Two calls, two attribute sets — first is $9, second is 0.0.
+    calls = [c for c in mock_span.set_attribute.call_args_list if c[0][0] == "llm.cost.est_usd"]
+    assert len(calls) == 2
+    assert calls[0][0][1] == pytest.approx(9.0)
+    assert calls[1][0][1] == 0.0
+
+
 # --- OTel cost emission (parity with sync client) --------------------------
 
 

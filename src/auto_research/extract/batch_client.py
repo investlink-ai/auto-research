@@ -62,6 +62,7 @@ honest representation.
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -152,6 +153,14 @@ class BatchClient:
         self._sdk = sdk
         self._cost = cost
         self._submit_wrapped = submit_wrapped
+        # Track which batches have already had their cost rolled into
+        # `_cost`. The Anthropic API allows fetching results for the
+        # same batch multiple times (re-inspection, retry after a partial
+        # read, `wait()` followed by `results()`), and the actual API
+        # spend happened once. Without this set, a re-fetch would
+        # double-count cost and could falsely trip `CostCapExceeded`.
+        self._accounted_batches: set[str] = set()
+        self._accounted_lock = threading.Lock()
 
     def submit(self, *, task: str, requests: list[BatchRequest]) -> BatchHandle:
         """Submit a batch. Routes the model, marks system as cacheable,
@@ -179,17 +188,29 @@ class BatchClient:
     def results(self, handle: BatchHandle) -> BatchResults:
         """Fetch all results (must be called after `poll()` shows
         `processing_status == "ended"`). Splits succeeded vs failed by
-        the `result.type` discriminator and accumulates the per-message
-        USD into the cost tracker — the cap will block the *next*
-        `submit()` if the running total crossed the threshold.
+        the `result.type` discriminator.
 
-        Also emits the *aggregate* USD spent on this batch as the OTel
-        span attribute `llm.cost.est_usd`. OpenLLMetry's auto-
-        instrumentation captures per-message token counts on the
-        underlying HTTP-call spans; we add the dollar figure on the
-        active span so traces / dashboards have a single per-batch
-        number without needing a join across N child spans.
+        On the *first* fetch for a given batch_id, accumulates the
+        per-message USD into the cost tracker and emits the aggregate
+        as the OTel span attribute `llm.cost.est_usd`. Subsequent
+        fetches for the same batch_id (e.g., `wait()` then
+        `results()`, or two callers inspecting the same handle) skip
+        accumulation — the API spend was incurred once when Anthropic
+        processed the batch, and re-fetching the JSONL incurs no
+        additional LLM cost. Without this gate, double-counting could
+        falsely trip `CostCapExceeded` and block legitimate follow-up
+        submissions.
+
+        The OTel attribute reflects the cost incurred by *this*
+        operation: the first fetch emits the batch total; re-fetches
+        emit 0.0 so dashboards can distinguish "this trace caused new
+        spend" from "this trace re-read existing results".
         """
+        with self._accounted_lock:
+            first_fetch = handle.batch_id not in self._accounted_batches
+            if first_fetch:
+                self._accounted_batches.add(handle.batch_id)
+
         succeeded: dict[str, Message] = {}
         failed: dict[str, MessageBatchIndividualResponse] = {}
         batch_usd = 0.0
@@ -197,7 +218,8 @@ class BatchClient:
             if response.result.type == "succeeded":
                 message = response.result.message
                 succeeded[response.custom_id] = message
-                batch_usd += self._cost.add_message(message)
+                if first_fetch:
+                    batch_usd += self._cost.add_message(message)
             else:
                 failed[response.custom_id] = response
         trace.get_current_span().set_attribute("llm.cost.est_usd", batch_usd)
