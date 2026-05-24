@@ -30,7 +30,7 @@ migration. See `docs/CONTRACTS.md` §1.3.
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import (
     BaseModel,
@@ -38,6 +38,12 @@ from pydantic import (
     Field,
     NonNegativeInt,
     model_validator,
+)
+
+from auto_research.extract.enums import (
+    EventClassification,
+    FormType,
+    RiskFactorChangeType,
 )
 
 # Shared model config: frozen (mutation raises ValidationError) +
@@ -133,7 +139,7 @@ class RiskFactorDelta(BaseModel):
 
     model_config = _FROZEN_STRICT
 
-    change_type: Literal["added", "removed", "modified"]
+    change_type: RiskFactorChangeType
     text: str
     citation: Citation
 
@@ -183,15 +189,7 @@ class EightKOutput(BaseModel):
 
     cik: str
     accession_number: str
-    event_classification: Literal[
-        "milestone",
-        "partnership",
-        "contract",
-        "guidance_change",
-        "leadership_change",
-        "dilution",
-        "other",
-    ]
+    event_classification: EventClassification
     milestone_mentions: list[Claim]
     dilution_language_flags: list[Claim]
 
@@ -201,7 +199,7 @@ class SFilingOutput(BaseModel):
 
     cik: str
     accession_number: str
-    form_type: Literal["S-1", "S-3"]
+    form_type: FormType
     dilution_event: Claim
     capital_raise_language: list[Claim]
     use_of_proceeds: list[Claim]

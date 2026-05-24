@@ -13,6 +13,11 @@ from datetime import date, datetime
 import pytest
 from pydantic import ValidationError
 
+from auto_research.extract.enums import (
+    EventClassification,
+    FormType,
+    RiskFactorChangeType,
+)
 from auto_research.extract.schemas import (
     Citation,
     Claim,
@@ -143,7 +148,7 @@ def _eight_k_output() -> EightKOutput:
     return EightKOutput(
         cik="0001045810",
         accession_number="0001045810-25-000002",
-        event_classification="milestone",
+        event_classification=EventClassification.MILESTONE,
         milestone_mentions=[],
         dilution_language_flags=[],
     )
@@ -153,7 +158,7 @@ def _s_filing_output() -> SFilingOutput:
     return SFilingOutput(
         cik="0001045810",
         accession_number="0001045810-25-000003",
-        form_type="S-3",
+        form_type=FormType.S_3,
         dilution_event=_claim(),
         capital_raise_language=[],
         use_of_proceeds=[],
@@ -191,7 +196,7 @@ def test_transcript_output_is_frozen() -> None:
 def test_eight_k_output_is_frozen() -> None:
     out = _eight_k_output()
     with pytest.raises(ValidationError):
-        out.event_classification = "other"
+        out.event_classification = EventClassification.OTHER
 
 
 def test_eight_k_output_rejects_unknown_event_classification() -> None:
@@ -208,7 +213,7 @@ def test_eight_k_output_rejects_unknown_event_classification() -> None:
 def test_s_filing_output_is_frozen() -> None:
     out = _s_filing_output()
     with pytest.raises(ValidationError):
-        out.form_type = "S-1"
+        out.form_type = FormType.S_1
 
 
 def test_s_filing_output_rejects_unknown_form_type() -> None:
@@ -257,7 +262,7 @@ def test_customer_mention_is_frozen() -> None:
 
 def test_risk_factor_delta_is_frozen() -> None:
     rfd = RiskFactorDelta(
-        change_type="added",
+        change_type=RiskFactorChangeType.ADDED,
         text="new risk",
         citation=_citation(),
     )
@@ -274,3 +279,75 @@ def test_forward_statement_is_frozen() -> None:
     )
     with pytest.raises(ValidationError):
         fs.statement_text = "other"
+
+
+# --- Enum round-trip + interop ---------------------------------------------
+#
+# `StrEnum` is chosen so callers can keep using string literals (the natural
+# LLM-JSON interop) AND have an importable namespace + IDE auto-complete.
+# These tests pin both behaviors so a future "should we drop StrEnum?"
+# refactor breaks loudly instead of silently changing the wire format.
+
+
+def test_event_classification_accepts_string_input() -> None:
+    # Pydantic coerces the string to the enum member — the natural
+    # LLM-JSON interop path. `# type: ignore[arg-type]` documents that
+    # statically-typed callers should pass the enum member; the coercion
+    # is for the JSON deserialization path only.
+    out = EightKOutput(
+        cik="0001045810",
+        accession_number="acc-1",
+        event_classification="milestone",  # type: ignore[arg-type]
+        milestone_mentions=[],
+        dilution_language_flags=[],
+    )
+    assert out.event_classification is EventClassification.MILESTONE
+    # StrEnum members ARE strings at runtime; cast through `str` so mypy's
+    # narrowing doesn't flag the equality as non-overlapping.
+    assert str(out.event_classification) == "milestone"
+
+
+def test_event_classification_accepts_enum_member() -> None:
+    out = EightKOutput(
+        cik="0001045810",
+        accession_number="acc-1",
+        event_classification=EventClassification.DILUTION,
+        milestone_mentions=[],
+        dilution_language_flags=[],
+    )
+    assert out.event_classification is EventClassification.DILUTION
+
+
+def test_event_classification_json_round_trip_is_plain_string() -> None:
+    out = EightKOutput(
+        cik="0001045810",
+        accession_number="acc-1",
+        event_classification=EventClassification.PARTNERSHIP,
+        milestone_mentions=[],
+        dilution_language_flags=[],
+    )
+    dumped = out.model_dump(mode="json")
+    # The wire format is the string value, not "<EventClassification.PARTNERSHIP: ...>".
+    assert dumped["event_classification"] == "partnership"
+
+
+def test_form_type_round_trips_with_hyphenated_value() -> None:
+    out = SFilingOutput(
+        cik="0001045810",
+        accession_number="acc-1",
+        form_type=FormType.S_1,
+        dilution_event=_claim(),
+        capital_raise_language=[],
+        use_of_proceeds=[],
+    )
+    assert out.form_type == "S-1"
+    assert out.model_dump(mode="json")["form_type"] == "S-1"
+
+
+def test_risk_factor_change_type_enum_accepted() -> None:
+    rfd = RiskFactorDelta(
+        change_type=RiskFactorChangeType.REMOVED,
+        text="dropped supply-chain risk",
+        citation=_citation(),
+    )
+    assert rfd.change_type == "removed"

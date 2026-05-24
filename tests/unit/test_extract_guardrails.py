@@ -34,6 +34,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from auto_research.extract import guardrails
+from auto_research.extract.enums import EventClassification
 from auto_research.extract.guardrails import (
     CitationMismatch,
     QuarantineRecord,
@@ -62,7 +63,7 @@ def _minimal_eight_k(claim: Claim) -> EightKOutput:
     return EightKOutput(
         cik="0001045810",
         accession_number="0001045810-25-000002",
-        event_classification="milestone",
+        event_classification=EventClassification.MILESTONE,
         milestone_mentions=[claim],
         dilution_language_flags=[],
     )
