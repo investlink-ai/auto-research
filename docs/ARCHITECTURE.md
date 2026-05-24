@@ -1,196 +1,331 @@
 # Architecture
 
-Current architecture. Updated as code evolves.
-
-For design rationale and the original v1 narrative, see
-`docs/specs/2026-05-22-design.md`. The spec is a frozen design record; this
-doc is the live map.
+Current architecture, loosely structured as a C4 (Context → Container →
+Component) view with Mermaid diagrams. Time-invariant — captures the
+*shape* of the system, not the current file layout. For module-level
+specifics see `CONTRACTS.md` (Pydantic surfaces), `DATA_MODEL.md` (Feast
+schema), and `BACKTEST.md` (validation gates). For the original v1
+design rationale see `docs/specs/2026-05-22-design.md`.
 
 ---
 
-## 1. Two-plane overview
+## 1. System context (C4 L1)
 
-```
-        ┌────────────────────────────────────────────┐
-        │             DATA SOURCES                     │
-        │  EDGAR  •  YouTube/yt-dlp + Whisper  •  prices │
-        └─────────────────┬──────────────────────────┘
-                          ▼
-        ┌────────────────────────────────────────────┐
-        │             RAW DOC STORE                    │
-        │   data/raw/  (content-hash idempotent)       │
-        └──────┬─────────────────────────┬───────────┘
-               │                         │
-       LLM PLANE                  DETERMINISTIC PLANE
-   ┌─────────────────┐         ┌──────────────────────┐
-   │ extract/        │         │ ingest/ → prices     │
-   │ (workers, RAG,  │         │ feast/  (PIT FS)     │
-   │  guardrails)    │ ──────▶ │                      │
-   └─────────────────┘ features└──────────┬───────────┘
-                                          ▼
-                                ┌──────────────────────┐
-                                │ signals/  + combiner │
-                                └──────────┬───────────┘
-                                           ▼
-                                ┌──────────────────────┐
-                                │ backtest/   tiered   │
-                                │  T1 → T2 → T3 gates  │
-                                └──────────┬───────────┘
-                                           ▼
-                                ┌──────────────────────┐
-                                │ paper portfolio +    │
-                                │ MLflow alpha library │
-                                └──────────┬───────────┘
-                                           │
-   ┌───────────────────────────────────────┘
-   ▼
-┌──────────────────────────┐     ┌──────────────────────────┐
-│ agents/research_graph    │ ──▶ │ mcp_server (FastMCP)     │ ◀── Cursor / Claude Desktop
-│  (LangGraph: hypothesis  │ ◀── │  read-only tool surface  │
-│   → validate → memo)     │     └──────────────────────────┘
-└──────────────────────────┘
-┌──────────────────────────┐
-│ agents/live_critic       │ ─── daily haircut ∈ [0, 1]
-│  (Pydantic AI)           │
-└──────────────────────────┘
+The platform reads SEC filings + earnings-call audio and produces a
+paper-traded long/short signal. External actors and data sources sit
+outside the trust boundary; everything inside the box is owned code or
+locally-hosted infrastructure.
+
+```mermaid
+C4Context
+    title System context — auto-research
+
+    Person(researcher, "Researcher", "Proposes hypotheses, reads memos, monitors paper P&L.")
+    Person(reviewer, "Reviewer", "Reads PRs, audits invariants.")
+
+    System_Boundary(auto, "auto-research") {
+        System(platform, "Two-plane research platform", "Deterministic plane + LLM plane separated by a feature-store contract")
+    }
+
+    System_Ext(edgar, "SEC EDGAR", "10-K, 10-Q, 8-K, S-1, S-3 filings")
+    System_Ext(audio, "Earnings-call audio sources", "yt-dlp aggregators, issuer IR pages")
+    System_Ext(prices, "Price + cost reference data", "Daily OHLCV; bid-ask half-spread")
+    System_Ext(llmapi, "Anthropic API", "Batch + cached extraction; research nodes")
+    System_Ext(whisper, "OpenAI Whisper API", "Audio → text")
+    System_Ext(voyage, "Voyage AI", "voyage-finance-2 embeddings")
+    System_Ext(brokers, "(Future) broker APIs", "Execution — explicitly out of v1 scope")
+
+    Rel(researcher, platform, "MCP tools, paper-P&L dashboard")
+    Rel(reviewer, platform, "PRs, eval reports")
+    Rel(edgar, platform, "Filings (free)")
+    Rel(audio, platform, "Audio bytes")
+    Rel(prices, platform, "Daily prices, cost inputs")
+    Rel(platform, llmapi, "Nightly extraction, research nodes")
+    Rel(platform, whisper, "Transcripts")
+    Rel(platform, voyage, "Embeddings")
+    Rel(platform, brokers, "(Not in v1)", "")
 ```
 
-The **Feast feature store** is the only contract between the two planes.
-
 ---
 
-## 2. Plane boundaries
+## 2. The two-plane invariant
 
-### Deterministic plane
+The dominant architectural decision: the LLM never sits in the trading-
+decision path. Extraction and research are batch/async; the live
+trading loop is fully deterministic.
 
-Owns prices, features, signals, backtests, portfolio state. No LLM calls in
-the trading-decision path. Code-checked gates (`T1_GATE`, `T2_GATE`) decide
-promote/iterate/kill. See `docs/BACKTEST.md`.
+```mermaid
+flowchart LR
+    subgraph LLM["LLM plane (async, batch)"]
+        direction TB
+        extract[Extraction workers]
+        research[Research agent]
+        critic[Live critic — multiplicative haircut only]
+    end
 
-### LLM plane
+    subgraph DET["Deterministic plane (synchronous)"]
+        direction TB
+        fs[(Feature store<br/>PIT-baked)]
+        signals[Signal library]
+        bt[Backtest engine]
+        port[Paper portfolio]
+    end
 
-Owns unstructured-to-structured extraction (nightly batch), research
-hypotheses (async), live haircut critic (multiplicative only). All LLM calls
-are version-pinned, content-hash cached, and produce typed Pydantic outputs
-with citation grounding. See `docs/CONTRACTS.md`.
+    extract -- "typed claims with<br/>source_span + source_quote" --> fs
+    fs --> signals
+    signals --> bt
+    bt --> port
+    critic -. "multiplicative haircut ∈ [0,1]" .-> port
+    research -. "memos, alpha library" .-> port
 
-### Boundary contract
-
-Features written to Feast carry `event_datetime` + `as_of_ts = event_datetime + 1
-trading day cutoff`, baked in at write-time (INV-1). The deterministic plane
-reads Feast only; the LLM plane writes Feast only. No raw extraction JSON
-crosses the boundary into signals — that would bypass PIT discipline.
-
----
-
-## 3. Module map
-
-```
-src/auto_research/
-├── ingest/                   # data sources
-│   ├── edgar.py              # SEC EDGAR client (10-K, 10-Q, 8-K, S-1, S-3)
-│   ├── transcripts/          # earnings-call audio → Whisper transcripts
-│   │   ├── _whisper.py       # OpenAI Whisper engine
-│   │   └── sources/          # per-platform: direct_mp3, youtube (yt-dlp)
-│   └── manifest.py           # append-only fetch ledger
-│
-├── extract/                  # LLM plane
-│   ├── schemas.py            # Pydantic outputs with source_span/source_quote      [SENSITIVE]
-│   ├── guardrails.py         # citation grounding + Guardrails AI validators       [SENSITIVE]
-│   ├── chunking.py           # section-aware + parent/child + INV-2 char_span        [SENSITIVE]
-│   ├── rag_retrieval.py      # LanceDB + hybrid (BM25+dense+RRF) + bge-reranker-v2-m3
-│   ├── entity_resolution.py  # mention → ticker disambiguation
-│   ├── ten_k.py              # 10-K worker
-│   ├── transcript.py         # earnings transcript worker
-│   ├── eight_k.py            # 8-K worker
-│   └── s_filings.py          # S-1, S-3 worker
-│
-├── feast_repo/               # PIT feature store                                    [SENSITIVE]
-│   ├── feature_store.yaml    # registry + offline store config
-│   ├── entities.py           # entity_id = ticker
-│   ├── feature_views.py      # ten_k, transcript, eight_k, s_filing, price, signal
-│   └── feature_services.py   # signal_a1, signal_a2, signal_b1
-│
-├── signals/                  # alpha primitives
-│   ├── a1_supply_chain.py    # hyperscaler forward-tone propagation
-│   ├── a2_pead.py            # post-earnings language drift
-│   ├── b1_frontier.py        # milestone/dilution
-│   └── combiner.py           # IC-weighted + Ledoit-Wolf shrinkage
-│
-├── backtest/                 # validation gauntlet                                  [SENSITIVE]
-│   ├── info_tests.py         # T1: event_study, ic_analysis, quantile_sort, MI
-│   ├── labels.py             # triple-barrier with vol-adjusted bands              [SENSITIVE]
-│   ├── cpcv.py               # combinatorial purged CV with embargo                [SENSITIVE]
-│   ├── deflated_sharpe.py    # multiple-testing-adjusted Sharpe                    [SENSITIVE]
-│   ├── costs.py              # half-spread + sqrt impact + borrow + commissions    [SENSITIVE]
-│   ├── engine.py             # vbt.pro wrapper, T1/T2 tier dispatcher
-│   ├── report.py             # InfoReport, BacktestReport dataclasses
-│   └── gates.py              # T1_GATE, T2_GATE constants (code-checked)           [SENSITIVE]
-│
-├── agents/                   # LLM-driven workflows
-│   ├── research_graph.py     # LangGraph state machine + checkpointer + HITL       [SENSITIVE]
-│   ├── live_critic.py        # Pydantic AI daily haircut
-│   ├── memo_retrieval.py     # Flow 2 RAG over past memos
-│   ├── reliability.py        # circuit breaker, cost cap, fallback model           [SENSITIVE]
-│   └── alpha_library.py      # MLflow-backed promoted-signal registry
-│
-├── mcp_server.py             # FastMCP read-only tool surface                       [SENSITIVE]
-│
-└── eval/                     # quality gates
-    ├── deepeval_suite.py     # extraction F1, hallucination, G-Eval
-    └── ragas_suite.py        # RAG context_recall, faithfulness
+    classDef llm fill:#fdf6e3,stroke:#b58900;
+    classDef det fill:#eee8d5,stroke:#586e75;
+    class extract,research,critic llm;
+    class fs,signals,bt,port det;
 ```
 
-`[SENSITIVE]` marks Tier 2 paths per `docs/AI_WORKFLOW.md` §2. Edits require
-failing test or eval delta first.
+**Why this matters.** Every cross-plane edge is a code-checked,
+schema-validated, time-aware contract — not an LLM prompt. The
+research agent's promote/iterate/kill judgment is a code gate
+(`T1_GATE`, `T2_GATE`), not a model output. The live critic's
+multiplicative haircut can dampen positions but cannot flip sign.
 
 ---
 
-## 4. Data flow per layer
+## 3. Containers (C4 L2)
 
-| Layer | Reads from | Writes to | Cadence |
-|---|---|---|---|
-| **Ingest** | EDGAR, FMP, price API | `data/raw/`, `data/manifest.parquet` | Nightly cron |
-| **Extract** | `data/raw/` | `data/extracted/*.jsonl`, Feast FeatureViews | Nightly batch (Anthropic Batch API) |
-| **Feast materialize** | `data/extracted/`, prices | Feast offline store (Parquet) | After each extract run |
-| **Signals** | Feast (read-only) | `signal_features` FeatureView | Daily |
-| **Backtest** | Feast (`signal_features` + prices) | `MLflow runs`, `BacktestReport` artifacts | On-demand (research) + weekly batch |
-| **Research agent** | MCP tools → Feast/MLflow/memos | `data/memos/*.md`, `alpha_library` (MLflow) | Async, hours-to-days |
-| **Live critic** | News API, current positions | Daily `haircut.json` consumed by paper portfolio | Daily cron |
+Logical containers and their internal responsibilities. Container
+boundaries are stable; the file/module mapping evolves and lives in
+the code itself.
 
----
+```mermaid
+flowchart TB
+    subgraph external[" "]
+        direction LR
+        edgar[(SEC EDGAR)]
+        ytdlp[(yt-dlp / IR)]
+        anth[(Anthropic)]
+        whisp[(Whisper)]
+        voy[(Voyage)]
+        fmp[(Price + cost data)]
+    end
 
-## 5. Ownership boundaries
+    subgraph ingest["Ingest"]
+        i1[Filings client]
+        i2[Audio fetchers]
+        i3[Manifest ledger]
+    end
 
-| Concern | Owner | Not owned by |
+    raw[(Raw doc store<br/>content-hash idempotent)]
+
+    subgraph llmplane["LLM plane"]
+        chunk[Chunking +<br/>citation-grounded validation]
+        rag[RAG retrieval<br/>BM25 + dense + RRF + reranker]
+        workers[Extraction workers<br/>10-K, 10-Q, 8-K, S-1/3, transcript]
+        ent[Entity resolution]
+        agents[Research agent<br/>LangGraph state machine]
+        crit[Live critic<br/>Pydantic AI]
+    end
+
+    subgraph store["Storage"]
+        feast[(Feast feature store<br/>PIT-baked)]
+        lance[(LanceDB vector store<br/>per-doc + per-corpus)]
+        mem[(Memos + alpha library)]
+        mlflow[(MLflow runs)]
+    end
+
+    subgraph det["Deterministic plane"]
+        signals[Signal library]
+        combiner[Combiner<br/>IC-weighted + shrinkage]
+        bt[Backtest engine<br/>CPCV + deflated Sharpe + costs]
+        port[Paper portfolio]
+        gates[Tier gates<br/>code constants]
+    end
+
+    obs[/Observability<br/>Langfuse + MLflow + OpenLLMetry/]
+
+    edgar --> i1
+    ytdlp --> i2
+    fmp --> i1
+    i1 --> raw
+    i2 --> whisp
+    whisp --> raw
+    i1 --> i3
+    i2 --> i3
+
+    raw --> chunk
+    chunk --> rag
+    chunk --> workers
+    rag --> workers
+    workers --> anth
+    workers --> ent
+    ent --> voy
+    rag --> voy
+    rag --> lance
+    workers --> feast
+
+    feast --> signals
+    signals --> combiner
+    combiner --> bt
+    bt --> mlflow
+    bt --> port
+    gates -. read by .-> agents
+    gates -. read by .-> bt
+
+    agents --> anth
+    agents --> mem
+    agents --> mlflow
+    crit --> anth
+    crit -. "haircut ∈ [0,1]" .-> port
+
+    workers -. traces .-> obs
+    agents -. traces .-> obs
+    bt -. runs .-> obs
+
+    classDef ext fill:#f5f5f5,stroke:#999,color:#555;
+    class edgar,ytdlp,anth,whisp,voy,fmp,obs ext;
+```
+
+Container responsibilities, time-invariant:
+
+| Container | Owns | Does not own |
 |---|---|---|
-| Point-in-time correctness | `feast_repo/feature_views.py` (write-time baking) | Query callers |
-| Citation grounding | `extract/guardrails.py` post-validation | Worker bodies |
-| Promote/iterate/kill decision | `backtest/gates.py` (code constants) | Research agent LLM |
-| Position state | Paper-portfolio engine (vbt.Portfolio) | Live critic, research agent |
-| Prompt versioning | Langfuse prompt registry | Worker code (workers read registry) |
-| Cost model | `backtest/costs.py` | Signal code, paper portfolio |
-| MCP tool registration | `mcp_server.py` (read-only only) | Research agent (consumes, doesn't add) |
+| Ingest | Fetch, persist raw bytes, append to manifest | Parsing, interpretation |
+| Chunking | Section detection, parent/child chunking, char_span fidelity | LLM calls, embeddings |
+| RAG retrieval | Hybrid retrieve + rerank over LanceDB | Embedding generation policy |
+| Extraction workers | (raw_doc, prompt_v, schema_v, model, decoding) → typed claims | Where to store, how to combine |
+| Entity resolution | Fuzzy mention → ticker disambiguation | Universe definition |
+| Feast feature store | PIT discipline, lag-1 baking, schema versioning | Anything outside features |
+| Signals | Per-name daily alpha components from features | Position state, costs |
+| Backtest engine | CPCV folds, deflated Sharpe, cost-plumbed PnL | Live execution |
+| Research agent | Hypothesis → validate → memo loop | Promote/iterate/kill decision (code gates own this) |
+| Live critic | Daily multiplicative haircut from news | Position direction |
+| Paper portfolio | Position state, P&L attribution | Anything LLM |
 
 ---
 
-## 6. External services
+## 4. Key flows (sequence)
 
-| Service | Used by | Purpose |
-|---|---|---|
-| **Anthropic API** (Batch + caching) | `extract/`, `agents/` | Workers + LangGraph nodes + Pydantic AI critic |
-| **OpenAI Whisper** | `ingest/transcripts/_whisper.py` | Earnings-call audio → text |
-| **YouTube via yt-dlp** | `ingest/transcripts/sources/youtube.py` | Aggregator-mirrored earnings audio |
-| **FMP API** | `backtest/costs.py` | Bid-ask half-spread |
-| **Voyage AI** | `extract/rag_retrieval.py`, `extract/entity_resolution.py`, `agents/memo_retrieval.py` | `voyage-finance-2` embeddings (BGE `bge-small-en-v1.5` fallback). See ADR `docs/decisions/2026-05-24-rag-enhancements.md`. |
-| **EDGAR** | `ingest/edgar.py` | Free SEC filings |
-| **Langfuse self-hosted** (Docker) | All LLM-touching code via OpenLLMetry | Traces, prompt registry, cost tracking |
-| **MLflow local** | `backtest/`, `agents/alpha_library.py` | Experiment tracking + signal registry |
-| **LanceDB local** | `extract/rag_retrieval.py`, `agents/memo_retrieval.py` | Vector store (per-doc + memos) |
+### 4.1 Nightly extraction
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Cron
+    participant Ingest
+    participant Raw as Raw store
+    participant Chunk as Chunking
+    participant Worker as Extraction worker
+    participant Guard as Citation guard
+    participant Quar as Quarantine
+    participant Feast
+
+    Cron->>Ingest: kick nightly
+    Ingest->>Raw: persist filing bytes (idempotent by content-hash)
+    Cron->>Chunk: parse_filing(raw, metadata)
+    Chunk-->>Cron: ChunkSet (parents + children, all carry char_span)
+
+    Cron->>Worker: extract(ChunkSet, prompt_v, schema_v, model)
+    Worker->>Worker: cache lookup (5-tuple key)
+    alt cache miss
+        Worker->>Worker: Anthropic Batch API + prompt caching
+    end
+    Worker-->>Guard: typed claims with source_span/source_quote
+    alt INV-2 holds (source_text[span] == source_quote)
+        Guard->>Feast: write feature rows with as_of_ts = event_dt + 1 trading day
+    else mismatch
+        Guard->>Quar: write QuarantineRecord; return None
+        Note over Guard,Quar: Worker MUST NOT persist
+    end
+```
+
+### 4.2 Daily backtest dispatch
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Researcher
+    participant Engine as Backtest engine
+    participant Feast
+    participant Costs as Cost model
+    participant Gates as T1/T2 gates
+    participant MLflow
+
+    Researcher->>Engine: run_backtest(signal_def, tier)
+    Engine->>Feast: fetch features as_of(t) for each t
+    Engine->>Costs: bid-ask + impact + borrow + commissions
+    alt tier == T1 (info content)
+        Engine->>Engine: IC, quantile sort, event study, MI
+    else tier == T2 (portfolio)
+        Engine->>Engine: CPCV folds with embargo<br/>triple-barrier labels<br/>deflated Sharpe
+    end
+    Engine-->>Gates: pass/fail against code constants
+    Engine->>MLflow: log run + artifacts
+    Engine-->>Researcher: BacktestReport (cost-adjusted)
+```
+
+### 4.3 Research-agent loop
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent as Research agent (LangGraph)
+    participant Memos as Memo retrieval
+    participant MCP as MCP read-only tools
+    participant Engine as Backtest engine
+    participant Gate as T1/T2 gate (code)
+    participant Library as Alpha library
+
+    Agent->>Memos: search prior hypotheses
+    Agent->>Agent: propose hypothesis
+    Agent->>MCP: pull features, prior runs, universe
+    Agent->>Engine: run_backtest(hypothesis, T1)
+    Engine-->>Agent: InfoReport
+    Agent->>Gate: T1_GATE(report)
+    alt T1 passes
+        Agent->>Engine: run_backtest(hypothesis, T2)
+        Agent->>Gate: T2_GATE(report)
+        alt T2 passes
+            Agent->>Library: promote
+        else fails
+            Agent->>Memos: write kill memo
+        end
+    else fails
+        Agent->>Memos: write kill memo
+    end
+    Note over Agent,Gate: Gate is a code constant, not an LLM judgment
+```
 
 ---
 
-## 7. Observability
+## 5. Cross-cutting concerns
+
+### 5.1 Invariants
+
+Owned by `AGENTS.md` §2 (single source of truth). Summarized here for
+context only:
+
+- **INV-1 PIT discipline** — every feature row's `as_of_ts` is baked at
+  write-time; lookahead is architecturally impossible.
+- **INV-2 Citation grounding** — every extracted claim carries
+  `source_span` + `source_quote`; post-validation asserts the slice
+  identity. Chunking carries the same contract via `char_span`.
+- **INV-3 LLM off the trading path** — see §2 above.
+- **INV-4 López-de-Prado backtest discipline** — CPCV, triple-barrier,
+  deflated Sharpe.
+- **INV-5 Costs plumbed, not assumed.**
+- **INV-6 Determinism** — extraction is a pure function of
+  (raw_doc, prompt_v, schema_v, model_id, decoding_params), content-
+  hash cached. Prompt + schema versions are co-pinned in code.
+- **INV-7 Secrets stay out of logs.**
+
+### 5.2 Tiered change-risk classification
+
+`docs/AI_WORKFLOW.md` §2 — every code change classified Tier 0/1/2.
+Tier 2 (sensitive paths) requires failing-test-first, named test
+evidence, and a Change Contract block in the PR body.
+
+### 5.3 Observability
 
 Strategy ratified in `docs/specs/2026-05-22-design.md` §15: one tracing
 backend (Langfuse via OTLP) for LLM-touching code, one experiment store
@@ -224,7 +359,7 @@ matters operationally:
 | Span | Emitter | Key attributes |
 |---|---|---|
 | `edgar.fetch_filings_for_cik` | `ingest/edgar.py` | `edgar.cik`, `edgar.form_types`, `edgar.n_filings`, `edgar.n_fetched`, `edgar.n_cache_hits` |
-| `transcript.fetch` | `ingest/transcripts/__init__.py` | `transcript.ticker`, `.year`, `.quarter`, `.source_name`, `.outcome` (cached / unregistered / no_coverage / ok / error) |
+| `transcript.fetch` | `ingest/transcripts/__init__.py` | `transcript.ticker`, `.year`, `.quarter`, `.source_name`, `.outcome` |
 | `transcript.find_audio_url` | `ingest/transcripts/sources/youtube.py` | `transcript.query`, `transcript.result_count`, `transcript.matched` |
 | `transcript.download` | `youtube.py` + `direct_mp3.py` | `transcript.source_name`, `transcript.bytes`, `transcript.duration_ms` |
 | `extract.s_filings` | `extract/workers/s_filings.py` | `extract.worker`, `extract.doc_id`, `extract.outcome` (cache_hit / persisted / quarantined) |
@@ -245,16 +380,38 @@ a few attribute dict writes that go nowhere.
 `InMemorySpanExporter`). End-to-end delivery to Langfuse is covered by
 `tests/integration/test_telemetry_export.py` (requires Docker up).
 
+**Backends:**
+- **Langfuse** — every LLM call (extraction, research, critic) traced
+  via OpenLLMetry; prompt registry + cost tracking.
+- **MLflow** — every backtest run + signal promotion event; alpha
+  library is MLflow-backed.
+- **Hermetic tests** — `make test` uses no network, no Docker, no API
+  keys. `make integration` uses Docker; `make live-smoke` hits real
+  endpoints.
+
+### 5.4 Storage layout
+
+| Surface | Discipline |
+|---|---|
+| Raw bytes | Content-hash idempotent. Append-only. |
+| Extracted JSONL | Per-worker. Version-pinned by `(prompt_v, schema_v)`. |
+| Quarantine | `data/quarantine/<worker>/<doc_id>.json`. Never deleted; audit trail. |
+| Feast offline | Parquet, PIT-baked `as_of_ts`. Schema migrations explicit. |
+| LanceDB | Per-doc + per-corpus narrative store. Index-time filterable. |
+| Memos | Markdown + LanceDB embedding for retrieval. |
+| MLflow | Local file store (dev) → DB (when promoted to prod). |
+
 ---
 
-## 8. Where to look when…
+## 6. Where to look when…
 
 | Task | Start here |
 |---|---|
-| Add a new extraction field | `docs/CONTRACTS.md` §1 (schema), then `extract/{worker}.py` |
-| Change a feature definition | `docs/DATA_MODEL.md`, then `feast_repo/feature_views.py` |
-| Add or tune a signal | `docs/BACKTEST.md` §2 (tier gates), then `signals/` |
-| Modify backtest math | `docs/BACKTEST.md` §3-5, then `backtest/{module}.py` |
-| Add a research-agent tool | `docs/CONTRACTS.md` §2 (MCP surface), then `mcp_server.py` |
-| Change LLM model routing | `docs/specs/2026-05-22-design.md` §7.3, then `extract/{worker}.py` |
-| Debug a failing eval | `docs/AI_WORKFLOW.md` §5 (PR evidence template), then `eval/` |
+| Add a new extraction field | `CONTRACTS.md` §1 (Pydantic surface), then the relevant worker |
+| Change a feature definition | `DATA_MODEL.md`, then Feast feature views |
+| Add or tune a signal | `BACKTEST.md` §2 (tier gates), then the signal library |
+| Modify backtest math | `BACKTEST.md` §3-5, then the relevant backtest module |
+| Add a research-agent tool | `CONTRACTS.md` §2 (MCP surface), then `mcp_server.py` |
+| Change LLM model routing | `docs/specs/2026-05-22-design.md` §7.3, then the worker |
+| Debug a failing eval | `AI_WORKFLOW.md` §5 (PR evidence template), then the eval suite |
+| Modify chunking / char_span behavior | this doc §2 (two-plane invariant), `AGENTS.md` §3 (sensitive paths), then `extract/chunking.py` |

@@ -1,4 +1,4 @@
-"""Unit tests for `auto_research.extract.chunking` (Issue #13, Tier 2).
+"""Unit tests for `auto_research.extract.chunking` (Tier 2 per INV-2).
 
 Hermetic: no network, no LLM calls. Real 10-K HTML loaded from the
 checked-in NVDA fixture at `tests/fixtures/chunking/sample_10k.htm`.
@@ -446,6 +446,43 @@ def test_at_least_one_table_html_is_pandas_readable(parsed_sample: ChunkSet) -> 
         if dfs and not dfs[0].empty:
             return  # success
     pytest.fail("no table_html parsed via pandas.read_html — table-policy contract broken")
+
+
+def test_nested_table_html_covers_outer_table(edge_metadata: ChunkMetadata) -> None:
+    """`table_html` must cover the full OUTER table even when inner
+    tables are nested inside — common in SEC iXBRL layouts. Without
+    depth tracking the first `</table>` after the outer open would
+    truncate the chunk at the inner close, leaving the outer's tail
+    rows leaking into narrative."""
+    inner_a = "<table><tr><td>inner A row</td></tr></table>"
+    inner_b = "<table><tr><td>inner B row</td></tr></table>"
+    outer = (
+        "<table id='outer'>"
+        "<tr><td>outer header cell</td></tr>"
+        f"<tr><td>cell with nested {inner_a}</td></tr>"
+        f"<tr><td>another nested {inner_b}</td></tr>"
+        "<tr><td>outer footer cell</td></tr>"
+        "</table>"
+    )
+    # Build a doc with a real section header so the table lands inside it.
+    html = (
+        "<html><body><h1>Item 8. Financial Statements</h1>"
+        + ("<p>Filler prose paragraph " + ("word " * 100) + ".</p>") * 3
+        + outer
+        + ("<p>Trailing prose paragraph " + ("word " * 100) + ".</p>") * 3
+        + "</body></html>"
+    )
+    result = parse_filing(html=html, metadata=edge_metadata)
+    table_parents = [p for p in result.parents if p.table_html is not None]
+    assert len(table_parents) == 1, (
+        f"expected exactly one outer-table chunk, got {len(table_parents)}"
+    )
+    tbl = table_parents[0]
+    # The outer table's footer row must be inside the chunk text, proving
+    # we didn't truncate at the first inner `</table>`.
+    assert "outer footer cell" in tbl.text
+    assert tbl.text.startswith("<table id='outer'>")
+    assert tbl.text.rstrip().endswith("</table>")
 
 
 def test_table_parents_subdivide_to_single_child_equal_to_parent(

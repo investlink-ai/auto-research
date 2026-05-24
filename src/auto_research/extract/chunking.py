@@ -1,4 +1,4 @@
-"""Section-aware SEC filing parsing + chunking (Issue #13, Tier 2 per INV-2).
+"""Section-aware SEC filing parsing + chunking (Tier 2 per INV-2).
 
 Public surface:
 
@@ -8,28 +8,31 @@ Public surface:
 - `ChunkValidationError` — raised when char_span fidelity (INV-2) fails.
 - `validate_char_spans(source_text, parents, children)` — runtime guard.
 - `quarantine_chunkset(...)` — INV-2 quarantine routing.
+- `validate_or_quarantine_chunkset(...)` — single-call routing helper.
 
-Design (per `docs/decisions/2026-05-24-rag-enhancements.md`, decisions D1,
-D3, D4, D5, D7, D9):
+Design recorded in `docs/decisions/2026-05-24-rag-enhancements.md`.
 
-- Library-first via `unstructured.partition.html.partition_html` (OSS,
-  Apache 2.0). The library identifies structural elements (`Title`,
-  `NarrativeText`, `Table`); the chunker locates each element's text in
-  the raw HTML via entity-tolerant search and emits parent/child chunks
-  whose `text` is the raw-HTML slice (so `source_text[span] == chunk.
-  text` holds trivially — INV-2).
+- Section detection uses an entity-aware regex on the raw HTML
+  (tolerates `&#160;` / `&nbsp;` between `Item` and the number, since
+  iXBRL filings commonly emit non-breaking-space entities at section
+  headers). `unstructured.partition.html` is imported transitively for
+  downstream callers; this module does NOT invoke it.
 
-- 10-K Item 8 `Table` elements emit as summary `ParentChunk`s with the
-  raw `<table>...</table>` HTML attached on `table_html`; structured
-  extraction (Issue #19's 10-K worker) consumes `table_html` directly,
-  bypassing dense retrieval (ADR D5).
+- 10-K Item 8 tables emit as standalone `ParentChunk`s with the raw
+  `<table>...</table>` HTML attached on `table_html`. Downstream
+  structured extraction reads `table_html` via a typed Pydantic
+  schema, bypassing dense retrieval. Nested `<table>` depth is tracked
+  so `table_html` always covers the full outer table.
 
-- NVDA-style HTML entities (`&#160;`, `&nbsp;`) inside section headers
-  are tolerated by entity-aware fallback in `_find_offset` (ADR D9).
+- chunk.text is `html[char_span]` by construction. INV-2 holds via
+  this identity; `validate_char_spans` is a defense-in-depth runtime
+  check, not the load-bearing guarantee.
 
-Tables and narrative chunks share `section_name`. Children carry
-`parent_id = f"{doc_id}::{parent.char_span[0]}-{parent.char_span[1]}"`
-back-referencing the parent's identity.
+Children carry `parent_id = "{doc_id}::{parent.char_span[0]}-{parent
+.char_span[1]}"`, `section_name` (copied from the parent so LanceDB
+can filter at index time without a parent JOIN), and `from_table`
+(True iff the child was emitted under a table parent — table parents
+are atomic, so the child equals the parent in that case).
 """
 
 from __future__ import annotations
@@ -43,9 +46,6 @@ from pathlib import Path
 from typing import Final
 
 import tiktoken
-from unstructured.partition.html import (
-    partition_html,  # noqa: F401  # imported lazily for transitive availability
-)
 
 from auto_research._io import atomic_write_text
 
@@ -170,7 +170,7 @@ class ChunkValidationError(ValueError):  # typed contract name
 class ChunkMetadata:
     """Per-document metadata copied onto every chunk (ADR D7).
 
-    These fields land as LanceDB columns in Issue #15 so retrieval can
+    These fields land as LanceDB columns downstream so retrieval can
     filter at index time — e.g., Signal A1 windowing by `(ticker,
     filing_date)`.
     """
@@ -188,8 +188,8 @@ class ParentChunk:
 
     `table_html` is the raw `<table>...</table>` HTML when this chunk
     represents an Item 8 table; `None` for narrative chunks. The 10-K
-    worker in Issue #19 reads `table_html` directly via a typed Pydantic
-    schema, bypassing dense retrieval over tabular text.
+    worker reads `table_html` directly via a typed Pydantic schema,
+    bypassing dense retrieval over tabular text.
     """
 
     text: str
@@ -204,10 +204,10 @@ class ParentChunk:
 class ChildChunk:
     """The retrieval-embedding unit (200-800 tokens, never crosses a parent).
 
-    `section_name` is copied from the parent so the LanceDB schema in
-    Issue #15 can filter at index time without a parent JOIN (ADR D7 +
-    D11). `from_table` flags fragments that originated under a table
-    parent — Issue #16's retrieval filter pairs this with `table_html`
+    `section_name` is copied from the parent so the LanceDB schema
+    downstream can filter at index time without a parent JOIN (ADR D7
+    + D11). `from_table` flags fragments that originated under a
+    table parent — the hybrid retriever pairs this with `table_html`
     on parents per ADR D5.
     """
 
@@ -547,6 +547,40 @@ _TABLE_OPEN = re.compile(r"<table\b[^>]*>", re.IGNORECASE)
 _TABLE_CLOSE = re.compile(r"</table\s*>", re.IGNORECASE)
 
 
+def _find_matching_table_close(html: str, after: int) -> int | None:
+    """Return the offset just past the `</table>` that closes the
+    outermost `<table>` opened at `after - 1`-ish.
+
+    Tracks nested `<table>` depth so a parent table that contains
+    inner tables (legitimate in SEC iXBRL layouts — outer-shell table
+    used for column alignment with inner financial-statement tables) is
+    not truncated at the first inner `</table>`. Without depth
+    tracking, `table_html` ends at the inner close and the outer
+    table's remaining rows leak into a following narrative chunk —
+    breaking the well-formed-HTML invariant downstream extraction
+    relies on (`pandas.read_html(table_html)`).
+
+    `after` is the offset just past the OPENING `<table ...>` whose
+    matching close we want; depth starts at 1 (the outer open already
+    consumed by the caller).
+    """
+    depth = 1
+    pos = after
+    while True:
+        open_m = _TABLE_OPEN.search(html, pos)
+        close_m = _TABLE_CLOSE.search(html, pos)
+        if close_m is None:
+            return None
+        if open_m is not None and open_m.start() < close_m.start():
+            depth += 1
+            pos = open_m.end()
+            continue
+        depth -= 1
+        if depth == 0:
+            return close_m.end()
+        pos = close_m.end()
+
+
 def _mask_comments(html: str) -> str:
     """Replace HTML comment bodies with spaces, preserving offsets.
 
@@ -751,24 +785,25 @@ def _emit_section_chunks(
     """
     start, end = section.char_span
 
-    # Locate `<table>...</table>` spans FULLY INSIDE [start, end).
-    # Cross-boundary tables are skipped — see docstring.
+    # Locate outer `<table>...</table>` spans fully inside [start, end).
+    # Nested-table depth is tracked by `_find_matching_table_close`, so
+    # `table_html` always covers the complete outer table — never
+    # truncates at an inner `</table>`. Cross-boundary tables are
+    # skipped (see docstring).
     tables: list[tuple[int, int]] = []
     pos = start
     while pos < end:
         open_m = _TABLE_OPEN.search(html, pos)
         if open_m is None or open_m.start() >= end:
             break
-        close_m = _TABLE_CLOSE.search(html, open_m.end())
-        if close_m is None:
+        tbl_end = _find_matching_table_close(html, open_m.end())
+        if tbl_end is None:
             break
-        tbl_end = close_m.end()
         if tbl_end > end:
-            # Table crosses the section boundary. Skip it as a table
-            # chunk; the open `<table>` will land in narrative for this
-            # section and the close in the next section's narrative.
-            # Advance past the open so we don't infinite-loop, but DON'T
-            # advance past the close (we don't own bytes beyond `end`).
+            # Outer table crosses the section boundary. Skip emission
+            # as a table chunk; the open `<table>` falls into this
+            # section's narrative and the close into the next section's
+            # narrative. Advance past the open so the loop doesn't spin.
             pos = open_m.end()
             continue
         tables.append((open_m.start(), tbl_end))
@@ -810,8 +845,8 @@ def _single_child_from_parent(parent: ParentChunk, *, from_table: bool) -> Child
 
     Used in two cases: (1) parents small enough to fit one child, and
     (2) table parents — splitting a table mid-row would invalidate the
-    HTML, so the child equals the parent and the `from_table` flag tells
-    downstream retrieval (Issue #16) to filter accordingly per ADR D5.
+    HTML, so the child equals the parent and the `from_table` flag
+    tells downstream retrieval to filter accordingly per ADR D5.
     """
     return ChildChunk(
         text=parent.text,
@@ -827,12 +862,12 @@ def _single_child_from_parent(parent: ParentChunk, *, from_table: bool) -> Child
 def subdivide_to_children(parent: ParentChunk) -> list[ChildChunk]:
     """Subdivide a parent into 200-800 token children (ADR D4).
 
-    Children never cross the parent boundary; `char_span`s are absolute
-    into the raw source HTML. Each child's text is `source[span]` by
-    construction (INV-2 holds). `section_name` and `from_table` are
-    copied from the parent so LanceDB (Issue #15) and the hybrid
-    retriever (Issue #16) can filter at the child level without a JOIN
-    back to the parent.
+    Children never cross the parent boundary; `char_span`s are
+    absolute into the raw source HTML. Each child's text is
+    `source[span]` by construction (INV-2 holds). `section_name` and
+    `from_table` are copied from the parent so LanceDB and the hybrid
+    retriever can filter at the child level without a JOIN back to
+    the parent.
 
     Table parents (`table_html is not None`) emit a single child equal
     to the parent — never sub-split (ADR D5). Splitting `<td>` seams
