@@ -469,25 +469,57 @@ def _section_name_from_title(title_text: str) -> str | None:
 # echoes packed adjacent to other Item names. The skip is short enough to
 # still capture a real section's opening sentence inside the 2000-char
 # window.
+#
+# The threshold (80) is tuned to admit table-heavy sections like Item 8
+# (where AMD's filing jumps straight into Consolidated Statements with
+# ~150 alpha chars in 2 KB — almost all numbers and table markup) while
+# still rejecting TOC entries (typically <50 alpha chars in 2 KB —
+# Item name + page number padded with leader dots/whitespace). The
+# title-pattern check (`. <Capitalized Title>` after the Item number)
+# does most of the false-positive filtering; this density check is
+# defense-in-depth against TOC entries that happen to carry title text.
 _HEADER_DENSITY_SKIP_BYTES: Final[int] = 200
 _HEADER_DENSITY_WINDOW_BYTES: Final[int] = 2_000
-_HEADER_DENSITY_MIN_ALPHA: Final[int] = 200
+_HEADER_DENSITY_MIN_ALPHA: Final[int] = 80
+
+# A real Item header is followed by ". <SECTION TITLE>" — period (or
+# entity-encoded space-then-period), optional whitespace, then a
+# capitalized title (Risk Factors, Management's Discussion, etc.).
+# Cross-references say "Item 7 above" / "Item 7 of this Form" — no
+# period, lowercase preposition. Inspected in the ~250 chars
+# immediately following the candidate, after stripping HTML tags and
+# entities, so the title check works regardless of how the filer
+# styled the heading.
+_HEADER_TITLE_LOOKAHEAD: Final[int] = 250
+_TITLE_PATTERN = re.compile(r"^\s*[.:]\s*[A-Z]")
 
 
 def _is_real_section_header(html: str, span_start: int) -> bool:
-    """A candidate is a "real" section start (not a TOC echo) if the
-    raw HTML BEYOND the header's own text contains substantial prose
-    content (≥ `_HEADER_DENSITY_MIN_ALPHA` alphabetic characters after
-    tag/entity stripping).
+    """A candidate is a "real" section start when both:
 
-    The window starts `_HEADER_DENSITY_SKIP_BYTES` past `span_start` so
-    the header's own letters ("Risk Factors", "Management Discussion")
-    do not bleed into the threshold. This guards against (a) TOC entries
-    where surrounding Item names contribute high alpha density without
-    real prose, and (b) inline cross-references where the formatted
-    `<span>Item N</span>` is followed by continuing sentence text but no
-    actual section body.
+    1. The next `_HEADER_DENSITY_WINDOW_BYTES` of raw HTML (skipping
+       the first `_HEADER_DENSITY_SKIP_BYTES`) contain ≥
+       `_HEADER_DENSITY_MIN_ALPHA` alphabetic characters of prose
+       (drops TOC echoes that have no real section body).
+    2. The text immediately following the candidate (after tag/entity
+       stripping) looks like `. <CAPITALIZED TITLE>` — the section-
+       title pattern. Cross-references like `Item 7 of this Form` or
+       `Item 7 above` fail this check because they lack the period +
+       title structure.
     """
+    # Where does the Item-N match end in the raw HTML? Step past the
+    # number and any trailing entities/whitespace to find the start of
+    # whatever follows.
+    after = _ITEM_HEADER.match(html, span_start) or _ITEM_HEADER.search(html, span_start)
+    if after is None:
+        return False
+    title_window = html[after.end() : after.end() + _HEADER_TITLE_LOOKAHEAD]
+    # Strip HTML tags and entities; preserve relative ordering.
+    title_clean = re.sub(r"<[^>]+>", "", title_window)
+    title_clean = re.sub(r"&[^;]+;", " ", title_clean)
+    if not _TITLE_PATTERN.match(title_clean):
+        return False
+
     window_start = span_start + _HEADER_DENSITY_SKIP_BYTES
     snippet = html[window_start : window_start + _HEADER_DENSITY_WINDOW_BYTES]
     stripped = re.sub(r"<[^>]+>|&[^;]+;", " ", snippet)
@@ -497,15 +529,35 @@ def _is_real_section_header(html: str, span_start: int) -> bool:
 
 # Block-level HTML tags that mark structural boundaries in SEC filings.
 # Section headers typically open inside or immediately after one of
-# these; inline formatting tags (`<span>`, `<b>`, `<i>`, `<a>`, `<em>`,
-# `<strong>`) do NOT count — accepting them as structural causes inline
-# cross-references like `... see <span class="bold">Item 7</span> ...`
-# to false-positive as section starts.
+# these; unstyled inline formatting tags (`<span>`, `<a>`, `<em>`) do
+# NOT count alone — accepting them as structural causes inline cross-
+# references like `... see <span>Item 7</span> ...` to false-positive
+# as section starts.
 _BLOCK_TAGS = "(?:div|p|td|tr|li|h[1-6]|section|article|header|footer|main|body|table|tbody|thead|tfoot)"
 
 _BLOCK_CLOSE_RE = re.compile(rf"</{_BLOCK_TAGS}[^>]*>\s*$", re.IGNORECASE)
 _BLOCK_OPEN_RE = re.compile(rf"<{_BLOCK_TAGS}[^>]*>\s*$", re.IGNORECASE)
 _COMMENT_END_RE = re.compile(r"-->\s*$")
+
+# Many filers (AMD, AVGO, others) style their section headers with an
+# inline `<span style="font-weight:700">Item N. ...</span>` rather than
+# a block tag. The unstyled `<span>` is rejected by `_BLOCK_OPEN_RE`
+# (which doesn't list span/b/strong/font); the styled one is accepted
+# here. Cross-references inside running prose use unstyled `<span>` so
+# they stay rejected.
+#
+# Anchored only at the closing `>` of the styling tag — the lookback
+# window (80 chars) is shorter than typical `<span style="...">` opening
+# tags in iXBRL HTML (~100 chars of attributes), so we cannot require
+# the `<span` opening literally. The signal we rely on is the substring
+# `font-weight:700` (or 800/900/bold) followed by `">` within the
+# lookback window. False positives would require the literal text
+# `font-weight:700">` to appear outside an HTML tag, which doesn't
+# happen in normal SEC content.
+_STYLED_HEADER_RE = re.compile(
+    r"font-weight\s*[:=]\s*['\"]?(?:700|800|900|bold|bolder)['\"]?[^>]*>\s*$",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_block_header(html: str, span_start: int) -> bool:
@@ -540,6 +592,7 @@ def _looks_like_block_header(html: str, span_start: int) -> bool:
         _BLOCK_CLOSE_RE.search(preceding)
         or _BLOCK_OPEN_RE.search(preceding)
         or _COMMENT_END_RE.search(preceding)
+        or _STYLED_HEADER_RE.search(preceding)
     )
 
 

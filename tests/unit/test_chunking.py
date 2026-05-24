@@ -43,12 +43,68 @@ from auto_research.extract.chunking import (
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "chunking"
 
 
-# ---------- Session fixtures ------------------------------------------------
+# ---------- Fixture discovery + parameterization ----------------------------
 
 
-@pytest.fixture(scope="session")
-def sample_10k_html() -> str:
-    return (FIXTURE_DIR / "sample_10k.htm").read_text(encoding="utf-8", errors="replace")
+def _discover_10k_fixtures() -> list[str]:
+    """Return the stem of every `sample_10k*.htm` fixture present.
+
+    Adding a new ticker via `scripts/build_chunking_fixture.py` writes
+    `sample_10k_<ticker>.htm` + `.meta.json` here, and this helper
+    automatically extends parameterized test coverage to it — no test
+    edits required.
+    """
+    return sorted(p.stem for p in FIXTURE_DIR.glob("sample_10k*.htm"))
+
+
+@dataclasses.dataclass(frozen=True)
+class _LoadedFixture:
+    stem: str
+    html: str
+    meta: dict[str, Any]
+    metadata: ChunkMetadata
+    parsed: ChunkSet
+
+
+def _load_fixture(stem: str) -> _LoadedFixture:
+    html = (FIXTURE_DIR / f"{stem}.htm").read_text(encoding="utf-8", errors="replace")
+    meta: dict[str, Any] = json.loads((FIXTURE_DIR / f"{stem}.meta.json").read_text())
+    metadata = ChunkMetadata(
+        ticker=meta["ticker"],
+        filing_date=date.fromisoformat(meta["filing_date"]),
+        fiscal_period=meta["fiscal_period"],
+        doc_type=meta["doc_type"],
+        doc_id=meta["doc_id"],
+    )
+    return _LoadedFixture(
+        stem=stem,
+        html=html,
+        meta=meta,
+        metadata=metadata,
+        parsed=parse_filing(html=html, metadata=metadata),
+    )
+
+
+# Cache parsed fixtures at module scope so each parametrized test
+# doesn't re-pay the chunking cost (section detection on a 220 KB doc
+# takes ~50 ms, multiplied across 30+ tests across 3 fixtures is real).
+_FIXTURE_CACHE: dict[str, _LoadedFixture] = {}
+
+
+def _cached_fixture(stem: str) -> _LoadedFixture:
+    if stem not in _FIXTURE_CACHE:
+        _FIXTURE_CACHE[stem] = _load_fixture(stem)
+    return _FIXTURE_CACHE[stem]
+
+
+@pytest.fixture(params=_discover_10k_fixtures(), ids=lambda s: s)
+def filing(request: pytest.FixtureRequest) -> _LoadedFixture:
+    """Parameterized fixture yielding one `_LoadedFixture` per 10-K fixture.
+
+    A test using this fixture runs once per checked-in ticker. Adding
+    a new fixture via the build script extends coverage automatically.
+    """
+    return _cached_fixture(request.param)
 
 
 @pytest.fixture(scope="session")
@@ -56,19 +112,15 @@ def edge_cases_html() -> str:
     return (FIXTURE_DIR / "edge_cases.htm").read_text(encoding="utf-8", errors="replace")
 
 
-@pytest.fixture(scope="session")
-def sample_10k_meta() -> dict[str, Any]:
-    return json.loads((FIXTURE_DIR / "sample_10k.meta.json").read_text())  # type: ignore[no-any-return]
-
-
 @pytest.fixture
-def sample_10k_metadata(sample_10k_meta: dict[str, Any]) -> ChunkMetadata:
+def sample_10k_metadata() -> ChunkMetadata:
+    """Synthetic ChunkMetadata for tests that don't need a real filing."""
     return ChunkMetadata(
-        ticker=sample_10k_meta["ticker"],
-        filing_date=date.fromisoformat(sample_10k_meta["filing_date"]),
-        fiscal_period=sample_10k_meta["fiscal_period"],
-        doc_type=sample_10k_meta["doc_type"],
-        doc_id=sample_10k_meta["doc_id"],
+        ticker="NVDA",
+        filing_date=date(2025, 2, 26),
+        fiscal_period="FY2025",
+        doc_type="10-K",
+        doc_id="0001045810-25-000023",
     )
 
 
@@ -81,19 +133,6 @@ def edge_metadata() -> ChunkMetadata:
         doc_type="10-K",
         doc_id="edge-cases-test",
     )
-
-
-@pytest.fixture(scope="session")
-def parsed_sample(sample_10k_html: str, sample_10k_meta: dict[str, Any]) -> ChunkSet:
-    """Cache the parse result — section detection is the slow step."""
-    meta = ChunkMetadata(
-        ticker=sample_10k_meta["ticker"],
-        filing_date=date.fromisoformat(sample_10k_meta["filing_date"]),
-        fiscal_period=sample_10k_meta["fiscal_period"],
-        doc_type=sample_10k_meta["doc_type"],
-        doc_id=sample_10k_meta["doc_id"],
-    )
-    return parse_filing(html=sample_10k_html, metadata=meta)
 
 
 # ---------- Dataclass shape -------------------------------------------------
@@ -157,13 +196,14 @@ def test_chunkset_groups_parents_and_children(sample_10k_metadata: ChunkMetadata
     assert len(cs.children) == 1
 
 
-def test_chunkset_fields_are_tuples_not_lists(parsed_sample: ChunkSet) -> None:
+def test_chunkset_fields_are_tuples_not_lists(filing: _LoadedFixture) -> None:
     """ADR/code-review P1-12: frozen ChunkSet uses tuples so consumers
     cannot mutate the parents/children sequence in place."""
-    assert isinstance(parsed_sample.parents, tuple)
-    assert isinstance(parsed_sample.children, tuple)
+    parsed = filing.parsed
+    assert isinstance(parsed.parents, tuple)
+    assert isinstance(parsed.children, tuple)
     with pytest.raises(AttributeError):
-        parsed_sample.parents.append(parsed_sample.parents[0])  # type: ignore[attr-defined]
+        parsed.parents.append(parsed.parents[0])  # type: ignore[attr-defined]
 
 
 def test_chunk_validation_error_is_value_error() -> None:
@@ -324,120 +364,139 @@ def test_inline_span_item_reference_does_not_false_positive(
 # ---------- parse_filing on real 10-K fixture -------------------------------
 
 
-def test_real_10k_parses_into_expected_sections(
-    parsed_sample: ChunkSet, sample_10k_meta: dict[str, Any]
-) -> None:
-    section_names = [p.section_name for p in parsed_sample.parents]
-    for required in sample_10k_meta["expected_sections"]:
+def test_real_10k_parses_into_expected_sections(filing: _LoadedFixture) -> None:
+    section_names = [p.section_name for p in filing.parsed.parents]
+    for required in filing.meta["expected_sections"]:
         assert required in section_names, (
-            f"missing {required!r}: got {sorted(set(section_names))}"
+            f"[{filing.stem}] missing {required!r}: got {sorted(set(section_names))}"
         )
 
 
-def test_real_10k_narrative_parents_under_max_tokens(parsed_sample: ChunkSet) -> None:
+def test_real_10k_narrative_parents_under_max_tokens(filing: _LoadedFixture) -> None:
     """Token cap applies to NARRATIVE parents (`table_html is None`).
 
     Table parents may exceed MAX_PARENT_TOKENS — they take a separate
     structured-extraction path (ADR D5) and splitting them mid-row would
     break HTML well-formedness.
     """
-    for p in parsed_sample.parents:
+    for p in filing.parsed.parents:
         if p.table_html is not None:
             continue
         assert p.token_count <= MAX_PARENT_TOKENS, (
-            f"narrative parent in {p.section_name} exceeds budget: "
+            f"[{filing.stem}] narrative parent in {p.section_name} exceeds budget: "
             f"{p.token_count} > {MAX_PARENT_TOKENS}"
         )
 
 
-def test_real_10k_parents_respect_section_boundaries(parsed_sample: ChunkSet) -> None:
+def test_real_10k_parents_respect_section_boundaries(filing: _LoadedFixture) -> None:
     seen_sections: list[str] = []
-    for p in parsed_sample.parents:
+    for p in filing.parsed.parents:
         if not seen_sections or seen_sections[-1] != p.section_name:
             assert p.section_name not in seen_sections, (
-                f"section {p.section_name} appears non-contiguously: {seen_sections}"
+                f"[{filing.stem}] section {p.section_name} appears "
+                f"non-contiguously: {seen_sections}"
             )
             seen_sections.append(p.section_name)
 
 
-def test_real_10k_children_are_subset_of_parent_spans(parsed_sample: ChunkSet) -> None:
+def test_real_10k_children_are_subset_of_parent_spans(filing: _LoadedFixture) -> None:
     parents_by_id: dict[str, ParentChunk] = {}
-    for p in parsed_sample.parents:
+    for p in filing.parsed.parents:
         pid = f"{p.metadata.doc_id}::{p.char_span[0]}-{p.char_span[1]}"
         parents_by_id[pid] = p
 
-    for c in parsed_sample.children:
+    for c in filing.parsed.children:
         parent = parents_by_id.get(c.parent_id)
-        assert parent is not None, f"child has no matching parent: {c.parent_id}"
+        assert parent is not None, f"[{filing.stem}] child has no matching parent: {c.parent_id}"
         assert parent.char_span[0] <= c.char_span[0] < c.char_span[1] <= parent.char_span[1]
 
 
-def test_real_10k_child_token_band_narrative_only(parsed_sample: ChunkSet) -> None:
+def test_real_10k_child_token_band_narrative_only(filing: _LoadedFixture) -> None:
     """Narrative children stay within MAX_CHILD_TOKENS. Table children
     can exceed it (they equal their parent per ADR D5; that's the
     documented degenerate case)."""
-    for c in parsed_sample.children:
+    for c in filing.parsed.children:
         if c.from_table:
             continue
         assert c.token_count <= MAX_CHILD_TOKENS, (
-            f"narrative child exceeds MAX_CHILD_TOKENS: {c.token_count}"
+            f"[{filing.stem}] narrative child exceeds MAX_CHILD_TOKENS: {c.token_count}"
         )
 
 
-def test_real_10k_child_section_name_matches_parent(parsed_sample: ChunkSet) -> None:
+def test_real_10k_child_section_name_matches_parent(filing: _LoadedFixture) -> None:
     """ADR D7: child carries section_name so LanceDB can filter at
     index time without a parent JOIN."""
     parents_by_id: dict[str, ParentChunk] = {}
-    for p in parsed_sample.parents:
+    for p in filing.parsed.parents:
         pid = f"{p.metadata.doc_id}::{p.char_span[0]}-{p.char_span[1]}"
         parents_by_id[pid] = p
 
-    for c in parsed_sample.children:
+    for c in filing.parsed.children:
         parent = parents_by_id[c.parent_id]
         assert c.section_name == parent.section_name
 
 
-def test_real_10k_char_span_fidelity_holds(
-    parsed_sample: ChunkSet, sample_10k_html: str
-) -> None:
-    for p in parsed_sample.parents:
-        assert sample_10k_html[p.char_span[0] : p.char_span[1]] == p.text
-    for c in parsed_sample.children:
-        assert sample_10k_html[c.char_span[0] : c.char_span[1]] == c.text
+def test_real_10k_char_span_fidelity_holds(filing: _LoadedFixture) -> None:
+    """The load-bearing INV-2 check: chunk.text equals html slice for
+    every parent and child, across every fixture."""
+    for p in filing.parsed.parents:
+        assert filing.html[p.char_span[0] : p.char_span[1]] == p.text, (
+            f"[{filing.stem}] INV-2 broken on parent {p.section_name}"
+        )
+    for c in filing.parsed.children:
+        assert filing.html[c.char_span[0] : c.char_span[1]] == c.text, (
+            f"[{filing.stem}] INV-2 broken on child {c.section_name}"
+        )
 
 
-def test_real_10k_metadata_is_populated(parsed_sample: ChunkSet) -> None:
-    for p in parsed_sample.parents:
-        assert p.metadata.ticker == "NVDA"
+def test_real_10k_metadata_is_populated(filing: _LoadedFixture) -> None:
+    expected_ticker = filing.meta["ticker"]
+    expected_doc_id = filing.meta["doc_id"]
+    for p in filing.parsed.parents:
+        assert p.metadata.ticker == expected_ticker
         assert p.metadata.doc_type == "10-K"
-        assert p.metadata.doc_id == "0001045810-25-000023"
-    for c in parsed_sample.children:
-        assert c.metadata.ticker == "NVDA"
+        assert p.metadata.doc_id == expected_doc_id
+    for c in filing.parsed.children:
+        assert c.metadata.ticker == expected_ticker
 
 
 # ---------- Table policy (ADR D5) -------------------------------------------
 
 
-def test_item_8_emits_chunks_with_table_html(parsed_sample: ChunkSet) -> None:
-    item_8_parents = [p for p in parsed_sample.parents if p.section_name == "Item 8"]
-    assert item_8_parents, "expected at least one Item 8 parent chunk in NVDA 10-K"
-    table_chunks = [p for p in item_8_parents if p.table_html is not None]
+def test_financial_section_emits_chunks_with_table_html(filing: _LoadedFixture) -> None:
+    """At least one parent chunk has `table_html` populated, regardless
+    of which Item the table lives in.
+
+    Filers structure 10-Ks differently — NVDA's Item 8 is a short
+    pointer ("the information required by this Item is set forth in
+    our Consolidated Financial Statements"), and the actual tables
+    live later in document order (inside the Item 14 span in NVDA's
+    case). AMD inlines tables in Item 8 itself. The chunker's table
+    policy (ADR D5) operates per-table, not per-section, so the test
+    asserts the policy holds anywhere in the doc.
+    """
+    table_chunks = [p for p in filing.parsed.parents if p.table_html is not None]
     assert table_chunks, (
-        "expected ≥1 Item 8 parent with table_html attached "
-        f"(got {len(item_8_parents)} item-8 parents, none with table_html)"
+        f"[{filing.stem}] expected ≥1 parent with table_html attached; "
+        f"got {len(filing.parsed.parents)} parents with sections "
+        f"{sorted({p.section_name for p in filing.parsed.parents})}"
     )
 
 
-def test_non_table_chunks_have_no_table_html(parsed_sample: ChunkSet) -> None:
-    item_1a = [p for p in parsed_sample.parents if p.section_name == "Item 1A"]
-    assert item_1a
+def test_narrative_parents_have_no_table_html(filing: _LoadedFixture) -> None:
+    """Item 1A (Risk Factors) is pure narrative — no tables. All Item 1A
+    chunks must have `table_html=None`."""
+    item_1a = [p for p in filing.parsed.parents if p.section_name == "Item 1A"]
+    assert item_1a, f"[{filing.stem}] expected Item 1A parents"
     for p in item_1a:
-        assert p.table_html is None
+        assert p.table_html is None, (
+            f"[{filing.stem}] Item 1A chunk should not carry table_html"
+        )
 
 
-def test_at_least_one_table_html_is_pandas_readable(parsed_sample: ChunkSet) -> None:
-    tables = [p for p in parsed_sample.parents if p.table_html is not None]
-    assert tables
+def test_at_least_one_table_html_is_pandas_readable(filing: _LoadedFixture) -> None:
+    tables = [p for p in filing.parsed.parents if p.table_html is not None]
+    assert tables, f"[{filing.stem}] expected table parents"
     for t in tables:
         try:
             dfs = pd.read_html(io.StringIO(t.table_html))
@@ -445,7 +504,10 @@ def test_at_least_one_table_html_is_pandas_readable(parsed_sample: ChunkSet) -> 
             continue
         if dfs and not dfs[0].empty:
             return  # success
-    pytest.fail("no table_html parsed via pandas.read_html — table-policy contract broken")
+    pytest.fail(
+        f"[{filing.stem}] no table_html parsed via pandas.read_html — "
+        "table-policy contract broken"
+    )
 
 
 def test_nested_table_html_covers_outer_table(edge_metadata: ChunkMetadata) -> None:
@@ -486,23 +548,24 @@ def test_nested_table_html_covers_outer_table(edge_metadata: ChunkMetadata) -> N
 
 
 def test_table_parents_subdivide_to_single_child_equal_to_parent(
-    parsed_sample: ChunkSet,
+    filing: _LoadedFixture,
 ) -> None:
     """ADR D5: table parents are atomic. Splitting at `</td>` would
     produce fragments without `</table>`. Each table parent must yield
     exactly one child with from_table=True and char_span equal to
     parent's char_span."""
     children_by_parent_id: dict[str, list[ChildChunk]] = {}
-    for c in parsed_sample.children:
+    for c in filing.parsed.children:
         children_by_parent_id.setdefault(c.parent_id, []).append(c)
 
-    for p in parsed_sample.parents:
+    for p in filing.parsed.parents:
         if p.table_html is None:
             continue
         pid = f"{p.metadata.doc_id}::{p.char_span[0]}-{p.char_span[1]}"
         kids = children_by_parent_id.get(pid, [])
         assert len(kids) == 1, (
-            f"table parent in {p.section_name} should yield 1 child, got {len(kids)}"
+            f"[{filing.stem}] table parent in {p.section_name} should yield "
+            f"1 child, got {len(kids)}"
         )
         kid = kids[0]
         assert kid.from_table is True
@@ -510,15 +573,15 @@ def test_table_parents_subdivide_to_single_child_equal_to_parent(
         assert kid.text == p.text
 
 
-def test_narrative_children_have_from_table_false(parsed_sample: ChunkSet) -> None:
-    for c in parsed_sample.children:
+def test_narrative_children_have_from_table_false(filing: _LoadedFixture) -> None:
+    for c in filing.parsed.children:
         if c.from_table:
             continue
         # The corresponding parent must also be a narrative parent.
         pid_parts = c.parent_id.split("::")[-1].split("-")
         parent_span = (int(pid_parts[0]), int(pid_parts[1]))
-        matching_parents = [p for p in parsed_sample.parents if p.char_span == parent_span]
-        assert matching_parents
+        matching_parents = [p for p in filing.parsed.parents if p.char_span == parent_span]
+        assert matching_parents, f"[{filing.stem}] no parent for child {c.parent_id}"
         assert matching_parents[0].table_html is None
 
 

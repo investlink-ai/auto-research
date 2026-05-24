@@ -4,8 +4,12 @@
   "fiscal_period": "FY2025",
   "doc_type": "10-K",
   "doc_id": "0001045810-25-000023",
-  "expected_sections": ["Item 1A", "Item 7", "Item 8"],
+  "expected_sections": [
+    "Item 1A",
+    "Item 7",
+    "Item 8"
+  ],
   "source_url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581025000023/nvda-20250126.htm",
-  "note": "Real EDGAR 10-K for NVIDIA Corporation, fiscal year ended 2025-01-26, filed 2025-02-26. Public-domain SEC filing. Trimmed to ~220KB to stay under the repo's 500KB pre-commit cap; contains real section headers for Items 1A, 7, 8 (Item 1A risk factors, Item 7 MD&A, Item 8 financial statements with multiple inline tables). NVDA uses non-breaking-space entities (Item&#160;N) in section headers — the chunker must handle that.",
-  "filename_convention": "Both checked-in fixtures use the .htm extension (not .html). SEC EDGAR exclusively uses .htm — every filing on EDGAR for the last 25+ years ships under three-letter HTML naming. Keeping the fixture extension matched to production input means the parser is exercised against representative file naming and any future tooling that filters by extension behaves identically in tests and in the live pipeline."
+  "filename_convention": "Uses .htm extension per SEC EDGAR's 25+-year convention. Production input from EDGAR always ends in .htm; fixture matches so any extension-aware tooling behaves identically in tests and live.",
+  "note": "Real EDGAR 10-K for NVDA, fiscal period FY2025, filed 2025-02-26. Public-domain SEC filing. Trimmed via scripts/build_chunking_fixture.py to fit the 500 KB pre-commit cap while preserving real section headers for Item 1A, Item 7, Item 8 in document order and at least one inline financial table for Item 8 table-policy tests."
 }
