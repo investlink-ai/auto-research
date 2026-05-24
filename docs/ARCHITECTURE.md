@@ -97,8 +97,8 @@ src/auto_research/
 ├── extract/                  # LLM plane
 │   ├── schemas.py            # Pydantic outputs with source_span/source_quote      [SENSITIVE]
 │   ├── guardrails.py         # citation grounding + Guardrails AI validators       [SENSITIVE]
-│   ├── chunking.py           # unstructured.io + contextual chunking
-│   ├── rag_retrieval.py      # LanceDB + hybrid (BM25+dense+RRF) + BGE reranker
+│   ├── chunking.py           # unstructured.io (OSS lib) + section-aware + parent/child + table policy
+│   ├── rag_retrieval.py      # LanceDB + hybrid (BM25+dense+RRF) + bge-reranker-v2-m3
 │   ├── entity_resolution.py  # mention → ticker disambiguation
 │   ├── ten_k.py              # 10-K worker
 │   ├── transcript.py         # earnings transcript worker
@@ -182,7 +182,7 @@ failing test or eval delta first.
 | **OpenAI Whisper** | `ingest/transcripts/_whisper.py` | Earnings-call audio → text |
 | **YouTube via yt-dlp** | `ingest/transcripts/sources/youtube.py` | Aggregator-mirrored earnings audio |
 | **FMP API** | `backtest/costs.py` | Bid-ask half-spread |
-| **Voyage AI** | `extract/rag_retrieval.py`, `extract/entity_resolution.py` | `voyage-3` embeddings (BGE fallback) |
+| **Voyage AI** | `extract/rag_retrieval.py`, `extract/entity_resolution.py`, `agents/memo_retrieval.py` | `voyage-finance-2` embeddings (BGE `bge-small-en-v1.5` fallback). See ADR `docs/decisions/2026-05-24-rag-enhancements.md`. |
 | **EDGAR** | `ingest/edgar.py` | Free SEC filings |
 | **Langfuse self-hosted** (Docker) | All LLM-touching code via OpenLLMetry | Traces, prompt registry, cost tracking |
 | **MLflow local** | `backtest/`, `agents/alpha_library.py` | Experiment tracking + signal registry |
