@@ -69,3 +69,15 @@ def test_try_init_telemetry_returns_true_when_already_initialized(
 
     monkeypatch.setattr(t, "_INITIALIZED", True)
     assert t.try_init_telemetry() is True
+
+
+def test_span_recorder_fixture_captures_spans(span_recorder) -> None:  # type: ignore[no-untyped-def]
+    """The shared in-memory tracer fixture captures finished spans."""
+    from opentelemetry import trace
+
+    tracer = trace.get_tracer("test")
+    with tracer.start_as_current_span("smoke") as span:
+        span.set_attribute("k", "v")
+
+    one = span_recorder.one("smoke")
+    assert one.attributes["k"] == "v"
