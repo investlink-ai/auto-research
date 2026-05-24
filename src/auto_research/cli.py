@@ -209,6 +209,12 @@ def extract_s_filings(
     for row in candidates:
         raw_path = Path(row["path"])
         try:
+            # `errors="replace"` is the canonical decode policy for the
+            # worker's INV-6 cache key (sha256 over raw_doc.encode()). A
+            # future caller using read_bytes() or a different encoding will
+            # compute a divergent key for the same content and pollute the
+            # cache. Add another caller? Route it through the same policy or
+            # refactor extract_s_filing to take bytes.
             raw_doc = raw_path.read_text(errors="replace")
         except OSError as exc:
             click.echo(f"warn: skipping {row['doc_id']} (file unreadable): {exc}", err=True)
