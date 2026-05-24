@@ -23,7 +23,9 @@ dependencies = [
     "pyarrow>=23.0.1",
     "pydantic>=2.13.4",
     "tenacity>=8.5,<9",
+    "tiktoken==0.13.0",
     "traceloop-sdk>=0.30",
+    "unstructured[html]==0.21.5",
     "yt-dlp>=2026.3",
 ]
 
