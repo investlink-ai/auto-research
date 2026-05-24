@@ -17,33 +17,34 @@ outside the trust boundary; everything inside the box is owned code or
 locally-hosted infrastructure.
 
 ```mermaid
-C4Context
-    title System context — auto-research
+flowchart TB
+    researcher([Researcher])
+    reviewer([Reviewer])
 
-    Person(researcher, "Researcher", "Proposes hypotheses, reads memos, monitors paper P&L.")
-    Person(reviewer, "Reviewer", "Reads PRs, audits invariants.")
+    subgraph platform["auto-research — two-plane research platform"]
+        core[Deterministic plane + LLM plane<br>separated by a feature-store contract]
+    end
 
-    System_Boundary(auto, "auto-research") {
-        System(platform, "Two-plane research platform", "Deterministic plane + LLM plane separated by a feature-store contract")
-    }
+    edgar[(SEC EDGAR<br>10-K, 10-Q, 8-K, S-1, S-3)]
+    audio[(Earnings-call audio<br>yt-dlp aggregators, issuer IR)]
+    prices[(Price + cost reference data<br>daily OHLCV, bid-ask spread)]
+    llmapi[(Anthropic API<br>batch + cached extraction)]
+    whisper[(OpenAI Whisper API)]
+    voyage[(Voyage AI<br>voyage-finance-2 embeddings)]
+    brokers[(Future broker APIs<br>out of v1 scope)]
 
-    System_Ext(edgar, "SEC EDGAR", "10-K, 10-Q, 8-K, S-1, S-3 filings")
-    System_Ext(audio, "Earnings-call audio sources", "yt-dlp aggregators, issuer IR pages")
-    System_Ext(prices, "Price + cost reference data", "Daily OHLCV; bid-ask half-spread")
-    System_Ext(llmapi, "Anthropic API", "Batch + cached extraction; research nodes")
-    System_Ext(whisper, "OpenAI Whisper API", "Audio → text")
-    System_Ext(voyage, "Voyage AI", "voyage-finance-2 embeddings")
-    System_Ext(brokers, "(Future) broker APIs", "Execution — explicitly out of v1 scope")
+    researcher -- "MCP tools, paper P&L" --> platform
+    reviewer -- "PRs, eval reports" --> platform
+    edgar -- "filings (free)" --> platform
+    audio -- "audio bytes" --> platform
+    prices -- "prices, cost inputs" --> platform
+    platform -- "nightly extraction,<br>research nodes" --> llmapi
+    platform -- "transcripts" --> whisper
+    platform -- "embeddings" --> voyage
+    platform -. "not in v1" .-> brokers
 
-    Rel(researcher, platform, "MCP tools, paper-P&L dashboard")
-    Rel(reviewer, platform, "PRs, eval reports")
-    Rel(edgar, platform, "Filings (free)")
-    Rel(audio, platform, "Audio bytes")
-    Rel(prices, platform, "Daily prices, cost inputs")
-    Rel(platform, llmapi, "Nightly extraction, research nodes")
-    Rel(platform, whisper, "Transcripts")
-    Rel(platform, voyage, "Embeddings")
-    Rel(platform, brokers, "(Not in v1)", "")
+    classDef ext fill:#f5f5f5,stroke:#999,color:#333;
+    class edgar,audio,prices,llmapi,whisper,voyage,brokers ext;
 ```
 
 ---
@@ -60,22 +61,22 @@ flowchart LR
         direction TB
         extract[Extraction workers]
         research[Research agent]
-        critic[Live critic — multiplicative haircut only]
+        critic[Live critic — haircut only]
     end
 
     subgraph DET["Deterministic plane (synchronous)"]
         direction TB
-        fs[(Feature store<br/>PIT-baked)]
+        fs[(Feature store<br>PIT-baked)]
         signals[Signal library]
         bt[Backtest engine]
         port[Paper portfolio]
     end
 
-    extract -- "typed claims with<br/>source_span + source_quote" --> fs
+    extract -- "typed claims with<br>source_span + source_quote" --> fs
     fs --> signals
     signals --> bt
     bt --> port
-    critic -. "multiplicative haircut ∈ [0,1]" .-> port
+    critic -. "haircut in 0 to 1" .-> port
     research -. "memos, alpha library" .-> port
 
     classDef llm fill:#fdf6e3,stroke:#b58900;
@@ -116,33 +117,33 @@ flowchart TB
         i3[Manifest ledger]
     end
 
-    raw[(Raw doc store<br/>content-hash idempotent)]
+    raw[(Raw doc store<br>content-hash idempotent)]
 
     subgraph llmplane["LLM plane"]
-        chunk[Chunking +<br/>citation-grounded validation]
-        rag[RAG retrieval<br/>BM25 + dense + RRF + reranker]
-        workers[Extraction workers<br/>10-K, 10-Q, 8-K, S-1/3, transcript]
+        chunk[Chunking +<br>citation-grounded validation]
+        rag[RAG retrieval<br>BM25 + dense + RRF + reranker]
+        workers[Extraction workers<br>10-K, 10-Q, 8-K, S-filings, transcript]
         ent[Entity resolution]
-        agents[Research agent<br/>LangGraph state machine]
-        crit[Live critic<br/>Pydantic AI]
+        agents[Research agent<br>LangGraph state machine]
+        crit[Live critic<br>Pydantic AI]
     end
 
     subgraph store["Storage"]
-        feast[(Feast feature store<br/>PIT-baked)]
-        lance[(LanceDB vector store<br/>per-doc + per-corpus)]
+        feast[(Feast feature store<br>PIT-baked)]
+        lance[(LanceDB vector store<br>per-doc + per-corpus)]
         mem[(Memos + alpha library)]
         mlflow[(MLflow runs)]
     end
 
     subgraph det["Deterministic plane"]
         signals[Signal library]
-        combiner[Combiner<br/>IC-weighted + shrinkage]
-        bt[Backtest engine<br/>CPCV + deflated Sharpe + costs]
+        combiner[Combiner<br>IC-weighted + shrinkage]
+        bt[Backtest engine<br>CPCV + deflated Sharpe + costs]
         port[Paper portfolio]
-        gates[Tier gates<br/>code constants]
+        gates[Tier gates<br>code constants]
     end
 
-    obs[/Observability<br/>Langfuse + MLflow + OpenLLMetry/]
+    obs[Observability<br>Langfuse + MLflow + OpenLLMetry]
 
     edgar --> i1
     ytdlp --> i2
@@ -176,7 +177,7 @@ flowchart TB
     agents --> mem
     agents --> mlflow
     crit --> anth
-    crit -. "haircut ∈ [0,1]" .-> port
+    crit -. "haircut in 0 to 1" .-> port
 
     workers -. traces .-> obs
     agents -. traces .-> obs
@@ -223,21 +224,24 @@ sequenceDiagram
     Cron->>Ingest: kick nightly
     Ingest->>Raw: persist filing bytes (idempotent by content-hash)
     Cron->>Chunk: parse_filing(raw, metadata)
-    Chunk-->>Cron: ChunkSet (parents + children, all carry char_span)
+    Chunk-->>Cron: ChunkSet, parents + children, all carry char_span
 
     Cron->>Worker: extract(ChunkSet, prompt_v, schema_v, model)
     Worker->>Worker: cache lookup (5-tuple key)
     alt cache miss
         Worker->>Worker: Anthropic Batch API + prompt caching
     end
-    Worker-->>Guard: typed claims with source_span/source_quote
-    alt INV-2 holds (source_text[span] == source_quote)
+    Worker-->>Guard: typed claims with source_span and source_quote
+    alt INV-2 holds — source_text slice equals source_quote
         Guard->>Feast: write feature rows with as_of_ts = event_dt + 1 trading day
     else mismatch
-        Guard->>Quar: write QuarantineRecord; return None
-        Note over Guard,Quar: Worker MUST NOT persist
+        Guard->>Quar: write QuarantineRecord and return None
     end
 ```
+
+After a mismatch the worker must not persist the output anywhere
+downstream — the quarantine record is the only artifact retained for
+audit.
 
 ### 4.2 Daily backtest dispatch
 
@@ -254,10 +258,10 @@ sequenceDiagram
     Researcher->>Engine: run_backtest(signal_def, tier)
     Engine->>Feast: fetch features as_of(t) for each t
     Engine->>Costs: bid-ask + impact + borrow + commissions
-    alt tier == T1 (info content)
+    alt tier is T1 (info content)
         Engine->>Engine: IC, quantile sort, event study, MI
-    else tier == T2 (portfolio)
-        Engine->>Engine: CPCV folds with embargo<br/>triple-barrier labels<br/>deflated Sharpe
+    else tier is T2 (portfolio)
+        Engine->>Engine: CPCV folds with embargo, triple-barrier labels, deflated Sharpe
     end
     Engine-->>Gates: pass/fail against code constants
     Engine->>MLflow: log run + artifacts
@@ -269,7 +273,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Agent as Research agent (LangGraph)
+    participant Agent as Research agent
     participant Memos as Memo retrieval
     participant MCP as MCP read-only tools
     participant Engine as Backtest engine
@@ -287,14 +291,18 @@ sequenceDiagram
         Agent->>Gate: T2_GATE(report)
         alt T2 passes
             Agent->>Library: promote
-        else fails
+        else T2 fails
             Agent->>Memos: write kill memo
         end
-    else fails
+    else T1 fails
         Agent->>Memos: write kill memo
     end
-    Note over Agent,Gate: Gate is a code constant, not an LLM judgment
 ```
+
+The gate is a code constant (`T1_GATE`, `T2_GATE`), not an LLM
+judgment — the agent reads the constant and branches on it, so
+promote/iterate/kill decisions are mechanically checkable in code
+review, not trusted to a model output.
 
 ---
 
