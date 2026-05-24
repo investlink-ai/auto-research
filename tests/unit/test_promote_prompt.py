@@ -38,8 +38,8 @@ def test_compute_f1_empty_on_both_sides_is_perfect() -> None:
     """A gold sample with no expected fields (e.g., 'no novel dilution
     language') correctly extracted as empty deserves F1=1.0, not 0.0.
     Addresses code-review finding #10."""
-    expected = {"dilution_event_quote": None, "use_of_proceeds_phrases": []}
-    actual = {"dilution_event": None, "use_of_proceeds": []}
+    expected: dict[str, Any] = {"dilution_event_quote": None, "use_of_proceeds_phrases": []}
+    actual: dict[str, Any] = {"dilution_event": None, "use_of_proceeds": []}
     assert compute_f1(expected, actual) == pytest.approx(1.0)
 
 

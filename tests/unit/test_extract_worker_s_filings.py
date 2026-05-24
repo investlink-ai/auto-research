@@ -246,11 +246,11 @@ def test_production_client_is_singleton(monkeypatch: pytest.MonkeyPatch) -> None
     `src/auto_research/extract/client.py` lines 39, 96-97 ('Production
     code instantiates one client per worker module ... at module top
     level so the per-worker budgets are independent')."""
+    from auto_research.extract.client import make_extraction_client as real_factory
     from auto_research.extract.workers import s_filings as worker_mod
 
     monkeypatch.setattr(worker_mod, "_CLIENT", None)
     factory_calls = 0
-    real_factory = worker_mod.make_extraction_client
 
     def counting_factory(**kwargs: Any) -> Any:
         nonlocal factory_calls

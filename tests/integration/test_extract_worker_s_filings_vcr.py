@@ -82,5 +82,16 @@ def test_real_s3_passes_citation_grounding(
         )
     assert out is not None, "real S-3 must pass citation grounding"
     assert out.form_type in ("S-1", "S-3")
-    # Every Citation in `out` aligns with `raw` — `validate_or_quarantine`
-    # returned `out` instead of `None`, which is the INV-2 contract.
+
+    # INV-2 contract literal check: every Citation's source_span indexes
+    # into `raw` (the on-disk file), and the resulting slice equals
+    # source_quote. The earlier worker design (whitespace-normalized
+    # text) made this assertion silently false; the rewrite restores
+    # raw-coordinate spans so this works end-to-end on a multi-line filing.
+    from auto_research.extract.guardrails import _walk_citations
+
+    for path, citation in _walk_citations(out):
+        start, end = citation.source_span
+        assert raw[start:end] == citation.source_quote, (
+            f"citation at {path} span {(start, end)} does not align with raw_doc"
+        )
