@@ -28,6 +28,7 @@ from auto_research.ingest.transcripts.sources.youtube import (
     _title_matches_call,
     _year_tokens,
 )
+from tests._otel_helpers import SpanRecorder
 
 
 def _fast_limiter() -> TokenBucket:
@@ -618,7 +619,7 @@ def test_short_ticker_overrides_present() -> None:
 
 
 def test_find_audio_url_emits_span_matched_true(
-    span_recorder,  # type: ignore[no-untyped-def]
+    span_recorder: SpanRecorder,
 ) -> None:
     """A matched search result records matched=True + result_count."""
     src = _make_source(
@@ -634,32 +635,33 @@ def test_find_audio_url_emits_span_matched_true(
     url = src.find_audio_url("NVDA", 2025, 1)
     assert url == "https://youtube.com/watch?v=match"
 
-    span = span_recorder.one("transcript.find_audio_url")
-    assert span.attributes["transcript.ticker"] == "NVDA"
-    assert span.attributes["transcript.year"] == 2025
-    assert span.attributes["transcript.quarter"] == 1
-    assert span.attributes["transcript.matched"] is True
-    assert span.attributes["transcript.result_count"] == 1
+    attrs = span_recorder.attrs("transcript.find_audio_url")
+    assert attrs["transcript.ticker"] == "NVDA"
+    assert attrs["transcript.year"] == 2025
+    assert attrs["transcript.quarter"] == 1
+    assert attrs["transcript.matched"] is True
+    assert attrs["transcript.result_count"] == 1
 
 
 def test_find_audio_url_emits_span_matched_false(
-    span_recorder,  # type: ignore[no-untyped-def]
+    span_recorder: SpanRecorder,
 ) -> None:
     src = _make_source(search_response={"entries": []})
     assert src.find_audio_url("NVDA", 2025, 1) is None
-    span = span_recorder.one("transcript.find_audio_url")
-    assert span.attributes["transcript.matched"] is False
-    assert span.attributes["transcript.result_count"] == 0
+    attrs = span_recorder.attrs("transcript.find_audio_url")
+    assert attrs["transcript.matched"] is False
+    assert attrs["transcript.result_count"] == 0
 
 
 def test_download_emits_span(
-    span_recorder,  # type: ignore[no-untyped-def]
+    span_recorder: SpanRecorder,
 ) -> None:
     src = _make_source(audio_bytes=_VALID_AUDIO_BYTES)
     audio = src.download("https://youtube.com/watch?v=fake")
-    span = span_recorder.one("transcript.download")
-    assert span.attributes["transcript.source_name"] == "youtube"
-    assert span.attributes["transcript.bytes"] == len(audio)
+    attrs = span_recorder.attrs("transcript.download")
+    assert attrs["transcript.source_name"] == "youtube"
+    assert attrs["transcript.bytes"] == len(audio)
     # duration_ms is wall-clock; a fast in-memory fake completes in <1ms,
     # so just assert non-negative.
-    assert span.attributes["transcript.duration_ms"] >= 0
+    duration_ms = attrs["transcript.duration_ms"]
+    assert isinstance(duration_ms, int) and duration_ms >= 0

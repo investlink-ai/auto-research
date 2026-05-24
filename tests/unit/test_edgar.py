@@ -24,6 +24,7 @@ import pytest
 
 from auto_research.ingest import edgar, manifest
 from auto_research.ingest.rate_limit import TokenBucket
+from tests._otel_helpers import SpanRecorder
 
 NVDA_CIK = 1045810
 NVDA_CIK_PADDED = f"{NVDA_CIK:010d}"
@@ -918,7 +919,7 @@ def test_afetch_finally_flush_failure_doesnt_swallow_gather_exceptions(
 
 def test_fetch_filings_for_cik_emits_span(
     fake_client: edgar.EdgarClient,
-    span_recorder,  # type: ignore[no-untyped-def]
+    span_recorder: SpanRecorder,
     tmp_path: Path,
 ) -> None:
     """`fetch_filings_for_cik` emits one span carrying cik / form_types /
@@ -931,18 +932,18 @@ def test_fetch_filings_for_cik_emits_span(
         form_types=("10-K", "S-3"),
     )
 
-    span = span_recorder.one("edgar.fetch_filings_for_cik")
-    assert span.attributes["edgar.cik"] == NVDA_CIK_PADDED
-    assert span.attributes["edgar.form_types"] == "10-K,S-3"
+    attrs = span_recorder.attrs("edgar.fetch_filings_for_cik")
+    assert attrs["edgar.cik"] == NVDA_CIK_PADDED
+    assert attrs["edgar.form_types"] == "10-K,S-3"
     # The fixture serves one 10-K + one S-3 (see _submissions_payload).
-    assert span.attributes["edgar.n_filings"] == 2
-    assert span.attributes["edgar.n_fetched"] == 2
-    assert span.attributes["edgar.n_cache_hits"] == 0
+    assert attrs["edgar.n_filings"] == 2
+    assert attrs["edgar.n_fetched"] == 2
+    assert attrs["edgar.n_cache_hits"] == 0
 
 
 def test_fetch_filings_for_cik_span_counts_cache_hits_on_rerun(
     fake_client: edgar.EdgarClient,
-    span_recorder,  # type: ignore[no-untyped-def]
+    span_recorder: SpanRecorder,
     tmp_path: Path,
 ) -> None:
     """A second invocation against the same manifest emits a span whose
@@ -965,6 +966,8 @@ def test_fetch_filings_for_cik_span_counts_cache_hits_on_rerun(
     )
     spans = span_recorder.by_name("edgar.fetch_filings_for_cik")
     assert len(spans) == 2
+    assert spans[0].attributes is not None
+    assert spans[1].attributes is not None
     assert spans[0].attributes["edgar.n_cache_hits"] == 0
     assert spans[1].attributes["edgar.n_cache_hits"] == 1
     assert spans[1].attributes["edgar.n_fetched"] == 0

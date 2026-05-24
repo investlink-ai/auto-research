@@ -13,6 +13,10 @@ already-shut-down provider — subsequent tests would silently record
 zero spans. We dodge this by installing a single `TracerProvider`
 once at session scope and rotating an `InMemorySpanExporter` per
 test. The provider stays stable; the recorder doesn't.
+
+The `SpanRecorder` class lives in `tests/_otel_helpers.py` so test
+files can import it for type annotations — see that module's
+docstring for why this conftest is excluded from mypy.
 """
 
 from __future__ import annotations
@@ -21,37 +25,13 @@ from collections.abc import Iterator
 
 import pytest
 from opentelemetry import trace
-from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
 
-
-class SpanRecorder:
-    """Convenience wrapper around an `InMemorySpanExporter`.
-
-    `by_name(name)` filters; `one(name)` asserts exactly one match.
-    Both walk the live exporter on each call so tests can assert span
-    state mid-run if they need to.
-    """
-
-    def __init__(self, exporter: InMemorySpanExporter) -> None:
-        self._exporter = exporter
-
-    def finished_spans(self) -> tuple[ReadableSpan, ...]:
-        return tuple(self._exporter.get_finished_spans())
-
-    def by_name(self, name: str) -> tuple[ReadableSpan, ...]:
-        return tuple(s for s in self.finished_spans() if s.name == name)
-
-    def one(self, name: str) -> ReadableSpan:
-        matches = self.by_name(name)
-        assert len(matches) == 1, (
-            f"expected exactly one span named {name!r}, "
-            f"got {len(matches)}: {[s.name for s in self.finished_spans()]}"
-        )
-        return matches[0]
+from tests._otel_helpers import SpanRecorder
 
 
 @pytest.fixture(scope="session")
@@ -87,10 +67,8 @@ def span_recorder(
     try:
         yield SpanRecorder(exporter)
     finally:
-        # Force-flush any pending spans, then remove the processor so
-        # subsequent tests start with a clean slate. `_active_span_processor`
-        # on TracerProvider is a `SynchronousMultiSpanProcessor` /
-        # `ConcurrentMultiSpanProcessor`; both expose internal lists we
-        # would have to mutate, so the cleanest portable approach is to
-        # shut down THIS processor and rely on its on_end hook stopping.
+        # Shut down THIS processor so its on_end hook stops firing.
+        # `_active_span_processor` on TracerProvider is a multi-
+        # processor whose internal list isn't a public API; shutting
+        # down the leaf processor is the portable equivalent.
         processor.shutdown()

@@ -13,6 +13,7 @@ from auto_research.telemetry import (
     init_telemetry,
     is_initialized,
 )
+from tests._otel_helpers import SpanRecorder
 
 
 def test_init_telemetry_raises_when_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -71,7 +72,7 @@ def test_try_init_telemetry_returns_true_when_already_initialized(
     assert t.try_init_telemetry() is True
 
 
-def test_span_recorder_fixture_captures_spans(span_recorder) -> None:  # type: ignore[no-untyped-def]
+def test_span_recorder_fixture_captures_spans(span_recorder: SpanRecorder) -> None:
     """The shared in-memory tracer fixture captures finished spans."""
     from opentelemetry import trace
 
@@ -79,5 +80,5 @@ def test_span_recorder_fixture_captures_spans(span_recorder) -> None:  # type: i
     with tracer.start_as_current_span("smoke") as span:
         span.set_attribute("k", "v")
 
-    one = span_recorder.one("smoke")
-    assert one.attributes["k"] == "v"
+    attrs = span_recorder.attrs("smoke")
+    assert attrs["k"] == "v"
