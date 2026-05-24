@@ -18,17 +18,14 @@ to construct the right typed exception.
 
 from __future__ import annotations
 
-import contextlib
-import os
-import threading
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from pathlib import Path
 from typing import Any, Final
 
 import httpx
 from tenacity import RetryCallState, wait_exponential_jitter
 
+from auto_research._io import atomic_write_bytes
 from auto_research._transport import TRANSIENT_NETWORK_ERRORS
 
 # Tunables. Sources may pass overrides (e.g., a slower upstream might
@@ -180,42 +177,6 @@ def make_retry_wait(
         return base
 
     return wait
-
-
-def atomic_write_bytes(dest: Path, content: bytes) -> None:
-    """Write bytes to `dest` atomically and durably.
-
-    Mirrors `manifest.append`'s discipline: tmp file + fsync of both
-    the file and the parent directory before the rename, so a power
-    loss can't leave a 0-byte canonical file when the manifest row
-    is already durably committed. Tmp is removed on any failure
-    between `write_bytes` and `os.replace` to avoid leaking hidden
-    dotfiles into the destination directory. PID + thread-id in the
-    tmp suffix prevents collisions when multiple `asyncio.to_thread`
-    workers happen to target the same dest.
-    """
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.parent / f".{dest.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    try:
-        tmp.write_bytes(content)
-        fd = os.open(tmp, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(tmp, dest)
-    except BaseException:
-        # Cleanup must NOT mask the original exception. unlink can itself
-        # raise (PermissionError on read-only fs, EIO on a dying disk) —
-        # swallow OSError from cleanup and re-raise the original failure.
-        with contextlib.suppress(OSError):
-            tmp.unlink(missing_ok=True)
-        raise
-    dir_fd = os.open(dest.parent, os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
 
 
 def default_headers(
