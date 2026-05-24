@@ -16,12 +16,16 @@ def test_prompt_version_is_human_readable_tag() -> None:
 
 
 def test_prompt_text_carries_required_extraction_contract() -> None:
-    """Every extraction prompt must instruct the model to emit `source_span`
-    and `source_quote` for every claim — that's the INV-2 wire format."""
-    assert "source_span" in S_FILINGS_DILUTION_PROMPT
+    """Every extraction prompt must instruct the model to emit `source_quote`
+    — that's the INV-2 wire format. (`source_span` is computed by the worker
+    so the prompt explicitly does NOT request it.)"""
     assert "source_quote" in S_FILINGS_DILUTION_PROMPT
 
 
-def test_prompt_text_carries_placeholder() -> None:
-    """Prompt is a template with a `{source_text}` placeholder."""
-    assert "{source_text}" in S_FILINGS_DILUTION_PROMPT
+def test_prompt_has_no_source_text_placeholder() -> None:
+    """The prompt is INSTRUCTIONS ONLY — the document is sent separately as
+    user_content. A `{source_text}` placeholder would (a) double the doc
+    via system+user blocks, busting prompt caching, and (b) require the
+    worker to `.format()` the template, re-introducing the brace-collision
+    bug class. See `s_filings_dilution.py` module docstring."""
+    assert "{source_text}" not in S_FILINGS_DILUTION_PROMPT

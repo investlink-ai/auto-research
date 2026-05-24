@@ -1,4 +1,20 @@
-"""S-1 / S-3 dilution-language extraction prompt (Issue #11)."""
+"""S-1 / S-3 dilution-language extraction prompt (Issue #11).
+
+Template is **instructions only** — the source text is sent separately as
+the user-content turn, never embedded in the system block. That split
+matters for two reasons:
+
+1. **Prompt caching** (spec §7.4): the system block is the stable cached
+   prefix. Including the per-doc text in it busts the cache key on every
+   call and collapses cache-hit economics from ~80% to 0%.
+2. **One source of truth**: embedding the doc into the system block and
+   also passing it as user_content sends it twice, doubling input tokens
+   and giving the model two source-texts to reason about.
+
+The placeholder convention from earlier W1 prompts (`{source_text}`) is
+intentionally absent here. Workers must pass `system_prompt=PROMPT` (no
+`.format()`) and `user_content=raw_doc`.
+"""
 
 from __future__ import annotations
 
@@ -6,14 +22,18 @@ S_FILINGS_DILUTION_PROMPT_VERSION = "v1"
 
 S_FILINGS_DILUTION_PROMPT = """\
 You are extracting structured dilution and capital-raise signals from an SEC
-S-1 or S-3 registration statement.
+S-1 or S-3 registration statement. The filing text will be supplied in the
+next user message.
 
-Read <source_text> carefully and return a single JSON object matching the
-SFilingOutput schema. Every claim MUST include:
-- source_quote: a verbatim substring of <source_text> that supports the
-  claim. The substring will be located in <source_text> by exact match; if
-  any character (including whitespace, punctuation, capitalization) differs,
-  the claim will be rejected and the entire output quarantined.
+Return a single JSON object matching the SFilingOutput schema. Every claim
+MUST include:
+- source_quote: a verbatim substring of the filing text that supports the
+  claim. Preserve the original whitespace exactly — do NOT collapse runs of
+  whitespace or rewrite punctuation. The substring will be located in the
+  filing by whitespace-flexible match; if no occurrence is found, OR if more
+  than one occurrence is found, the claim will be rejected and the entire
+  output quarantined. Choose quotes long and specific enough to be unique
+  in the filing.
 
 DO NOT include `source_span`. Character offsets are computed in code from
 your `source_quote` — counting characters is the worker's job, not yours.
@@ -34,23 +54,19 @@ A Claim is an object with EXACTLY two fields: `citation` (an object with
 allowed inside a Claim or Citation. Example of the required shape for a
 single Claim:
 
-  {{
-    "citation": {{
+  {
+    "citation": {
       "source_quote": "shelf takedown of $200 million of common stock"
-    }},
+    },
     "confidence": 0.9
-  }}
+  }
 
-Do not invent quotes. If a field has no support in source_text, return an
+Do not invent quotes. If a field has no support in the filing, return an
 empty list rather than fabricating a citation.
 
 Return ONLY the JSON object. Do not wrap it in markdown code fences. Do not
 prepend or append any commentary. The response must start with an opening
 curly brace and end with a closing curly brace.
-
-<source_text>
-{source_text}
-</source_text>
 """
 
 __all__ = [

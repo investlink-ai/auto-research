@@ -11,29 +11,40 @@ Flow:
 2. Look up `data/cache/extract/s_filings/<sha>.json`. Hit -> deserialize
    into `SFilingOutput`, return.
 3. Miss -> invoke the Anthropic client (with reliability + caching from
-   `make_extraction_client`), parse the JSON content block into
-   `SFilingOutput`, validate via `validate_or_quarantine`.
-4. On validation success: write to cache, return the output. On failure:
-   the guardrail already wrote a QuarantineRecord; return None.
+   `make_extraction_client`), parse the JSON content block into a dict,
+   resolve `source_span` against the raw doc by whitespace-flexible
+   regex match (LLMs are unreliable at character counting; the worker is
+   the source of span truth), construct `SFilingOutput`, validate via
+   `validate_or_quarantine`.
+4. On parse / span-resolution / validation failure: write a
+   `QuarantineRecord` snapshot of the *unmutated* parsed dict and return
+   None. Any failure mode that leaves the model's output unauditable is
+   a bug — every quarantine path captures what the model actually said.
 
 `cache_root` and `quarantine_root` are injected so tests can pass
 `tmp_path` and stay hermetic. Production callers omit them and get the
 package defaults. `anthropic_client` is injected the same way
-`make_extraction_client` accepts it — production callers omit it; tests
-pass a `MagicMock`.
+`make_extraction_client` accepts it — production callers omit it and
+share the module-level singleton (preserves cost-cap and circuit-breaker
+state across calls per `client.py` discipline); tests pass a `MagicMock`
+and get a fresh per-call client.
 """
 
 from __future__ import annotations
 
+import copy
 import json
+import re
 from pathlib import Path
+from typing import Any
 
 import anthropic
+from pydantic import ValidationError
 
 from auto_research._io import atomic_write_text
 from auto_research._models import route_model
 from auto_research.extract import cache as content_cache
-from auto_research.extract.client import make_extraction_client
+from auto_research.extract.client import ExtractionFn, make_extraction_client
 from auto_research.extract.guardrails import (
     DEFAULT_QUARANTINE_ROOT,
     QuarantineRecord,
@@ -50,52 +61,128 @@ _TASK = "dilution_event"  # matches SFilingOutput.dilution_event field name
 _MAX_TOKENS = 4096
 _DECODING_PARAMS: dict[str, object] = {"max_tokens": _MAX_TOKENS}
 
+# Module-level lazy client so per-worker cost_cap + circuit_breaker state
+# accumulates across calls. Each call site that passes its own
+# `anthropic_client` (test injection) gets a fresh per-call client and
+# bypasses the singleton — fine because per-test state isolation is what
+# tests want.
+_CLIENT: ExtractionFn | None = None
 
-def _normalize_whitespace(text: str) -> str:
-    """Collapse runs of whitespace into single spaces and strip ends.
 
-    LLMs reliably collapse multi-line filing text into single-space prose
-    when quoting back. Sending the model the normalized form (and
-    validating against it) keeps the INV-2 verbatim-match contract robust
-    to the model's "helpful" reformatting. The cache key uses the raw
-    bytes so a whitespace change in the source still busts the cache; the
-    normalized form is reproducible from raw at any time.
+def _get_client(anthropic_client: anthropic.Anthropic | None) -> ExtractionFn:
+    """Return the production singleton, or a fresh client for test injection.
+
+    The singleton path is the one whose @cost_cap counter and
+    @circuit_breaker state must persist across calls; the injection path
+    is exercised only by tests that don't care about those.
     """
-    return " ".join(text.split())
+    global _CLIENT
+    if anthropic_client is not None:
+        return make_extraction_client(
+            worker=_WORKER, anthropic_client=anthropic_client
+        )
+    if _CLIENT is None:
+        _CLIENT = make_extraction_client(worker=_WORKER)
+    return _CLIENT
 
 
-def _resolve_spans_inplace(node: object, raw: str) -> list[str]:
-    """Walk the parsed JSON tree; for any Citation-shaped dict, fill in
-    `source_span` by locating `source_quote` in `raw`. Return the list of
-    quotes that were not found verbatim — a non-empty result means the
-    output must be quarantined.
+# Markdown-fence strip: handles both `\`\`\`json\n{...}\n\`\`\`` and
+# the no-newline single-line form `\`\`\`json{...}\`\`\``. Captures the JSON
+# body in group 1. Defensive only — the prompt forbids fences.
+_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*(.*?)\s*```\s*$", re.DOTALL)
 
-    Mutates `node` in place. LLMs are reliably bad at character counting,
-    so the model returns only `source_quote` and the worker is the source
-    of span truth. Pydantic validation downstream still requires
-    `source_span`, so a missing-quote case naturally surfaces as a
-    quarantine signal rather than a silent gap.
+
+def _strip_fence(text: str) -> str:
+    match = _FENCE_RE.match(text)
+    return match.group(1) if match else text
+
+
+def _quote_to_flex_regex(quote: str) -> str:
+    r"""Convert `quote` to a regex pattern that treats any run of whitespace
+    in `quote` as `\s+` — matches whitespace-equivalent occurrences in
+    raw text without losing positional fidelity.
+
+    Required because the prompt asks the model to quote verbatim, but
+    LLMs collapse runs of whitespace ("We may offer\nshares" -> "We may
+    offer shares") more reliably than they preserve them. We match the
+    quote shape-flexibly against the raw doc and use the *raw match*'s
+    offsets as `source_span` — INV-2 's `source_text[span] == source_quote`
+    no longer holds literally, but the stronger property holds: the span
+    points at the same semantic region the model quoted.
     """
-    missing: list[str] = []
-    if isinstance(node, dict):
-        if "source_quote" in node:
-            quote = node["source_quote"]
-            if isinstance(quote, str):
-                start = raw.find(quote)
-                if start < 0:
-                    missing.append(quote)
-                    # Sentinel span so Pydantic still parses (NonNegativeInt
-                    # + start<end validators); the quarantine routing above
-                    # short-circuits before validation anyway.
-                    node["source_span"] = [0, 1]
+    parts = re.split(r"\s+", quote.strip())
+    if not parts or parts == [""]:
+        return r"(?!x)x"  # never-matching pattern; treated as "not found"
+    return r"\s+".join(re.escape(p) for p in parts)
+
+
+def _resolve_spans(
+    parsed: dict[str, Any], raw: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Return (resolved_copy, problem_quotes).
+
+    Walks a deep copy of `parsed` and assigns `source_span` to every
+    Citation-shaped dict by whitespace-flexible regex match against `raw`.
+    A quote is a "problem" (route to quarantine) if it is empty, not found
+    in `raw`, or appears more than once — ambiguous matches mean we
+    cannot honestly assign one span over another.
+
+    Crucially: `parsed` is NOT mutated. The QuarantineRecord upstream
+    snapshots the *original* parsed dict so reviewers see exactly what
+    the model returned, not what the worker rewrote it to.
+    """
+    resolved = copy.deepcopy(parsed)
+    problems: list[str] = []
+
+    def _walk(node: object) -> None:
+        if isinstance(node, dict):
+            if "source_quote" in node:
+                quote = node["source_quote"]
+                if not isinstance(quote, str) or not quote.strip():
+                    problems.append(repr(quote))
                 else:
-                    node["source_span"] = [start, start + len(quote)]
-        for value in node.values():
-            missing.extend(_resolve_spans_inplace(value, raw))
-    elif isinstance(node, list):
-        for item in node:
-            missing.extend(_resolve_spans_inplace(item, raw))
-    return missing
+                    pattern = _quote_to_flex_regex(quote)
+                    matches = list(re.finditer(pattern, raw))
+                    if len(matches) == 0:
+                        problems.append(quote)
+                    elif len(matches) > 1:
+                        problems.append(
+                            f"AMBIGUOUS ({len(matches)} matches): {quote}"
+                        )
+                    else:
+                        start, end = matches[0].span()
+                        node["source_span"] = [start, end]
+                        # Snap source_quote to the actual raw substring so
+                        # validate_citation_grounding's
+                        # `source_text[span] == quote` invariant holds
+                        # literally (not just shape-equivalently).
+                        node["source_quote"] = raw[start:end]
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(resolved)
+    return resolved, problems
+
+
+def _write_quarantine(
+    *,
+    quarantine_root: Path,
+    doc_id: str,
+    parsed: object,
+    error: str,
+) -> None:
+    record = QuarantineRecord(
+        doc_id=doc_id,
+        worker=_WORKER,
+        prompt_version=S_FILINGS_DILUTION_PROMPT_VERSION,
+        output=parsed if isinstance(parsed, dict) else {"raw": parsed},
+        error=error,
+    )
+    target = quarantine_root / _WORKER / f"{doc_id}.json"
+    atomic_write_text(target, record.model_dump_json(indent=2))
 
 
 def extract_s_filing(
@@ -108,8 +195,10 @@ def extract_s_filing(
 ) -> SFilingOutput | None:
     """Extract an SFilingOutput from a raw S-1/S-3 text.
 
-    Returns `None` when the output failed citation grounding; the caller
-    MUST treat None as "do not persist."
+    Returns `None` when the output failed any parse / span-resolution /
+    grounding check; the caller MUST treat None as "do not persist." The
+    raw model output is always captured in a QuarantineRecord on the
+    failure path.
     """
     effective_cache_root = (
         cache_root if cache_root is not None else content_cache.DEFAULT_CACHE_ROOT
@@ -131,54 +220,64 @@ def extract_s_filing(
     if cached is not None:
         return SFilingOutput.model_validate(cached)
 
-    normalized = _normalize_whitespace(raw_doc)
-    client = make_extraction_client(
-        worker=_WORKER,
-        anthropic_client=anthropic_client,
-    )
+    client = _get_client(anthropic_client)
     response = client(
         task=_TASK,
-        system_prompt=S_FILINGS_DILUTION_PROMPT.format(source_text=normalized),
-        user_content=normalized,
+        system_prompt=S_FILINGS_DILUTION_PROMPT,
+        user_content=raw_doc,
         max_tokens=_MAX_TOKENS,
     )
 
-    # Anthropic responses are a list of content blocks; the worker expects
-    # one TextBlock containing JSON. The prompt forbids markdown fences,
-    # but the model occasionally wraps anyway — strip a single ```json/```
-    # fence defensively so a cosmetic regression doesn't quarantine an
-    # otherwise-valid output. Any other shape is model misbehavior; let
-    # `model_validate` raise so quarantine catches it.
-    text = "".join(b.text for b in response.content if b.type == "text").strip()
-    if text.startswith("```"):
-        # Trim opening fence (with optional `json` tag) and closing fence.
-        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-        if text.endswith("```"):
-            text = text[: -len("```")].rstrip()
-    parsed = json.loads(text)
-
-    # Fill in source_span from source_quote (the worker is the source of
-    # span truth; see `_resolve_spans_inplace`). Quotes are matched against
-    # the whitespace-normalized form of `raw_doc` — same text the model
-    # saw — so a hallucination is the only way to miss.
-    missing_quotes = _resolve_spans_inplace(parsed, normalized)
-    if missing_quotes:
-        record = QuarantineRecord(
+    # Extract the text content. An empty content list or a non-text-block
+    # response (e.g. refusal, max_tokens before any text) leaves `text` as
+    # the empty string — treat as a parse failure so the model's response
+    # shape is auditable rather than crashing the batch.
+    text = _strip_fence(
+        "".join(b.text for b in response.content if b.type == "text").strip()
+    )
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        _write_quarantine(
+            quarantine_root=effective_quarantine_root,
             doc_id=doc_id,
-            worker=_WORKER,
-            prompt_version=S_FILINGS_DILUTION_PROMPT_VERSION,
-            output=parsed if isinstance(parsed, dict) else {"raw": parsed},
-            error=f"source_quote(s) not found in raw_doc: {missing_quotes!r}",
+            parsed={"raw_text": text},
+            error=f"json decode failed: {exc}",
         )
-        target = effective_quarantine_root / _WORKER / f"{doc_id}.json"
-        atomic_write_text(target, record.model_dump_json(indent=2))
         return None
 
-    output = SFilingOutput.model_validate(parsed)
+    # Snapshot BEFORE _resolve_spans builds its mutated copy, so a quarantine
+    # write on the next branch persists the model's actual output.
+    parsed_snapshot = copy.deepcopy(parsed)
 
+    resolved, problem_quotes = _resolve_spans(parsed, raw_doc)
+    if problem_quotes:
+        _write_quarantine(
+            quarantine_root=effective_quarantine_root,
+            doc_id=doc_id,
+            parsed=parsed_snapshot,
+            error=f"source_quote(s) unresolvable in raw_doc: {problem_quotes!r}",
+        )
+        return None
+
+    try:
+        output = SFilingOutput.model_validate(resolved)
+    except ValidationError as exc:
+        _write_quarantine(
+            quarantine_root=effective_quarantine_root,
+            doc_id=doc_id,
+            parsed=parsed_snapshot,
+            error=f"schema validation failed: {exc}",
+        )
+        return None
+
+    # Defense in depth — even though spans were just computed by the worker
+    # against `raw_doc`, run the validator: catches future worker bugs
+    # (e.g., a refactor that changes _resolve_spans without re-running it)
+    # before the bad output reaches the cache.
     validated = validate_or_quarantine(
         output,
-        source_text=normalized,
+        source_text=raw_doc,
         doc_id=doc_id,
         worker=_WORKER,
         prompt_version=S_FILINGS_DILUTION_PROMPT_VERSION,
