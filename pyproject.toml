@@ -17,6 +17,7 @@ dependencies = [
     "langfuse>=2,<3",
     "mlflow-skinny>=3.0",
     "numpy>=2.0",
+    "openai>=2.38.0",
     "pandas>=2.2",
     "pyarrow>=23.0.1",
     "pydantic>=2.13.4",
