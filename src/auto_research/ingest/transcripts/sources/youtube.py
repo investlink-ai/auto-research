@@ -3,10 +3,11 @@
 Most large- and mid-cap earnings calls are mirrored on YouTube within
 hours by aggregator channels (Benzinga, Castify Earnings Call, EARNMOAR,
 Investing 101, Yahoo Finance) plus the occasional first-party upload.
-A universe-wide probe of the 81-ticker v1 universe found a full-length
+A universe-wide probe of the 80-ticker v1 universe found a full-length
 match (40-90 min duration, the consistent earnings-call shape) for
-every ticker when queried by company name. yt-dlp fetches the audio
-stream directly — no headless browser, no platform registration.
+every ticker after curating per-ticker query overrides where the bare
+symbol didn't match. yt-dlp fetches the audio stream directly — no
+headless browser, no platform registration.
 
 `find_audio_url` runs a `ytsearch{N}:{query}` lookup, filters results
 by duration band AND by a title check that requires the company,
@@ -49,42 +50,36 @@ from auto_research.ingest.transcripts._base import TranscriptConfigError
 SOURCE_NAME: Final = "youtube"
 
 # Per-ticker search query override. The default query is
-# `{ticker} earnings call`, which works for most tickers but
-# misses tickers whose symbol doesn't match the company name used
-# by aggregator uploaders (e.g., GOOGL → 'Alphabet', LEU → 'Centrus
-# Energy'). Override here; the value is appended with `earnings call
-# Q{quarter} {year}` before search.
+# `{ticker} earnings call`, which works for most tickers but fails
+# in two patterns:
 #
-# Curation methodology:
-#   1. The ticker→company mapping comes from SEC's official
-#      `company_tickers.json` (CIK + ticker + corporate name). The
-#      override value is the SEC name with corporate suffixes
-#      ("CORP", "INC.", "LTD.", etc.) stripped — that's what
-#      aggregator uploaders actually use in video titles.
-#   2. Each entry was manually verified by running a search and
-#      confirming the matched video's title is an actual earnings
-#      call for THAT company, not a similarly-named one. (Lesson
-#      from the prior CBRS → 'CoreWeave' error and the NVMI →
-#      'Nova' / NovaGold collision: ambiguous company names need
-#      tighter discriminators, or no override at all.)
+#  (1) The ticker symbol doesn't appear in aggregator video titles
+#      (e.g., GOOGL → 'Alphabet', LEU → 'Centrus Energy'). The bare
+#      query returns no in-band match.
+#  (2) The ticker IS a substring of common English words, so the
+#      title-gate's `ticker in title` substring check false-matches
+#      against unrelated companies' earnings calls (e.g., 'on' in
+#      'Conference' for ON Semiconductor, 'be' in 'Adobe' for
+#      Bloom Energy). Without an override, find_audio_url silently
+#      returned the WRONG company's call.
 #
-# Two universe tickers are deliberately ABSENT despite being in the
-# 81-ticker probe's failure set:
-#   - CBRS (Cerebras Systems) — IPO too recent; no earnings call
-#     uploads on YouTube at all (no override would help).
-#   - NVMI (Nova Ltd / Nova Measuring Instruments) — recent calls
-#     not on YouTube (only 2020-2021 uploads survive); 'Nova' alone
-#     collides with NovaGold Resources, and 'Nova Measuring' has no
-#     recent in-band hits.
-# Both fall through to `no_coverage` until the coverage-survey
-# worker re-evaluates.
+# Override values come from SEC's official `company_tickers.json`
+# (CIK + ticker + corporate name), with corporate suffixes ("CORP",
+# "INC.", "LTD.") stripped to match what aggregators put in titles.
+# Each entry was verified by running find_audio_url, then fetching
+# the matched URL's actual title and checking the SEC-canonical name
+# appears there — NOT by checking the override itself appears in
+# the title (that check is tautological and missed the prior
+# CBRS → 'CoreWeave' / NVMI → 'NovaGold' wrong-company errors).
 TICKER_QUERIES: dict[str, str] = {
     "AAOI": "Applied Optoelectronics",
+    "BE": "Bloom Energy",
     "FORM": "FormFactor",
     "GOOGL": "Alphabet",
     "LEU": "Centrus Energy",
     "MIR": "Mirion Technologies",
     "NVDA": "NVIDIA",
+    "ON": "ON Semiconductor",
     "SATS": "EchoStar",
     "STRL": "Sterling Infrastructure",
     "TLN": "Talen Energy",
