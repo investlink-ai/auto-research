@@ -46,43 +46,30 @@ from typing import Any, Final, Protocol
 
 from auto_research.ingest.rate_limit import TokenBucket
 from auto_research.ingest.transcripts._base import TranscriptConfigError
+from auto_research.ingest.transcripts._config import load_sources_config
 
 SOURCE_NAME: Final = "youtube"
 
-# Per-ticker search query override. The default query is
-# `{ticker} earnings call`, which works for most tickers but fails
-# in two patterns:
+# Per-ticker search query override. Loaded from `data/transcripts/
+# sources.toml` (the `[tickers]` table's `query` field on rows
+# whose source is `youtube`). The default query is `{ticker}
+# earnings call`; an override replaces the ticker portion with the
+# explicit company name. Two failure modes the override fixes:
 #
 #  (1) The ticker symbol doesn't appear in aggregator video titles
-#      (e.g., GOOGL → 'Alphabet', LEU → 'Centrus Energy'). The bare
-#      query returns no in-band match.
+#      (e.g., GOOGL → 'Alphabet'). Bare-ticker search misses.
 #  (2) The ticker IS a substring of common English words, so the
-#      title-gate's `ticker in title` substring check false-matches
-#      against unrelated companies' earnings calls (e.g., 'on' in
-#      'Conference' for ON Semiconductor, 'be' in 'Adobe' for
-#      Bloom Energy). Without an override, find_audio_url silently
-#      returned the WRONG company's call.
+#      title-gate's substring check false-matches against unrelated
+#      companies' earnings calls (e.g., 'on' in 'Conference' for
+#      ON Semiconductor, 'be' in 'Adobe' for Bloom Energy).
 #
-# Override values come from SEC's official `company_tickers.json`
-# (CIK + ticker + corporate name), with corporate suffixes ("CORP",
-# "INC.", "LTD.") stripped to match what aggregators put in titles.
-# Each entry was verified by running find_audio_url, then fetching
-# the matched URL's actual title and checking the SEC-canonical name
-# appears there — NOT by checking the override itself appears in
-# the title (that check is tautological and missed the prior
-# CBRS → 'CoreWeave' / NVMI → 'NovaGold' wrong-company errors).
+# Override values come from SEC's official `company_tickers.json`,
+# verified by inspecting matched titles. See `_config.py` for the
+# schema and the docstring on `data/transcripts/sources.toml`.
 TICKER_QUERIES: dict[str, str] = {
-    "AAOI": "Applied Optoelectronics",
-    "BE": "Bloom Energy",
-    "FORM": "FormFactor",
-    "GOOGL": "Alphabet",
-    "LEU": "Centrus Energy",
-    "MIR": "Mirion Technologies",
-    "NVDA": "NVIDIA",
-    "ON": "ON Semiconductor",
-    "SATS": "EchoStar",
-    "STRL": "Sterling Infrastructure",
-    "TLN": "Talen Energy",
+    ticker: cfg.query
+    for ticker, cfg in load_sources_config().tickers.items()
+    if cfg.source == SOURCE_NAME and cfg.query is not None
 }
 
 # Earnings calls are typically 40-90 minutes (2400-5400 sec). We use a
