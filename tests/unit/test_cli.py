@@ -188,3 +188,36 @@ def test_extract_s_filings_skips_non_s_filings(
         )
     assert result.exit_code == 0, result.output
     mock_extract.assert_not_called()
+
+
+def test_extract_s_filings_logs_and_skips_missing_raw_file(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """A manifest row whose `path` no longer exists on disk must be skipped,
+    not crash the batch. Counts as quarantined."""
+    manifest_path = tmp_path / "manifest.parquet"
+    _write_edgar_manifest_row(
+        manifest_path,
+        cik="0001045810",
+        accession="0001045810-24-000003",
+        form_type="S-3",
+        raw_path=tmp_path / "raw" / "does_not_exist.txt",
+    )
+    with patch("auto_research.cli.extract_s_filing", autospec=True) as mock_extract:
+        result = runner.invoke(
+            cli,
+            [
+                "extract",
+                "s-filings",
+                "--cik",
+                "0001045810",
+                "--manifest-path",
+                str(manifest_path),
+                "--out-root",
+                str(tmp_path / "extracted"),
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    mock_extract.assert_not_called()
+    assert "skipping 0001045810-24-000003" in result.output
+    assert "quarantined=1" in result.output

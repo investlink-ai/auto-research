@@ -118,6 +118,7 @@ def extract() -> None: ...
     type=click.Path(dir_okay=False, exists=True, path_type=Path),
     default=_DEFAULT_MANIFEST,
     show_default=True,
+    help="Manifest Parquet file.",
 )
 @click.option(
     "--out-root",
@@ -138,16 +139,21 @@ def extract_s_filings(cik: str, manifest_path: Path, out_root: Path) -> None:
         and r["status"] == "ok"
     ]
     out_dir = out_root / "s_filings"
-    out_dir.mkdir(parents=True, exist_ok=True)
     persisted = 0
     quarantined = 0
     for row in candidates:
         raw_path = Path(row["path"])
-        raw_doc = raw_path.read_text(errors="replace")
+        try:
+            raw_doc = raw_path.read_text(errors="replace")
+        except OSError as exc:
+            click.echo(f"warn: skipping {row['doc_id']}: {exc}", err=True)
+            quarantined += 1
+            continue
         result = extract_s_filing(raw_doc=raw_doc, doc_id=row["doc_id"])
         if result is None:
             quarantined += 1
             continue
+        out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / f"{row['doc_id']}.json").write_text(
             result.model_dump_json(indent=2)
         )
