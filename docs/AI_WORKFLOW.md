@@ -89,7 +89,7 @@ Two tiers. No Tier 3/4 — no live capital, no shared infrastructure.
 | Markdown, comments | 0 | → 1 if it changes policy or invariants |
 | `docs/specs/`, `docs/plans/`, `docs/decisions/`, `AGENTS.md`, `CLAUDE.md`, `docs/AI_WORKFLOW.md`, `docs/AI_CODE_STYLE.md` | 1 | → 2 if it changes an invariant |
 | `src/auto_research/ingest/`, `src/auto_research/eval/`, observability glue, `dashboard.py` | 1 | — |
-| `src/auto_research/extract/` (worker bodies) | 1 | → 2 for `guardrails.py`, `schemas.py`, citation-grounding logic |
+| `src/auto_research/extract/` (worker bodies) | 1 | → 2 for `guardrails.py`, `schemas.py`, `chunking.py`, citation-grounding logic |
 | `feast/` (FeatureView definitions) | 2 | — PIT discipline |
 | `src/auto_research/backtest/cpcv.py`, `deflated_sharpe.py`, `labels.py`, `costs.py` | 2 | — López de Prado correctness |
 | `src/auto_research/agents/research_graph.py` | 2 | — `T1_GATE`/`T2_GATE` are code-checked authority |

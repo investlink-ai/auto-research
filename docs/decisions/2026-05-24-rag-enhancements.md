@@ -217,13 +217,33 @@ path. Issue #15's adapter writes both stores from the same
 ### `extract/chunking.py` (Issue #13 surface)
 
 ```python
-# Public surface
-def parse_10k(html: str, *, metadata: ChunkMetadata) -> ChunkSet:
+# Public surface (after code review, 2026-05-25)
+def parse_filing(*, html: str, metadata: ChunkMetadata) -> ChunkSet:
     """Parse SEC HTML into section-aware parent + child chunks.
 
     Raises ChunkValidationError if any chunk fails the char_span identity
-    check. Caller is responsible for routing to data/quarantine/.
+    check. Callers route via `validate_or_quarantine_chunkset` rather
+    than handling the exception manually.
     """
+
+def validate_or_quarantine_chunkset(
+    chunkset: ChunkSet,
+    *,
+    source_text: str,
+    doc_id: str,
+    quarantine_root: Path = DEFAULT_QUARANTINE_ROOT,
+) -> ChunkSet | None:
+    """Mirror of `extract.guardrails.validate_or_quarantine`. On INV-2
+    failure: writes the quarantine record and returns None. Callers
+    that get None MUST NOT persist any part of the chunkset downstream.
+    """
+
+def quarantine_chunkset(
+    chunkset: ChunkSet, *, doc_id: str, source_text: str, reason: str,
+    quarantine_root: Path = DEFAULT_QUARANTINE_ROOT,
+) -> Path:
+    """Write data/quarantine/chunking/<doc_id>.json. Requires explicit
+    doc_id (no 'empty' fallback — caller always knows the document)."""
 
 @dataclass(frozen=True)
 class ChunkMetadata:
@@ -245,20 +265,47 @@ class ParentChunk:
 @dataclass(frozen=True)
 class ChildChunk:
     text: str
-    char_span: tuple[int, int]    # subset of parent's char_span
+    char_span: tuple[int, int]   # subset of parent's char_span
     token_count: int
-    parent_id: str                # parent's (doc_id, char_span)
+    parent_id: str               # parent's (doc_id, char_span)
+    section_name: str            # ADR D7 — copied from parent so LanceDB
+                                 # can filter at index time
+    from_table: bool             # ADR D5 — children of a table parent
+                                 # are atomic (single child = parent)
     metadata: ChunkMetadata
 
 @dataclass(frozen=True)
 class ChunkSet:
-    parents: list[ParentChunk]
-    children: list[ChildChunk]
+    # tuples (not lists) so frozenness extends to the contents —
+    # downstream consumers can't mutate parents/children in place.
+    parents: tuple[ParentChunk, ...]
+    children: tuple[ChildChunk, ...]
 ```
 
-`parse_10k` is pure: same `(html, metadata)` in → same `ChunkSet` out.
+`parse_filing` is pure (modulo a one-time spaCy warmup, lazy-loaded
+inside the function): same `(html, metadata)` in → same `ChunkSet` out.
 No network. No LLM calls. Tests pin `unstructured` to a specific
 version (D3) so parser output is deterministic.
+
+**Table-parent atomicity (D5 amendment, 2026-05-25).** Table parents
+(`table_html is not None`) emit a single child equal to the parent.
+Splitting at `</td>` seams produces fragments without closing
+`</table>`, breaking D5's well-formed-HTML invariant. Children carry
+`from_table=True` so Issue #16's retrieval can filter at the child
+level without a JOIN.
+
+**Cross-boundary tables (D5 amendment, 2026-05-25).** A `<table>` that
+opens inside a section but `</table>` closes after is NOT emitted as a
+table chunk. Clamping would produce malformed `table_html`. The open
+`<table>` falls into the section's narrative; the close lands in the
+next section's narrative.
+
+**Routing wrapper (review finding, 2026-05-25).** Callers must use
+`validate_or_quarantine_chunkset` rather than rolling their own
+try/except around `parse_filing`. The wrapper mirrors
+`guardrails.validate_or_quarantine`'s one-call contract so the INV-2
+quarantine discipline is symmetric across both halves of the
+invariant.
 
 ### Downstream surface (informational)
 

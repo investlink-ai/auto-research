@@ -108,6 +108,7 @@ Marked `[SENSITIVE]` in `docs/ARCHITECTURE.md` §3.
 
 - `src/auto_research/extract/guardrails.py` — citation-grounding validator
 - `src/auto_research/extract/schemas.py` — `source_span` / `source_quote` contract
+- `src/auto_research/extract/chunking.py` — INV-2 `char_span` fidelity (chunking half)
 - `feast_repo/` (FeatureView definitions, `apply` configs) — PIT discipline
 - `src/auto_research/backtest/cpcv.py` — combinatorial purged CV with embargo
 - `src/auto_research/backtest/deflated_sharpe.py` — multiple-testing correction

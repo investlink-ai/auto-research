@@ -43,6 +43,14 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras
 
+      # `unstructured.partition_html` requires spaCy's `en_core_web_sm`
+      # for element classification. spaCy hosts the model only on
+      # GitHub (no PyPI wheel), so `uv sync` does not install it.
+      # `auto_research.extract.chunking._ensure_nlp_warmup()` raises at
+      # first `parse_filing` call without it.
+      - name: Install NLP model
+        run: make setup-nlp
+
       - name: Lint + typecheck
         run: make quick
 

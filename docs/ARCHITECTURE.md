@@ -97,7 +97,7 @@ src/auto_research/
 ├── extract/                  # LLM plane
 │   ├── schemas.py            # Pydantic outputs with source_span/source_quote      [SENSITIVE]
 │   ├── guardrails.py         # citation grounding + Guardrails AI validators       [SENSITIVE]
-│   ├── chunking.py           # unstructured.io (OSS lib) + section-aware + parent/child + table policy
+│   ├── chunking.py           # section-aware + parent/child + INV-2 char_span        [SENSITIVE]
 │   ├── rag_retrieval.py      # LanceDB + hybrid (BM25+dense+RRF) + bge-reranker-v2-m3
 │   ├── entity_resolution.py  # mention → ticker disambiguation
 │   ├── ten_k.py              # 10-K worker

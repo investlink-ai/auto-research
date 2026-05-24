@@ -3,11 +3,13 @@
 <head><meta charset="utf-8"></head>
 <body>
 <h1>Item&#160;1A. Risk Factors</h1>
-<p>This paragraph has a non-breaking&nbsp;space and a curly&#8217;apostrophe inside the text body, both of which `unstructured.partition_html` may normalize.</p>
-<p>Nested <span><span>span elements</span></span> should still preserve byte offsets back into the raw source.</p>
-<p>The next paragraph contains a stray CDATA fragment that should not break parsing: <![CDATA[CDATA payload with raw text and a literal '<' character.]]></p>
+<p>This paragraph has a non-breaking&nbsp;space and a curly&#8217;apostrophe inside the text body, both of which `unstructured.partition_html` may normalize. The goal of this paragraph is to provide enough prose for the section-detection density heuristic to confidently identify the preceding header as a real section start. We need at least two hundred alphabetic characters of body content beyond the header itself, which means we need to keep writing prose, varying it just enough so a tokenizer sees the structure, and not just identical phrases over and over.</p>
+<p>Nested <span><span>span elements</span></span> should still preserve byte offsets back into the raw source. The chunker reads char_span values from the masked HTML but the actual text comes from the unmasked HTML at those same offsets, so any test must round-trip slice equality to confirm INV-2 still holds even when the parser would otherwise have normalized whitespace, entities, or nested formatting.</p>
+<p>The next paragraph contains a stray CDATA fragment that should not break parsing: <![CDATA[CDATA payload with raw text and a literal '<' character. This payload also contributes enough alphabetic content that the section threshold passes for this fixture without requiring a much longer body. We deliberately include several sentences to vary the token distribution.]]></p>
+<p>One more paragraph of contiguous prose ensures the density heuristic has comfortable headroom across the first kilobyte of section body, so the test asserts on detection rather than on the precise threshold value.</p>
 <h1>Item&#160;7. Management Discussion and Analysis</h1>
-<p>Trailing section content. This is short prose to give the chunker a second section with paragraphs to pack.</p>
-<p>A second paragraph ensures the packer has more than one element per section to fold together.</p>
+<p>Trailing section content for Item 7. This paragraph similarly needs enough alphabetic prose past the section header to allow the density heuristic to register Item 7 as a real section start, so the test asserting that both Item 1A and Item 7 are detected has comfortable headroom. We write deliberate prose, vary the sentence structure, and stay within typical 10-K English so the chunker isn't dealing with synthetic edge cases here.</p>
+<p>A second paragraph ensures the packer has more than one element per section to fold together. The narrative-packing logic walks HTML break tags and accumulates content within MAX_PARENT_TOKENS; with two paragraphs of substantive prose we exercise both the within-budget accumulation path and the section boundary respect.</p>
+<p>A third paragraph for additional density — discussion of operating performance, revenue drivers, and macroeconomic outlook would normally fill Item 7 in a real filing, so we mirror that shape with multiple paragraphs of related prose to give the chunker realistic input shape for testing.</p>
 </body>
 </html>
