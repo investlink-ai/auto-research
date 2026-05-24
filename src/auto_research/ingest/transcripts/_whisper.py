@@ -43,30 +43,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Final
 
-import openai
 from openai import OpenAI
-from tenacity import (
-    RetryCallState,
-    Retrying,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential_jitter,
-)
-
-from auto_research.ingest import _http
 
 from ._base import Transcript, TranscriptConfigError
 
-# The OpenAI SDK wraps ALL transport-level errors in its own exception
-# hierarchy — `httpx.*` types never escape `client.audio.transcriptions.create`.
-# So `_http.TRANSIENT_NETWORK_ERRORS` (httpx-typed) alone never matches what
-# Whisper raises; the retry budget would be fictional. The right set for
-# this caller is OpenAI's typed exceptions for transient conditions.
-_TRANSIENT_OPENAI_ERRORS: Final[tuple[type[BaseException], ...]] = (
-    openai.APIConnectionError,   # also covers openai.APITimeoutError
-    openai.RateLimitError,       # 429
-    openai.InternalServerError,  # 5xx
-)
+# Retries are delegated to the OpenAI SDK (`OpenAI(max_retries=N)`),
+# which covers 408 / 409 / 429 / 5xx and connection-level errors with
+# exponential backoff + Retry-After honoring. No need for a custom
+# tenacity layer here — it would duplicate the SDK and obscure the
+# actual error surface in tracebacks.
+_DEFAULT_MAX_RETRIES: Final = 5
 
 # Whisper API caps single uploads at 25 MB. Stay well under that to
 # absorb header overhead — 20 MB target.
@@ -130,29 +116,6 @@ def _ensure_ffmpeg() -> str:
     return path
 
 
-def _whisper_retry_wait(state: RetryCallState) -> float:
-    """Tenacity wait callback that honors `openai.RateLimitError`'s Retry-After.
-
-    The shared `_http.make_retry_wait` only inspects `_http.RateLimited`
-    (an httpx.HTTPStatusError subclass). Whisper traffic goes through
-    the OpenAI SDK, which raises `openai.RateLimitError` — a totally
-    separate hierarchy. Mirror the discipline here so a 429 from
-    OpenAI waits the server-requested duration.
-    """
-    fallback = wait_exponential_jitter(
-        initial=_http.DEFAULT_INITIAL_BACKOFF,
-        max=_http.DEFAULT_MAX_BACKOFF,
-    )
-    base = float(fallback(state))
-    outcome = state.outcome
-    exc = outcome.exception() if outcome is not None else None
-    if isinstance(exc, openai.RateLimitError) and exc.response is not None:
-        retry_after = _http.parse_retry_after(exc.response.headers.get("Retry-After"))
-        if retry_after is not None:
-            return max(retry_after, base)
-    return base
-
-
 def _split_qa(full_text: str) -> tuple[str, str]:
     """Detect the prepared-remarks → Q&A boundary in `full_text`.
 
@@ -180,7 +143,7 @@ class WhisperEngine:
         *,
         api_key: str | None = None,
         model: str = "whisper-1",
-        max_attempts: int = _http.DEFAULT_MAX_ATTEMPTS,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
         chunk_seconds: int = _CHUNK_SECONDS,
         ffmpeg_path: str | None = None,
         ffmpeg_timeout: float = _DEFAULT_FFMPEG_TIMEOUT,
@@ -191,8 +154,8 @@ class WhisperEngine:
                 f"floor; smaller values risk uncapped Whisper API spend "
                 f"(each chunk is a separate billed call)."
             )
-        if max_attempts < 1:
-            raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
+        if max_retries < 0:
+            raise ValueError(f"max_retries must be >= 0, got {max_retries}")
         if ffmpeg_timeout <= 0:
             raise ValueError(f"ffmpeg_timeout must be positive, got {ffmpeg_timeout}")
         # Resolve cheap (env / PATH) dependencies BEFORE opening the
@@ -200,9 +163,10 @@ class WhisperEngine:
         # already-constructed httpx connection pool inside `OpenAI(...)`.
         resolved_api_key = _resolve_api_key(api_key)
         self._ffmpeg = ffmpeg_path or _ensure_ffmpeg()
-        self._client = OpenAI(api_key=resolved_api_key)
+        # SDK handles retries for 408 / 409 / 429 / 5xx + connection
+        # errors, with exponential backoff and Retry-After honoring.
+        self._client = OpenAI(api_key=resolved_api_key, max_retries=max_retries)
         self._model = model
-        self._max_attempts = max_attempts
         self._chunk_seconds = chunk_seconds
         self._ffmpeg_timeout = ffmpeg_timeout
 
@@ -233,7 +197,9 @@ class WhisperEngine:
         3. Call Whisper API per chunk; concatenate the text.
         4. Apply Q&A boundary detection.
 
-        Retries on network / 5xx from the OpenAI SDK via tenacity.
+        Per-chunk retries (408/409/429/5xx + connection errors) are
+        handled by the OpenAI SDK's `max_retries` setting on the
+        client.
         """
         with tempfile.TemporaryDirectory(prefix="whisper-") as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -310,36 +276,32 @@ class WhisperEngine:
         return chunks
 
     def _transcribe_one(self, chunk: Path) -> str:
-        """Send one chunk to the OpenAI Whisper API and return its text."""
-        for attempt in Retrying(
-            stop=stop_after_attempt(self._max_attempts),
-            wait=_whisper_retry_wait,
-            retry=retry_if_exception_type(_TRANSIENT_OPENAI_ERRORS),
-            reraise=True,
-        ):
-            with attempt:
-                with chunk.open("rb") as fh:
-                    resp = self._client.audio.transcriptions.create(
-                        model=self._model,
-                        file=fh,
-                        response_format="text",
-                    )
-                # response_format="text" returns a plain `str` on
-                # openai>=2.38. If a future SDK ever swaps that for a
-                # typed wrapper, `str(resp)` would silently produce a
-                # `Transcription(text=...)` repr — corrupting every
-                # transcript. Assert the shape we depend on.
-                if isinstance(resp, str):
-                    return resp.strip()
-                text = getattr(resp, "text", None)
-                if isinstance(text, str):
-                    return text.strip()
-                raise TypeError(
-                    f"OpenAI Whisper returned {type(resp).__name__}; expected "
-                    "`str` (response_format='text') or an object with a `.text` "
-                    "attribute. SDK contract drift — pin openai version."
-                )
-        raise RuntimeError("unreachable: tenacity always returns or raises")
+        """Send one chunk to the OpenAI Whisper API and return its text.
+
+        The SDK handles retries for 408 / 409 / 429 / 5xx + connection
+        errors (configured via `max_retries` on the client). Errors
+        that escape this call are post-retry-budget failures.
+        """
+        with chunk.open("rb") as fh:
+            resp = self._client.audio.transcriptions.create(
+                model=self._model,
+                file=fh,
+                response_format="text",
+            )
+        # response_format="text" returns a plain `str` on openai>=2.38.
+        # If a future SDK swaps that for a typed wrapper, `str(resp)`
+        # would silently produce a `Transcription(text=...)` repr and
+        # corrupt every transcript. Assert the shape we depend on.
+        if isinstance(resp, str):
+            return resp.strip()
+        text = getattr(resp, "text", None)
+        if isinstance(text, str):
+            return text.strip()
+        raise TypeError(
+            f"OpenAI Whisper returned {type(resp).__name__}; expected "
+            "`str` (response_format='text') or an object with a `.text` "
+            "attribute. SDK contract drift — pin openai version."
+        )
 
 
 __all__ = ["WhisperEngine"]

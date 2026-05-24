@@ -22,8 +22,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import httpx
-import openai
 import pytest
 
 from auto_research.ingest.transcripts._base import Transcript, TranscriptConfigError
@@ -181,7 +179,7 @@ def test_whisper_engine_transcribe_happy_path(monkeypatch: pytest.MonkeyPatch) -
     )
     monkeypatch.setattr(
         "auto_research.ingest.transcripts._whisper.OpenAI",
-        lambda api_key: _FakeOpenAI(transcriptions),
+        lambda *, api_key, max_retries=2: _FakeOpenAI(transcriptions),
     )
     engine = WhisperEngine()
     transcript = engine.transcribe(
@@ -208,7 +206,7 @@ def test_whisper_engine_concatenates_multiple_chunks(
     transcriptions = _FakeTranscriptionsClient(response_text="segment text")
     monkeypatch.setattr(
         "auto_research.ingest.transcripts._whisper.OpenAI",
-        lambda api_key: _FakeOpenAI(transcriptions),
+        lambda *, api_key, max_retries=2: _FakeOpenAI(transcriptions),
     )
     # 90s audio, 30s chunks → 3 segments. (chunk_seconds floor is 30s
     # to bound Whisper API spend; we go just above the floor.)
@@ -241,12 +239,38 @@ def test_whisper_engine_rejects_sub_floor_chunk_seconds(
         WhisperEngine(chunk_seconds=10)
 
 
-def test_whisper_engine_rejects_zero_max_attempts(
+def test_whisper_engine_rejects_negative_max_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """max_retries=0 is valid (no retries); negative is not."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    with pytest.raises(ValueError, match="max_attempts"):
-        WhisperEngine(max_attempts=0)
+    with pytest.raises(ValueError, match="max_retries"):
+        WhisperEngine(max_retries=-1)
+
+
+def test_whisper_engine_passes_max_retries_to_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The constructor must hand max_retries to the OpenAI client —
+    that's where retry semantics live now (not in our own loop)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    captured: dict[str, int] = {}
+
+    class _SpyOpenAI:
+        def __init__(self, *, api_key: str, max_retries: int) -> None:
+            captured["max_retries"] = max_retries
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "auto_research.ingest.transcripts._whisper.OpenAI",
+        _SpyOpenAI,
+    )
+    if shutil.which("ffmpeg") is None:
+        monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/ffmpeg")
+    WhisperEngine(max_retries=7)
+    assert captured["max_retries"] == 7
 
 
 def test_whisper_engine_rejects_non_positive_timeout(
@@ -278,97 +302,7 @@ def test_split_qa_pattern_4_requires_line_anchor() -> None:
     assert qa.startswith("Operator: We'll now open")
 
 
-# ---------- Whisper retry: OpenAI SDK exception coverage ----------
-
-
-class _FlakeyTranscriptionsClient:
-    """Fails N times with the configured exception, then succeeds."""
-
-    def __init__(
-        self,
-        *,
-        response_text: str,
-        exception: BaseException,
-        fail_count: int,
-    ) -> None:
-        self._response_text = response_text
-        self._exception = exception
-        self._fail_count = fail_count
-        self.attempts = 0
-
-    def create(self, *, model: str, file: Any, response_format: str) -> str:
-        self.attempts += 1
-        if self.attempts <= self._fail_count:
-            raise self._exception
-        return self._response_text
-
-
-@pytest.mark.skipif(not _have_ffmpeg(), reason="ffmpeg not installed")
-def test_whisper_retries_on_openai_transient_errors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The retry predicate must match OpenAI SDK exceptions, not
-    httpx ones. The SDK wraps every transport-level error in its own
-    hierarchy (openai.APIConnectionError / RateLimitError / etc.),
-    so a retry predicate keyed on httpx.* never fires for Whisper."""
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setattr("time.sleep", lambda _: None)
-
-    fake_request = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
-    transient_exc = openai.APIConnectionError(message="conn refused", request=fake_request)
-    flakey = _FlakeyTranscriptionsClient(
-        response_text="recovered text",
-        exception=transient_exc,
-        fail_count=2,
-    )
-    monkeypatch.setattr(
-        "auto_research.ingest.transcripts._whisper.OpenAI",
-        lambda api_key: _FakeOpenAI(flakey),
-    )
-
-    engine = WhisperEngine(max_attempts=3)
-    transcript = engine.transcribe(
-        _make_silent_wav(seconds=2.0),
-        ticker="NVDA",
-        year=2024,
-        quarter=2,
-        event_datetime=datetime(2024, 5, 22, tzinfo=UTC),
-    )
-    assert "recovered text" in transcript.prepared_remarks
-    # Failed twice, succeeded on third attempt.
-    assert flakey.attempts == 3
-
-
-@pytest.mark.skipif(not _have_ffmpeg(), reason="ffmpeg not installed")
-def test_whisper_gives_up_after_max_attempts_on_persistent_openai_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Retry budget honored; persistent OpenAI errors surface after max_attempts."""
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setattr("time.sleep", lambda _: None)
-
-    fake_request = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
-    persistent_exc = openai.APIConnectionError(message="down hard", request=fake_request)
-    flakey = _FlakeyTranscriptionsClient(
-        response_text="never reached",
-        exception=persistent_exc,
-        fail_count=10,
-    )
-    monkeypatch.setattr(
-        "auto_research.ingest.transcripts._whisper.OpenAI",
-        lambda api_key: _FakeOpenAI(flakey),
-    )
-
-    engine = WhisperEngine(max_attempts=3)
-    with pytest.raises(openai.APIConnectionError):
-        engine.transcribe(
-            _make_silent_wav(seconds=2.0),
-            ticker="NVDA",
-            year=2024,
-            quarter=2,
-            event_datetime=datetime(2024, 5, 22, tzinfo=UTC),
-        )
-    assert flakey.attempts == 3
+# ---------- Construction / resource ordering ----------
 
 
 def test_whisper_engine_resolves_ffmpeg_before_openai_client(
@@ -383,7 +317,7 @@ def test_whisper_engine_resolves_ffmpeg_before_openai_client(
     constructed: list[bool] = []
 
     class _SpyOpenAI:
-        def __init__(self, api_key: str | None = None) -> None:
+        def __init__(self, *, api_key: str, max_retries: int = 2) -> None:
             constructed.append(True)
 
         def close(self) -> None:
