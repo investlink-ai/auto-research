@@ -2,14 +2,13 @@
 as a plain MP3/M4A link on a per-quarter URL.
 
 The simplest source class. Used as the bootstrap implementation of
-the `AudioSource` Protocol — every more-complex source (Q4 Inc with
-Playwright, YouTube with yt-dlp) follows the same shape, just with
-heavier discovery/download machinery inside `find_audio_url` and
-`download`.
+the `AudioSource` Protocol — heavier sources (YouTube via yt-dlp,
+future platforms) follow the same shape with more discovery /
+download machinery inside `find_audio_url` and `download`.
 
 Coverage in the universe is uncertain. A static IR-probe found a few
 candidates among smaller industrial caps, but Cloudflare blocked the
-most-promising ones; a Playwright-driven re-survey populates the
+most-promising ones; the coverage-survey worker populates the
 registry with whatever tickers actually use this pattern. Until then
 this source is the canonical reference implementation rather than a
 coverage workhorse.
@@ -24,19 +23,24 @@ import httpx
 from auto_research.ingest import _http
 from auto_research.ingest.rate_limit import TokenBucket
 from auto_research.ingest.transcripts._base import TranscriptConfigError
-
-# Per-ticker URL templates. Each value is a Python format string with
-# named placeholders `{year}` and `{quarter}` — the source substitutes
-# them at call time. URLs themselves are checked-in data (not scraped
-# discovery), kept here because each ticker's IR layout is bespoke:
-# `https://investor.acme.com/audio/2024Q1-earnings.mp3` etc.
-#
-# Empty in v1; populated after the Playwright-driven coverage survey.
-TICKER_URL_TEMPLATES: dict[str, str] = {}
-
+from auto_research.ingest.transcripts._config import load_sources_config
 
 SOURCE_NAME: Final = "direct_mp3"
 SOURCE_LABEL: Final = "direct-MP3"
+
+# Per-ticker URL templates. Loaded from `config/transcripts/sources.
+# toml` (the `[tickers]` table's `url` field on rows whose source is
+# `direct_mp3`). Each value is a Python format string with named
+# placeholders `{year}` and `{quarter}` — the source substitutes
+# them at call time. URLs themselves are checked-in data (not
+# scraped discovery), kept in config because each ticker's IR
+# layout is bespoke: `https://investor.acme.com/audio/2024Q1-
+# earnings.mp3` etc.
+TICKER_URL_TEMPLATES: dict[str, str] = {
+    ticker: cfg.url
+    for ticker, cfg in load_sources_config().tickers.items()
+    if cfg.source == SOURCE_NAME and cfg.url is not None
+}
 
 
 class DirectMp3Source:

@@ -1,11 +1,12 @@
 """Per-source audio-discovery + transcript types.
 
 Each issuer of earnings call audio exposes the recording differently
-— some serve a direct MP3 on their IR page, others use Q4 Inc's
-webcast platform (HLS stream behind JS), some use YouTube replays.
-The `AudioSource` Protocol is the seam that lets each platform have
-its own extractor while the orchestrator (`fetch_transcript` in
-`__init__.py`) stays source-agnostic.
+— some post a direct MP3 on their IR page, others rely on third-party
+webcast platforms (often registration-walled), some only surface via
+YouTube replays from aggregator channels. The `AudioSource` Protocol
+is the seam that lets each platform have its own extractor while the
+orchestrator (`fetch_transcript` in `__init__.py`) stays source-
+agnostic.
 
 `Transcript` is the shape we return upstream: `ticker`, `year`,
 `quarter`, `event_datetime`, `prepared_remarks`, `q_and_a`. Frozen

@@ -1,6 +1,6 @@
 """Universe loader.
 
-Reads `data/universe/universe_v1.json` (~90 names from spec §5) and returns
+Reads `config/universe/universe_v1.json` (~90 names from spec §5) and returns
 a tuple of frozen `TickerEntry` models. The universe is versioned by
 filename; v1 covers AI infrastructure (~70) + frontier tech (~20).
 
@@ -36,20 +36,20 @@ class TickerEntry(BaseModel):
 
 
 def _default_path() -> Path:
-    """Anchor `data/universe/universe_v1.json` on the project root.
+    """Anchor `config/universe/universe_v1.json` on the project root.
 
     Walks up from this module looking for `pyproject.toml`. Editable
     installs (`uv sync`) keep the package inside the repo so this resolves
     deterministically. Non-editable installs (wheel in site-packages) won't
     find a parent `pyproject.toml` — and the wheel build doesn't bundle
-    `data/`, so there's no implicit path to fall back to. Raise loudly
+    `config/`, so there's no implicit path to fall back to. Raise loudly
     instead of silently returning a CWD path that may or may not exist;
     callers can pass `load_universe(path=...)` to override.
     """
     here = Path(__file__).resolve()
     for parent in (here, *here.parents):
         if (parent / "pyproject.toml").exists():
-            return parent / "data" / "universe" / "universe_v1.json"
+            return parent / "config" / "universe" / "universe_v1.json"
     raise FileNotFoundError(
         f"Could not locate the auto-research project root above {here} "
         "(no pyproject.toml in any parent directory). If this is a "

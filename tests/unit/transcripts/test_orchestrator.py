@@ -625,3 +625,103 @@ def test_transcribe_failure_writes_error_row_for_orphan_audio(
         event_datetime=event_dt,
     )
     assert isinstance(t, Transcript)
+
+
+# ---------- source.find_audio_url raises → retryable error row ----------
+
+
+class _RaisingFindSource:
+    """Source whose `find_audio_url` raises an infrastructure failure
+    (yt-dlp crash, network blip). Per the AudioSource Protocol contract
+    (`_base.py`), None means 'no coverage' and raises mean
+    'infrastructure broke' — the orchestrator must distinguish so
+    transient failures don't become permanent no_coverage cache rows."""
+
+    name = "youtube"
+
+    def __init__(self) -> None:
+        self.find_calls = 0
+
+    def find_audio_url(self, ticker: str, year: int, quarter: int) -> str | None:
+        self.find_calls += 1
+        raise RuntimeError("yt-dlp DownloadError: HTTP 403")
+
+    def download(self, audio_url: str) -> bytes:
+        # Unreachable in this test (find_audio_url always raises first),
+        # but the AudioSource Protocol requires it.
+        raise RuntimeError("download should not be called")
+
+    def close(self) -> None:
+        pass
+
+
+def test_find_audio_url_exception_records_error_row_not_no_coverage(
+    registered_acme: None, tmp_path: Path
+) -> None:
+    """Per the AudioSource Protocol: raises mean infrastructure failure
+    (retryable), not 'no coverage' (permanent cache). The orchestrator
+    must write an error row and re-raise the exception so the operator
+    sees the failure AND a subsequent run gets to retry."""
+    raw_root = tmp_path / "raw"
+    manifest_path = tmp_path / "manifest.parquet"
+    source = _RaisingFindSource()
+    engine = _FakeEngine(_canned_transcript())
+
+    with pytest.raises(RuntimeError, match="403"):
+        fetch_transcript(
+            "ACME",
+            2024,
+            2,
+            raw_root=raw_root,
+            manifest_path=manifest_path,
+            source=source,
+            engine=engine,
+            event_datetime=datetime(2024, 5, 22, 20, 30, tzinfo=UTC),
+        )
+
+    # The orchestrator must NOT write a no_coverage row for this case
+    # (a transient yt-dlp 403 != 'this call doesn't exist on YouTube').
+    table = manifest.read(manifest_path)
+    statuses = table.column("status").to_pylist()
+    assert "error" in statuses, "transient find_audio_url failure must be recorded"
+    assert "no_coverage" not in statuses, (
+        "transient failures must NOT be cached as permanent no_coverage"
+    )
+
+
+class _RaisingDownloadSource(_FakeSource):
+    """Source whose `download` raises (post-find). Mirrors yt-dlp
+    failing mid-fetch."""
+
+    def download(self, audio_url: str) -> bytes:
+        raise RuntimeError("yt-dlp partial fetch: ConnectionReset")
+
+
+def test_download_exception_records_error_row(
+    registered_acme: None, tmp_path: Path
+) -> None:
+    """A yt-dlp failure during download() must produce an error row
+    (so the operator sees the failed attempt) AND propagate the
+    exception (so batch workers can surface failures, not silently
+    skip)."""
+    raw_root = tmp_path / "raw"
+    manifest_path = tmp_path / "manifest.parquet"
+    source = _RaisingDownloadSource(audio_url="https://example.com/a.mp3")
+    engine = _FakeEngine(_canned_transcript())
+
+    with pytest.raises(RuntimeError, match="ConnectionReset"):
+        fetch_transcript(
+            "ACME",
+            2024,
+            2,
+            raw_root=raw_root,
+            manifest_path=manifest_path,
+            source=source,
+            engine=engine,
+            event_datetime=datetime(2024, 5, 22, 20, 30, tzinfo=UTC),
+        )
+
+    table = manifest.read(manifest_path)
+    statuses = table.column("status").to_pylist()
+    assert "error" in statuses, "transient download failure must be recorded"
+    assert "no_coverage" not in statuses

@@ -1,8 +1,57 @@
 # ADR: Earnings-call transcript source
 
-- Date: 2026-05-23
-- Status: **Accepted** (Whisper + Playwright + per-platform IR scrapers)
+- Date: 2026-05-23 (updated 2026-05-24)
+- Status: **Accepted** (Whisper + yt-dlp/YouTube + per-platform IR scrapers)
 - Owners: Sam
+
+## Update 2026-05-24: Q4 Inc / Playwright path abandoned, YouTube path adopted
+
+Subsequent live investigation invalidated this ADR's tier-2 plan
+(Q4 Inc via Playwright). Verified blockers:
+
+- Q4 Inc `events.q4inc.com/attendee/{event_id}` pages gate the
+  player behind a 5-field PII registration form. Both past and
+  future events. No m3u8 request appears in network traffic
+  before registration completes. Automating registration with
+  synthetic identity is ToS-violating and operationally fragile.
+- Search-engine reachability is also nil: Bing / DDG index
+  `q4inc.com` widget assets but not the gated `/attendee/` pages.
+
+In place of Q4 Inc, a direct universe-wide probe (81/81 tickers
+queried via yt-dlp, company-name framing) found a full-length
+in-band match on YouTube for **every** ticker. Latency from
+call-end to YouTube-availability is same-day to +1 day for the
+seven large-caps measured. Reliable uploaders: Benzinga, Castify
+Earnings Call, EARNMOAR, Investing 101, Yahoo Finance, occasional
+first-party.
+
+**Revised rollout:**
+
+1. **PR #6** — direct_mp3 source + Whisper + Protocol scaffold
+   (shipped).
+2. **PR #6-youtube** (in flight) — `sources/youtube.py` via
+   yt-dlp; NVDA seeded as the canary, live-smoke against real
+   YouTube. **This is the replacement for the dropped #6d.**
+3. **#6f** — coverage-survey worker probes each universe ticker
+   and populates `REGISTRY` + `TICKER_QUERIES` empirically;
+   per-source live smoke; this ADR's "Decision" + "Architecture"
+   sections get rewritten to reflect the YouTube-first reality.
+
+Q4 Inc is now in the same "no viable auth path" bucket as the
+tier-3 platforms (Chorus Call, Brainshark, KVGO, Notified) — see
+spec §6.1 and the original Decision section below.
+
+Commercial-use note: yt-dlp against YouTube has known ToS
+exposure for commercial deployment. The platform's intent
+(research / paper-trading) sets this risk floor; a future
+commercial productization would need licensed feeds (FMP
+Ultimate, AlphaSense) or direct-from-issuer paths.
+
+The sections below are preserved verbatim from the 2026-05-23
+write-up. They document the historical reasoning that produced
+the (now-revised) Q4 Inc plan. **Treat the Decision and
+Architecture sections as historical context**; the current
+authoritative direction is this update block.
 
 ## Context
 
@@ -24,7 +73,7 @@ Starter includes the endpoint. The original spec estimate was wrong by
 
 ### SEC 8-K is empirically not a transcript source
 
-Direct survey against `data/universe/universe_v1.json`:
+Direct survey against `config/universe/universe_v1.json`:
 
 - Scanned the most-recent earnings 8-K (Item 2.02 or 7.01) for every
   ticker in the 81-name universe.

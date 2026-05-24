@@ -13,7 +13,6 @@
   {"ticker": "CRM", "sub_universe": "ai_infra", "sector": "software_platform", "market_cap_tier": "large", "tradeable": false},
   {"ticker": "NOW", "sub_universe": "ai_infra", "sector": "software_platform", "market_cap_tier": "large", "tradeable": false},
   {"ticker": "ARM", "sub_universe": "ai_infra", "sector": "semiconductors", "market_cap_tier": "large", "tradeable": false},
-  {"ticker": "CBRS", "sub_universe": "ai_infra", "sector": "semiconductors", "market_cap_tier": "small", "tradeable": false},
   {"ticker": "DLR", "sub_universe": "ai_infra", "sector": "datacenter_reit", "market_cap_tier": "mid", "tradeable": false},
   {"ticker": "EQIX", "sub_universe": "ai_infra", "sector": "datacenter_reit", "market_cap_tier": "mid", "tradeable": false},
 

@@ -1,0 +1,103 @@
+# Per-ticker transcript-source configuration.
+#
+# Single source of truth for which transcript source to use per ticker,
+# plus per-source override fields. Edited as data (the coverage-survey
+# worker rewrites this file); Python modules under
+# `src/auto_research/ingest/transcripts/` read it at import time.
+#
+# Schema per row:
+#   source: one of KNOWN_SOURCES in registry.py ("direct_mp3", "youtube").
+#   query:  (youtube only) query string substituted for the ticker
+#           symbol when searching. Use when bare-ticker search misses
+#           (company name is what aggregators use in titles) or when
+#           the ticker is a substring of common English words (e.g.,
+#           ON in "Conference", BE in "Adobe").
+#   url:    (direct_mp3 only) per-quarter URL template with {year}
+#           and {quarter} placeholders.
+#
+# Curation: ticker→company mapping cross-checked against SEC's
+# canonical company_tickers.json. Each entry verified by inspecting
+# matched URL's actual title. See
+# docs/decisions/2026-05-23-transcripts-source.md.
+
+[tickers]
+AAOI = { source = "youtube", query = "Applied Optoelectronics" }
+AAPL = { source = "youtube" }
+ACMR = { source = "youtube" }
+AEHR = { source = "youtube" }
+ALAB = { source = "youtube" }
+ALGM = { source = "youtube" }
+AMAT = { source = "youtube" }
+AMBA = { source = "youtube" }
+AMD = { source = "youtube" }
+AMZN = { source = "youtube" }
+ANET = { source = "youtube" }
+ARM = { source = "youtube" }
+ASML = { source = "youtube" }
+ASTS = { source = "youtube" }
+AVGO = { source = "youtube" }
+BE = { source = "youtube", query = "Bloom Energy" }
+BKSY = { source = "youtube" }
+CCJ = { source = "youtube" }
+CEG = { source = "youtube" }
+CIEN = { source = "youtube" }
+COHR = { source = "youtube" }
+CRDO = { source = "youtube" }
+CRM = { source = "youtube" }
+DELL = { source = "youtube" }
+DLR = { source = "youtube" }
+EQIX = { source = "youtube" }
+ETN = { source = "youtube" }
+FORM = { source = "youtube", query = "FormFactor" }
+GEV = { source = "youtube" }
+GFS = { source = "youtube" }
+GOOGL = { source = "youtube", query = "Alphabet" }
+HON = { source = "youtube" }
+IBM = { source = "youtube" }
+IONQ = { source = "youtube" }
+KLAC = { source = "youtube" }
+LEU = { source = "youtube", query = "Centrus Energy" }
+LITE = { source = "youtube" }
+LRCX = { source = "youtube" }
+LSCC = { source = "youtube" }
+LUNR = { source = "youtube" }
+META = { source = "youtube" }
+MIR = { source = "youtube", query = "Mirion Technologies" }
+MPWR = { source = "youtube" }
+MRVL = { source = "youtube" }
+MSFT = { source = "youtube" }
+MTSI = { source = "youtube" }
+MU = { source = "youtube" }
+NNE = { source = "youtube" }
+NOW = { source = "youtube" }
+NRG = { source = "youtube" }
+NTNX = { source = "youtube" }
+NVDA = { source = "youtube", query = "NVIDIA" }
+NVMI = { source = "youtube" }
+OKLO = { source = "youtube" }
+ON = { source = "youtube", query = "ON Semiconductor" }
+ORCL = { source = "youtube" }
+PL = { source = "youtube" }
+PLTR = { source = "youtube" }
+PWR = { source = "youtube" }
+QBTS = { source = "youtube" }
+QRVO = { source = "youtube" }
+QUBT = { source = "youtube" }
+RDW = { source = "youtube" }
+RGTI = { source = "youtube" }
+RKLB = { source = "youtube" }
+RMBS = { source = "youtube" }
+SATS = { source = "youtube", query = "EchoStar" }
+SIMO = { source = "youtube" }
+SMCI = { source = "youtube" }
+SMR = { source = "youtube" }
+SNDK = { source = "youtube" }
+STRL = { source = "youtube", query = "Sterling Infrastructure" }
+SWKS = { source = "youtube" }
+TER = { source = "youtube" }
+TLN = { source = "youtube", query = "Talen Energy" }
+TSLA = { source = "youtube" }
+TSM = { source = "youtube" }
+VRT = { source = "youtube" }
+VST = { source = "youtube" }
+WDC = { source = "youtube" }

@@ -125,12 +125,12 @@ auto-trace to Langfuse via OTLP.
 ### Issue 4 — `feat(data): universe loader + ticker registry`
 
 **Objective.** Implement `auto_research.universe.load_universe()` reading
-`data/universe/universe_v1.json` (spec §5: ~70 AI infra + ~20 frontier tech).
+`config/universe/universe_v1.json` (spec §5: ~70 AI infra + ~20 frontier tech).
 Universe entries carry sub-universe, sector, market-cap tier, and an
 explicit `tradeable: bool` flag (narrative-source names default to `False`).
 
 **Acceptance criteria.**
-- `data/universe/universe_v1.json` checked in with the ~90-name list from spec §5.
+- `config/universe/universe_v1.json` checked in with the ~90-name list from spec §5.
 - `load_universe()` returns frozen Pydantic models; mutation raises.
 - `load_universe(tradeable_only=True)` filters narrative-source names out.
 - Tests cover empty universe (raises), duplicate ticker (raises), unknown

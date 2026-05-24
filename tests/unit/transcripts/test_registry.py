@@ -2,24 +2,59 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from auto_research.ingest.transcripts import registry
 
-
-def test_registry_starts_empty() -> None:
-    """v1 ships with no tickers wired; the registry is populated
-    after the Playwright-driven coverage survey. If this changes,
-    update this test with the rationale."""
-    assert registry.REGISTRY == {}
+_UNIVERSE_PATH = Path("config/universe/universe_v1.json")
 
 
-def test_known_sources_contains_direct_mp3() -> None:
-    assert "direct_mp3" in registry.KNOWN_SOURCES
+def _universe_tickers() -> set[str]:
+    with _UNIVERSE_PATH.open() as f:
+        return {entry["ticker"] for entry in json.load(f)}
+
+
+def test_registry_covers_full_universe() -> None:
+    """Every universe ticker has a source registered. If a new ticker
+    is added to `config/universe/universe_v1.json`, this test fails
+    until the registry maps it to a source — the right place to fix
+    coverage gaps, since unmapped tickers fall through to retryable
+    `status='error'` rows in the orchestrator's manifest."""
+    universe = _universe_tickers()
+    missing = universe - registry.REGISTRY.keys()
+    assert not missing, (
+        f"Universe tickers missing from REGISTRY: {sorted(missing)}. "
+        "Either map them to a source or remove them from the universe."
+    )
+
+
+def test_registry_has_no_orphan_tickers() -> None:
+    """Conversely, REGISTRY shouldn't carry tickers that aren't in the
+    universe — orphans drift over time and confuse coverage audits."""
+    universe = _universe_tickers()
+    orphans = registry.REGISTRY.keys() - universe
+    assert not orphans, (
+        f"REGISTRY contains tickers not in universe: {sorted(orphans)}. "
+        "Either add them to the universe or drop the registry rows."
+    )
+
+
+def test_registry_values_are_all_known_sources() -> None:
+    """Defense-in-depth for the runtime `validate()` — catches typos
+    at test time, not at first fetch."""
+    unknown = set(registry.REGISTRY.values()) - registry.KNOWN_SOURCES
+    assert not unknown, f"REGISTRY references unknown sources: {sorted(unknown)}"
+
+
+def test_known_sources_contains_implemented_platforms() -> None:
+    assert {"direct_mp3", "youtube"} <= registry.KNOWN_SOURCES
 
 
 def test_lookup_returns_none_for_unregistered() -> None:
-    assert registry.lookup("NVDA") is None
+    assert registry.lookup("NEVER_REGISTERED") is None
 
 
 def test_lookup_returns_source_when_registered(
