@@ -60,6 +60,7 @@ from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import httpx
+from opentelemetry import trace
 from tenacity import (
     AsyncRetrying,
     Retrying,
@@ -69,6 +70,8 @@ from tenacity import (
 
 from auto_research.ingest import _http, manifest
 from auto_research.ingest.rate_limit import TokenBucket, sec_rate_limiter
+
+_tracer = trace.get_tracer(__name__)
 
 DEFAULT_FORM_TYPES: tuple[str, ...] = ("10-K", "10-Q", "8-K", "S-1", "S-3")
 SOURCE: str = "edgar"
@@ -376,44 +379,55 @@ def fetch_filings_for_cik(
     `raw_root` is the project's `data/raw/` root; output is nested
     under `raw_root/edgar/{cik}/{year}/{accession}.{ext}`.
     """
-    owns_client = client is None
-    if owns_client:
-        client = EdgarClient()
-    assert client is not None
-    try:
-        filings = client.list_recent_filings(cik, form_types=form_types)
-        already = manifest.existing_doc_ids(manifest_path, source=SOURCE)
-        results: list[FetchResult] = []
-        new_rows: list[dict[str, object]] = []
-        seen: set[str] = set()
-        try:
-            for filing in filings:
-                if filing.accession_number in seen:
-                    continue
-                seen.add(filing.accession_number)
-                if filing.accession_number in already:
-                    results.append(_cache_hit(filing))
-                    continue
-                path, sha, _ = client.fetch_filing(filing, raw_root=raw_root / SOURCE)
-                results.append(
-                    FetchResult(
-                        cik=filing.cik,
-                        accession_number=filing.accession_number,
-                        form_type=filing.form_type,
-                        accepted_datetime=filing.accepted_datetime,
-                        path=path,
-                        content_sha256=sha,
-                        cache_hit=False,
-                    )
-                )
-                new_rows.append(_manifest_row(filing, path, sha, status="ok"))
-        finally:
-            if new_rows:
-                manifest.append(manifest_path, new_rows)
-        return results
-    finally:
+    forms = tuple(form_types)
+    with _tracer.start_as_current_span("edgar.fetch_filings_for_cik") as span:
+        span.set_attribute("edgar.cik", _pad_cik(cik))
+        span.set_attribute("edgar.form_types", ",".join(forms))
+        owns_client = client is None
         if owns_client:
-            client.close()
+            client = EdgarClient()
+        assert client is not None
+        try:
+            filings = client.list_recent_filings(cik, form_types=forms)
+            already = manifest.existing_doc_ids(manifest_path, source=SOURCE)
+            results: list[FetchResult] = []
+            new_rows: list[dict[str, object]] = []
+            seen: set[str] = set()
+            try:
+                for filing in filings:
+                    if filing.accession_number in seen:
+                        continue
+                    seen.add(filing.accession_number)
+                    if filing.accession_number in already:
+                        results.append(_cache_hit(filing))
+                        continue
+                    path, sha, _ = client.fetch_filing(filing, raw_root=raw_root / SOURCE)
+                    results.append(
+                        FetchResult(
+                            cik=filing.cik,
+                            accession_number=filing.accession_number,
+                            form_type=filing.form_type,
+                            accepted_datetime=filing.accepted_datetime,
+                            path=path,
+                            content_sha256=sha,
+                            cache_hit=False,
+                        )
+                    )
+                    new_rows.append(_manifest_row(filing, path, sha, status="ok"))
+            finally:
+                if new_rows:
+                    manifest.append(manifest_path, new_rows)
+            span.set_attribute("edgar.n_filings", len(results))
+            span.set_attribute(
+                "edgar.n_fetched", sum(1 for r in results if not r.cache_hit)
+            )
+            span.set_attribute(
+                "edgar.n_cache_hits", sum(1 for r in results if r.cache_hit)
+            )
+            return results
+        finally:
+            if owns_client:
+                client.close()
 
 
 async def afetch_filings_for_cik(

@@ -911,3 +911,60 @@ def test_afetch_finally_flush_failure_doesnt_swallow_gather_exceptions(
 # `test_atomic_write_bytes_cleans_tmp_on_failure` moved to test_http.py
 # along with the helper itself when `_atomic_write_bytes` was extracted
 # from edgar.py into the shared `_http.py` module.
+
+
+# ---------- OTel instrumentation (refs #52) ----------
+
+
+def test_fetch_filings_for_cik_emits_span(
+    fake_client: edgar.EdgarClient,
+    span_recorder,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
+) -> None:
+    """`fetch_filings_for_cik` emits one span carrying cik / form_types /
+    fetch outcome counts. Async variant out of scope per #52."""
+    edgar.fetch_filings_for_cik(
+        NVDA_CIK,
+        client=fake_client,
+        raw_root=tmp_path / "raw",
+        manifest_path=tmp_path / "manifest.parquet",
+        form_types=("10-K", "S-3"),
+    )
+
+    span = span_recorder.one("edgar.fetch_filings_for_cik")
+    assert span.attributes["edgar.cik"] == NVDA_CIK_PADDED
+    assert span.attributes["edgar.form_types"] == "10-K,S-3"
+    # The fixture serves one 10-K + one S-3 (see _submissions_payload).
+    assert span.attributes["edgar.n_filings"] == 2
+    assert span.attributes["edgar.n_fetched"] == 2
+    assert span.attributes["edgar.n_cache_hits"] == 0
+
+
+def test_fetch_filings_for_cik_span_counts_cache_hits_on_rerun(
+    fake_client: edgar.EdgarClient,
+    span_recorder,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
+) -> None:
+    """A second invocation against the same manifest emits a span whose
+    n_cache_hits matches the seen rows (idempotency in observability)."""
+    raw_root = tmp_path / "raw"
+    manifest_path = tmp_path / "manifest.parquet"
+    edgar.fetch_filings_for_cik(
+        NVDA_CIK,
+        client=fake_client,
+        raw_root=raw_root,
+        manifest_path=manifest_path,
+        form_types=("10-K",),
+    )
+    edgar.fetch_filings_for_cik(
+        NVDA_CIK,
+        client=fake_client,
+        raw_root=raw_root,
+        manifest_path=manifest_path,
+        form_types=("10-K",),
+    )
+    spans = span_recorder.by_name("edgar.fetch_filings_for_cik")
+    assert len(spans) == 2
+    assert spans[0].attributes["edgar.n_cache_hits"] == 0
+    assert spans[1].attributes["edgar.n_cache_hits"] == 1
+    assert spans[1].attributes["edgar.n_fetched"] == 0

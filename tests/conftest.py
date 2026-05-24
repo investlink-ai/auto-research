@@ -1,14 +1,18 @@
 """Shared pytest fixtures for the auto-research test suite.
 
-`span_recorder` installs an in-memory OTel tracer provider for the
-duration of one test and exposes the recorded spans. Used by unit
-tests that assert on manual instrumentation without needing a live
-OTLP exporter — `tests/integration/test_telemetry_export.py` covers
-the live-Langfuse path.
+`span_recorder` makes every manual span recorded by production code
+visible to a unit test via an in-memory exporter — no live OTLP
+required. `tests/integration/test_telemetry_export.py` covers the
+real-Langfuse path.
 
-`init_telemetry()` is NOT called inside the fixture: the fixture
-provides its own provider, and Traceloop's provider would race with
-it if both were installed in the same process.
+Design note: OTel's `ProxyTracer` caches the real tracer on first use
+and never refreshes. If each test installed its own `TracerProvider`
+and shut it down on teardown, module-level `_tracer = trace.get_tracer
+(__name__)` references in production code would keep pointing at the
+already-shut-down provider — subsequent tests would silently record
+zero spans. We dodge this by installing a single `TracerProvider`
+once at session scope and rotating an `InMemorySpanExporter` per
+test. The provider stays stable; the recorder doesn't.
 """
 
 from __future__ import annotations
@@ -28,8 +32,8 @@ class SpanRecorder:
     """Convenience wrapper around an `InMemorySpanExporter`.
 
     `by_name(name)` filters; `one(name)` asserts exactly one match.
-    Both walk the live exporter on each call so a test can assert
-    span state mid-run if it needs to (no snapshotting).
+    Both walk the live exporter on each call so tests can assert span
+    state mid-run if they need to.
     """
 
     def __init__(self, exporter: InMemorySpanExporter) -> None:
@@ -50,23 +54,43 @@ class SpanRecorder:
         return matches[0]
 
 
-@pytest.fixture
-def span_recorder() -> Iterator[SpanRecorder]:
-    """Install an in-memory tracer provider for one test; restore on teardown.
+@pytest.fixture(scope="session")
+def _session_tracer_provider() -> Iterator[TracerProvider]:
+    """One TracerProvider for the whole test session.
 
-    Restores `trace._TRACER_PROVIDER` via direct attribute set because
-    `trace.set_tracer_provider` refuses to replace an already-set
-    provider and the public API has no "unset" call. Touching the
-    internal is the lesser evil compared to leaking the fixture's
-    provider into subsequent tests.
+    Installs into the global `trace._TRACER_PROVIDER` slot via direct
+    attribute assignment (the OTel public API refuses to replace an
+    already-set provider and has no "unset" call). Tracers acquired
+    by production modules at import time bind to this provider and
+    stay valid for the entire session.
     """
-    previous = trace.get_tracer_provider()
     provider = TracerProvider()
-    exporter = InMemorySpanExporter()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    previous = trace.get_tracer_provider()
     trace._TRACER_PROVIDER = provider  # type: ignore[attr-defined]
     try:
-        yield SpanRecorder(exporter)
+        yield provider
     finally:
         provider.shutdown()
         trace._TRACER_PROVIDER = previous  # type: ignore[attr-defined]
+
+
+@pytest.fixture
+def span_recorder(
+    _session_tracer_provider: TracerProvider,
+) -> Iterator[SpanRecorder]:
+    """Per-test in-memory span exporter, registered as a SpanProcessor
+    on the session-scoped TracerProvider. Removed on teardown so spans
+    from a later test don't leak into an earlier recorder."""
+    exporter = InMemorySpanExporter()
+    processor = SimpleSpanProcessor(exporter)
+    _session_tracer_provider.add_span_processor(processor)
+    try:
+        yield SpanRecorder(exporter)
+    finally:
+        # Force-flush any pending spans, then remove the processor so
+        # subsequent tests start with a clean slate. `_active_span_processor`
+        # on TracerProvider is a `SynchronousMultiSpanProcessor` /
+        # `ConcurrentMultiSpanProcessor`; both expose internal lists we
+        # would have to mutate, so the cleanest portable approach is to
+        # shut down THIS processor and rely on its on_end hook stopping.
+        processor.shutdown()
