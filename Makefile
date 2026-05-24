@@ -1,10 +1,18 @@
-.PHONY: quick check check-full test integration eval live-smoke lint typecheck smoke
+.PHONY: quick check check-full test integration eval live-smoke lint typecheck setup-nlp smoke
 
 # Fast pre-commit gate — run constantly during development.
 quick: lint typecheck
 
 # Default pre-PR gate: lint + typecheck + unit tests. Cheap, hermetic.
 check: quick test
+
+# One-time NLP setup. `unstructured.partition_html`'s element classifier
+# calls into spaCy `en_core_web_sm`, which is hosted only on GitHub (not
+# on PyPI). Running this once after `uv sync` makes the chunking module
+# (`src/auto_research/extract/chunking.py`) importable. CI runs this in
+# the same step as `uv sync`.
+setup-nlp:
+	uv run python -m spacy download en_core_web_sm
 
 # Full local gate: + integration. Requires `docker compose up -d` first.
 check-full: quick test integration

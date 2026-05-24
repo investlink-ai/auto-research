@@ -161,15 +161,20 @@ matches at child level; returns parent-resolved hits to extraction.
 **D5. Table-handling policy (Issues #13 + #19).** `extract/chunking.py`
 **does not** RAG-embed `Table` elements from 10-K Item 8. Instead:
 
-- `Table` elements pass through `chunking.py` and are emitted as
-  `ParentChunk(section_name="Item 8", ...)` with `text` = a one-line
-  summary (`"Income statement table, 2024-Q3, rows=12, cols=5"`) and the
-  raw table HTML attached as a `table_html: str | None` field (None on
-  non-table chunks).
+- `<table>...</table>` regions inside a section emit as standalone
+  `ParentChunk`s (`section_name="Item 8"` for Item 8 tables) with the
+  raw HTML attached as `table_html: str | None` (None on non-table
+  chunks). INV-2 holds: `chunk.text == html[char_span] == table_html`.
 - Structured financial extraction (Issue #19's 10-K worker) reads
   `table_html` directly via a typed Pydantic schema, bypassing RAG.
-- RAG retrieval over Item 8 returns these summary chunks; if the
-  extractor needs the underlying table, it dereferences `table_html`.
+- The `MAX_PARENT_TOKENS` cap applies to **narrative parents only**.
+  Tables can exceed the cap because (a) splitting raw HTML mid-table
+  would produce invalid markup, and (b) the table path doesn't use
+  the dense-retrieval token budget — extraction reads the raw HTML
+  directly through a separate schema. Issue #13's tests assert the
+  4K cap on narrative parents only.
+- RAG retrieval ignores chunks where `table_html is not None`; if the
+  extractor wants the underlying table, it dereferences `table_html`.
 
 Net effect: tables stay in the chunk stream (preserving section
 ordering and document coverage) but don't pollute the dense index.
