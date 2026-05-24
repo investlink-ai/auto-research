@@ -144,17 +144,11 @@ gate for sensitive paths is the corresponding test/eval; for ordinary code it's
 for single-use code, no "flexibility" that wasn't requested, no error handling
 for impossible scenarios. See `docs/AI_CODE_STYLE.md` for the full rules.
 
-**Library-first; don't rebuild the wheel.** Before writing custom logic for a
-non-trivial concern (retries, HTTP, parsing, scheduling, observability, audio/
-video, format conversion, …), check whether a reliable SDK or stdlib module
-already does it. If yes, use it. If you reject it, justify in the PR body in
-one line. See `docs/AI_CODE_STYLE.md` §4.
+**Library-first.** Check for a reliable SDK or stdlib module before writing
+custom logic for any non-trivial concern. See `docs/AI_CODE_STYLE.md` §4.
 
-**Stable docstrings and comments.** Describe what the code does and the
-durable rationale, not the development trail. Don't reference PR numbers,
-Issue numbers, ticket IDs, or sprint names in docstrings or inline comments
-— those belong in commit messages, PR bodies, and `docs/decisions/`. See
-`docs/AI_CODE_STYLE.md` §5.
+**Stable docstrings.** No PR/Issue numbers or ticket IDs in docstrings or
+comments — that's commit-message territory. See `docs/AI_CODE_STYLE.md` §5.
 
 ---
 

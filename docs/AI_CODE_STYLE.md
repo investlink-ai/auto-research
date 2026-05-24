@@ -82,108 +82,50 @@ adapter for the Voyage/BGE fallback).
 
 ---
 
-## 4. Library-First Investigation
+## 4. Library-First
 
 Before writing custom logic for a non-trivial concern (retries, HTTP, parsing,
-scheduling, observability, audio/video handling, format conversion, async
-plumbing, etc.), check whether a reliable SDK or standard-library module
-already does the work. **Don't rebuild the wheel.**
+scheduling, observability, audio/video, format conversion, async plumbing,
+etc.), check whether a reliable SDK or stdlib module already does it. **Don't
+rebuild the wheel.**
 
-Custom logic that duplicates a library's surface adds traceback indirection,
-drift risk on dependency upgrades, and a maintenance burden the team didn't
-sign up for. Worse, the custom path will silently fall behind the library
-(missed retry conditions, missed headers, missed corner cases) and the failure
-mode is invisible until production.
+Custom paths that duplicate a library's surface add traceback indirection,
+drift risk on upgrades, and silently fall behind the library on edge cases
+(missed retry conditions, headers, corner cases).
 
-The investigation step is short and concrete:
+- Read the relevant SDK / module docs before writing the code path.
+- If a library exists and fits, use it.
+- If you reject it, justify in the PR body in one line.
 
-- For any concern the standard library or an already-pinned dep can handle,
-  read the relevant SDK / module docs for ~5 minutes before writing code.
-- If a library exists and is reasonable, use it.
-- If you reject it, write one line in the PR body: "considered X, rejected
-  because Y" (e.g., "considered httpx-cache, rejected because we need
-  Parquet-backed manifest semantics, not on-disk HTTP cache").
-
-Real lessons from this repo:
-
-- The OpenAI SDK has built-in retries (408 / 409 / 429 / 5xx + connection
-  errors), exponential backoff, and `Retry-After` honoring — configurable via
-  `OpenAI(max_retries=N)`. **Don't** wrap `client.audio.transcriptions.create`
-  in tenacity; that re-implements what the SDK already ships.
-- `httpx` provides connection pooling, retries via transport, and timeout
-  composition. **Don't** build a custom HTTP client around `urllib`.
-- `tenacity` handles retry / backoff / jitter / `Retry-After` for paths the
-  SDK doesn't own (EDGAR, IR audio hosts). **Don't** write a manual
-  `for i in range(n): try: …; sleep(2**i)`.
-- `subprocess.run(timeout=...)` handles process timeouts. **Don't** spawn a
-  watchdog thread.
-- `pyarrow.parquet` handles atomic Parquet write semantics with the right
-  fsync discipline (we wrap it in `manifest.append`; we don't roll our own
-  schema serialization).
-
-The rule applies recursively: if a library exists and we already use a
-heavier alternative, the lighter library probably belongs at the new call
-site too. Consistency across the codebase beats local cleverness.
+If the codebase already uses a library for the same concern elsewhere, the
+new call site uses it too. Consistency beats local cleverness.
 
 ---
 
-## 5. Comment And Docstring Discipline
+## 5. Comments And Docstrings
 
 Docstrings and comments describe **what the code does and the stable rationale
-behind it**. They should remain accurate when the original PR has long since
-merged and the author has moved on.
+behind it** — they stand on their own when the original PR is forgotten.
 
-**Don't reference PR numbers, Issue numbers, ticket IDs, sprint names, or
-review-bot findings in docstrings or comments.** These are ephemeral: a PR#
-is meaningful only while the GitHub UI is open to the right repo; after
-merge it rots into `git blame` territory. The next contributor reads the code
-without that context — the docstring has to stand on its own.
+**No PR numbers, Issue numbers, ticket IDs, sprint names, or review-bot
+findings in docstrings or comments.** Those belong in commit messages, PR
+bodies, and ADRs under `docs/decisions/`.
 
 ```python
-# ❌ BAD
-"""Unit tests for the token-bucket rate limiter (Issue #5)."""
+# ❌ "Unit tests for the rate limiter (Issue #5)."
+# ✅ "Unit tests for the rate limiter."
 
-# Per PR #43 review, no_coverage rows are PERMANENT cache hits.
-
-# Regression test for the Codex P2 finding on PR #34.
-
-# ✅ GOOD
-"""Unit tests for the token-bucket rate limiter."""
-
-# `no_coverage` rows are permanent cache hits — the past doesn't change.
-
-# Regression test: the universe loader must reject ticker entries
-# missing a `sub_universe` field instead of silently defaulting to "".
+# ❌ "Per PR #43 review, no_coverage rows are permanent."
+# ✅ "no_coverage rows are permanent — the past doesn't change."
 ```
 
-The right home for ephemeral references is **commit messages, PR
-descriptions, and ADRs under `docs/decisions/`**. The development trail lives
-there; the code itself shouldn't carry it.
-
-**The one exception**: a comment that explains a non-obvious constraint
-introduced by a specific bug fix can name the symptom directly (preferred) or,
-if absolutely necessary, link the incident — but the description of WHY the
-constraint matters must stand on its own without the link.
+If a constraint exists because of a specific incident, describe the symptom
+directly rather than linking the incident:
 
 ```python
 # ❌ "x must be > 0 (see PR #34)"
-# ✅ "x must be > 0; x == 0 puts ffmpeg's segment muxer into a
-#     1000-chunk-per-second loop and exhausts the OpenAI billing budget."
+# ✅ "x must be > 0; x == 0 puts ffmpeg into a chunk-per-frame loop."
 ```
-
-This rule applies to:
-
-- Module docstrings
-- Function / class / method docstrings
-- Inline comments
-- Test docstrings (the "what does this test prove" sentence)
-
-It does NOT apply to:
-
-- ADRs under `docs/decisions/` — those are dated, frozen artifacts that
-  reasonably reference the discussion that produced them.
-- Commit messages, PR bodies — those are the development trail by design.
-- `CHANGELOG.md`-style files if/when we adopt them.
 
 ---
 
@@ -265,11 +207,8 @@ Before claiming a generated patch is ready:
 - Did behavior changes get a failing test first?
 - Is every new abstraction justified by current duplication or a stable domain
   concept from the spec?
-- For any non-trivial logic, did you check whether a reliable SDK / library
-  already handles it (§4)? If you rejected one, is the rationale in the PR
-  body?
-- Do new docstrings and comments stand on their own without PR / Issue refs
-  (§5)?
+- For non-trivial logic, did you check for an existing SDK / library (§4)?
+- Are docstrings and comments free of PR / Issue refs (§5)?
 - Are docs synced without duplicating policy? (Link, don't restate.)
 - For Tier 2, did the relevant `AGENTS.md` §2 invariant get an explicit test
   or eval citation in the PR body?
