@@ -1,0 +1,10 @@
+{
+  "ticker": "NVDA",
+  "filing_date": "2025-02-26",
+  "fiscal_period": "FY2025",
+  "doc_type": "10-K",
+  "doc_id": "0001045810-25-000023",
+  "expected_sections": ["Item 1A", "Item 7", "Item 8"],
+  "source_url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581025000023/nvda-20250126.htm",
+  "note": "Real EDGAR 10-K for NVIDIA Corporation, fiscal year ended 2025-01-26, filed 2025-02-26. Public-domain SEC filing. Trimmed to ~220KB to stay under the repo's 500KB pre-commit cap; contains real section headers for Items 1A, 7, 8 (Item 1A risk factors, Item 7 MD&A, Item 8 financial statements with multiple inline tables). NVDA uses non-breaking-space entities (Item&#160;N) in section headers — the chunker must handle that."
+}
