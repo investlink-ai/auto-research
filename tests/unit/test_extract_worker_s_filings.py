@@ -239,6 +239,47 @@ def test_markdown_fence_is_stripped(tmp_path: Path) -> None:
         assert out is not None, f"failed for fence form: {wrapped[:20]!r}"
 
 
+def test_production_client_is_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Production extractions (no injected client) reuse one
+    `make_extraction_client` instance so the per-worker @cost_cap and
+    @circuit_breaker state accumulates across calls — see
+    `src/auto_research/extract/client.py` lines 39, 96-97 ('Production
+    code instantiates one client per worker module ... at module top
+    level so the per-worker budgets are independent')."""
+    from auto_research.extract.workers import s_filings as worker_mod
+
+    monkeypatch.setattr(worker_mod, "_CLIENT", None)
+    factory_calls = 0
+    real_factory = worker_mod.make_extraction_client
+
+    def counting_factory(**kwargs: Any) -> Any:
+        nonlocal factory_calls
+        factory_calls += 1
+        # Inject a never-firing anthropic client so the real factory does
+        # not try to read ANTHROPIC_API_KEY from env.
+        return real_factory(anthropic_client=cast(anthropic.Anthropic, MagicMock()), **kwargs)
+
+    monkeypatch.setattr(worker_mod, "make_extraction_client", counting_factory)
+
+    a = worker_mod._get_client(None)
+    b = worker_mod._get_client(None)
+    assert a is b, "production path must return the same client instance"
+    assert factory_calls == 1, "factory must build exactly one production client"
+
+
+def test_injected_client_bypasses_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test-injection path gets a fresh client per call — required for
+    hermetic per-test state, and explicitly NOT what production wants."""
+    from auto_research.extract.workers import s_filings as worker_mod
+
+    monkeypatch.setattr(worker_mod, "_CLIENT", None)
+    fake1 = cast(anthropic.Anthropic, MagicMock())
+    fake2 = cast(anthropic.Anthropic, MagicMock())
+    a = worker_mod._get_client(fake1)
+    b = worker_mod._get_client(fake2)
+    assert a is not b
+
+
 def test_quarantine_captures_original_parsed_not_mutated(tmp_path: Path) -> None:
     """QuarantineRecord must show what the LLM returned, not the worker's
     mutated copy with sentinel spans."""
