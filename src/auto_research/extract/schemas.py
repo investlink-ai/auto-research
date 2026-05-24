@@ -30,7 +30,7 @@ migration. See `docs/CONTRACTS.md` §1.3.
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Annotated
+from typing import Annotated, ClassVar
 
 from pydantic import (
     BaseModel,
@@ -162,6 +162,7 @@ class ForwardStatement(BaseModel):
 
 class TenKOutput(BaseModel):
     model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
 
     cik: str
     accession_number: str
@@ -176,6 +177,7 @@ class TenKOutput(BaseModel):
 
 class TranscriptOutput(BaseModel):
     model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
 
     ticker: str
     event_datetime: datetime
@@ -186,6 +188,7 @@ class TranscriptOutput(BaseModel):
 
 class EightKOutput(BaseModel):
     model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
 
     cik: str
     accession_number: str
@@ -196,6 +199,7 @@ class EightKOutput(BaseModel):
 
 class SFilingOutput(BaseModel):
     model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
 
     cik: str
     accession_number: str

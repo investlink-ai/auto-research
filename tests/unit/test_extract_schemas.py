@@ -352,3 +352,27 @@ def test_risk_factor_change_type_enum_accepted() -> None:
         citation=_citation(),
     )
     assert rfd.change_type == "removed"
+
+
+# --- SCHEMA_VERSION co-versioning (Issue #11) -------------------------------
+
+
+def test_every_output_model_carries_schema_version() -> None:
+    """Every Pydantic output model exports `SCHEMA_VERSION` as a ClassVar.
+
+    Cache key includes `schema_version`; if a model's field shape changes
+    without bumping `SCHEMA_VERSION`, cached rows deserialize wrong on next
+    read. See AGENTS.md INV-6.
+    """
+    for cls in (SFilingOutput, TenKOutput, TranscriptOutput, EightKOutput):
+        assert hasattr(cls, "SCHEMA_VERSION"), f"{cls.__name__} missing SCHEMA_VERSION"
+        assert isinstance(cls.SCHEMA_VERSION, str)
+        assert cls.SCHEMA_VERSION.startswith("v")
+
+
+def test_schema_version_is_classvar_not_pydantic_field() -> None:
+    """`SCHEMA_VERSION` must NOT appear in `model_fields` — it's metadata,
+    not data. If it leaks into the field set, dumps include it and
+    downstream consumers (Feast, parquet) break."""
+    for cls in (SFilingOutput, TenKOutput, TranscriptOutput, EightKOutput):
+        assert "SCHEMA_VERSION" not in cls.model_fields
