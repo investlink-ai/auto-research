@@ -55,21 +55,36 @@ SOURCE_NAME: Final = "youtube"
 # Energy'). Override here; the value is appended with `earnings call
 # Q{quarter} {year}` before search.
 #
-# Seeded with the tickers whose bare-symbol query failed the title-
-# gated probe in the universe-wide coverage measurement. Each
-# override below was empirically verified to recover the ticker
-# (find_audio_url returns an in-band, title-matching URL on a recent
-# quarter). The coverage-survey worker can populate additional rows
-# as the universe expands or aggregator naming patterns shift.
+# Curation methodology:
+#   1. The ticker→company mapping comes from SEC's official
+#      `company_tickers.json` (CIK + ticker + corporate name). The
+#      override value is the SEC name with corporate suffixes
+#      ("CORP", "INC.", "LTD.", etc.) stripped — that's what
+#      aggregator uploaders actually use in video titles.
+#   2. Each entry was manually verified by running a search and
+#      confirming the matched video's title is an actual earnings
+#      call for THAT company, not a similarly-named one. (Lesson
+#      from the prior CBRS → 'CoreWeave' error and the NVMI →
+#      'Nova' / NovaGold collision: ambiguous company names need
+#      tighter discriminators, or no override at all.)
+#
+# Two universe tickers are deliberately ABSENT despite being in the
+# 81-ticker probe's failure set:
+#   - CBRS (Cerebras Systems) — IPO too recent; no earnings call
+#     uploads on YouTube at all (no override would help).
+#   - NVMI (Nova Ltd / Nova Measuring Instruments) — recent calls
+#     not on YouTube (only 2020-2021 uploads survive); 'Nova' alone
+#     collides with NovaGold Resources, and 'Nova Measuring' has no
+#     recent in-band hits.
+# Both fall through to `no_coverage` until the coverage-survey
+# worker re-evaluates.
 TICKER_QUERIES: dict[str, str] = {
     "AAOI": "Applied Optoelectronics",
-    "CBRS": "CoreWeave",
     "FORM": "FormFactor",
     "GOOGL": "Alphabet",
     "LEU": "Centrus Energy",
     "MIR": "Mirion Technologies",
     "NVDA": "NVIDIA",
-    "NVMI": "Nova",
     "SATS": "EchoStar",
     "STRL": "Sterling Infrastructure",
     "TLN": "Talen Energy",
