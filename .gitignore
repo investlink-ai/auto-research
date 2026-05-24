@@ -63,3 +63,10 @@ feast_repo/data/*
 
 # Personal learning / self-study notes — kept local, never pushed.
 docs/learning/
+
+# Extraction cache (content-hash idempotent — bumping *_PROMPT_VERSION or
+# SCHEMA_VERSION naturally invalidates entries; see INV-6).
+data/cache/
+
+# Promotion-gate decisions log (scripts/promote_prompt.py)
+eval/promotions/
