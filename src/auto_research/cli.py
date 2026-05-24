@@ -20,7 +20,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import click
+import pyarrow.parquet as pq
 
+from auto_research.extract.workers.s_filings import extract_s_filing
 from auto_research.ingest.edgar import fetch_filings_for_cik
 
 _ENV_VAR_EPILOG = """
@@ -39,6 +41,8 @@ Required environment variables (see .env.example):
 _DEFAULT_EDGAR_FORM_TYPES = ("S-3", "S-1")
 _DEFAULT_RAW_ROOT = Path("data/raw")
 _DEFAULT_MANIFEST = Path("data/manifest.parquet")
+_S_FILING_FORM_TYPES = frozenset({"S-1", "S-3"})
+_DEFAULT_EXTRACTED_ROOT = Path("data/extracted")
 
 
 @click.group(
@@ -97,4 +101,58 @@ def ingest_edgar(
     click.echo(
         f"ingest edgar: cik={cik} forms={','.join(parsed_forms)} "
         f"results={len(results)} fetched={fetched} cached={cached}"
+    )
+
+
+@cli.group(help="Run extraction workers over raw documents.")
+def extract() -> None: ...
+
+
+@extract.command(
+    "s-filings",
+    help="Extract dilution events from every S-1/S-3 in the manifest for --cik.",
+)
+@click.option("--cik", required=True, help="Zero-padded 10-digit CIK.")
+@click.option(
+    "--manifest-path",
+    type=click.Path(dir_okay=False, exists=True, path_type=Path),
+    default=_DEFAULT_MANIFEST,
+    show_default=True,
+)
+@click.option(
+    "--out-root",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=_DEFAULT_EXTRACTED_ROOT,
+    show_default=True,
+    help="Where to persist SFilingOutput JSON (worker-keyed subdir).",
+)
+def extract_s_filings(cik: str, manifest_path: Path, out_root: Path) -> None:
+    table = pq.read_table(manifest_path)
+    rows = table.to_pylist()
+    candidates = [
+        r
+        for r in rows
+        if r["source"] == "edgar"
+        and r["entity_id"] == cik
+        and r["form_type"] in _S_FILING_FORM_TYPES
+        and r["status"] == "ok"
+    ]
+    out_dir = out_root / "s_filings"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    persisted = 0
+    quarantined = 0
+    for row in candidates:
+        raw_path = Path(row["path"])
+        raw_doc = raw_path.read_text(errors="replace")
+        result = extract_s_filing(raw_doc=raw_doc, doc_id=row["doc_id"])
+        if result is None:
+            quarantined += 1
+            continue
+        (out_dir / f"{row['doc_id']}.json").write_text(
+            result.model_dump_json(indent=2)
+        )
+        persisted += 1
+    click.echo(
+        f"extract s-filings: cik={cik} candidates={len(candidates)} "
+        f"persisted={persisted} quarantined={quarantined}"
     )
