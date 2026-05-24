@@ -7,6 +7,7 @@ patch the wrapped modules at the `auto_research.cli` boundary.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -20,6 +21,10 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+@pytest.mark.xfail(
+    reason="cumulative - passes once Tasks 4-7 register extract/feast/eval/status",
+    strict=True,
+)
 def test_root_help_lists_every_subcommand(runner: CliRunner) -> None:
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0, result.output
@@ -61,6 +66,8 @@ def test_ingest_edgar_invokes_fetch_filings_for_cik(runner: CliRunner) -> None:
     # CIK is forwarded as a positional argument; form_types split on comma.
     assert mock_fetch.call_args.args[0] == "0001045810"
     assert tuple(mock_fetch.call_args.kwargs["form_types"]) == ("S-3", "S-1")
+    assert mock_fetch.call_args.kwargs["raw_root"] == Path("data/raw")
+    assert mock_fetch.call_args.kwargs["manifest_path"] == Path("data/manifest.parquet")
 
 
 def test_ingest_edgar_default_form_types_is_s_filings(runner: CliRunner) -> None:

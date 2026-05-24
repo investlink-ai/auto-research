@@ -36,7 +36,7 @@ Required environment variables (see .env.example):
 """
 
 
-_DEFAULT_SMOKE_FORM_TYPES = ("S-3", "S-1")
+_DEFAULT_EDGAR_FORM_TYPES = ("S-3", "S-1")
 _DEFAULT_RAW_ROOT = Path("data/raw")
 _DEFAULT_MANIFEST = Path("data/manifest.parquet")
 
@@ -61,7 +61,7 @@ def ingest() -> None: ...
 )
 @click.option(
     "--form-types",
-    default=",".join(_DEFAULT_SMOKE_FORM_TYPES),
+    default=",".join(_DEFAULT_EDGAR_FORM_TYPES),
     show_default=True,
     help="Comma-separated form types (e.g., 'S-3,S-1,10-K').",
 )
