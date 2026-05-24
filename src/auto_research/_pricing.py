@@ -20,9 +20,17 @@ at startup so list-price drift doesn't require code edits.
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
 from anthropic.types import Message
+
+# The Anthropic API accepts both the un-dated alias (`claude-haiku-4-5`)
+# and the dated form (`claude-haiku-4-5-20251001`); `_models.route_model`
+# emits the alias, but the *response*'s `message.model` carries the dated
+# form. Strip a trailing `-YYYYMMDD` to map either form onto the alias
+# the pricing table is keyed on.
+_DATED_SUFFIX = re.compile(r"-\d{8}$")
 
 # Anthropic list prices (USD per million tokens) for the three tiers the
 # spec routes to. Cached input is billed at 10% of base input per Anthropic's
@@ -57,7 +65,8 @@ def usd_for_message(message: Message) -> float:
     at list price means callers *over-bill* (trip caps early) rather than
     under-bill — safe direction. Revisit if W2 adopts priority routing.
     """
-    input_per_mtok, output_per_mtok = _PRICING_PER_MTOK[message.model]
+    alias = _DATED_SUFFIX.sub("", message.model)
+    input_per_mtok, output_per_mtok = _PRICING_PER_MTOK[alias]
     usage = message.usage
 
     base_input = usage.input_tokens
