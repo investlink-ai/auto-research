@@ -1,8 +1,8 @@
 """Unit tests for the `auto-research` CLI surface.
 
 All tests use Click's CliRunner — no subprocess, no network, no live API
-calls. Backing primitives are patched at the cli module boundary so the
-tests exercise wiring, not the wrapped modules.
+calls. Subcommand wiring tests added in later tasks will additionally
+patch the wrapped modules at the `auto_research.cli` boundary.
 """
 
 from __future__ import annotations

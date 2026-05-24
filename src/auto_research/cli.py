@@ -37,5 +37,4 @@ Required environment variables (see .env.example):
     epilog=_ENV_VAR_EPILOG,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-def cli() -> None:
-    """Root group. Subcommands are registered below."""
+def cli() -> None: ...
