@@ -31,6 +31,7 @@ import pyarrow.parquet as pq
 from auto_research._io import atomic_write_text
 from auto_research.extract.workers.s_filings import extract_s_filing
 from auto_research.ingest.edgar import EdgarConfigError, fetch_filings_for_cik
+from auto_research.telemetry import try_init_telemetry
 
 _ENV_VAR_EPILOG = """
 \b
@@ -129,6 +130,7 @@ def ingest_edgar(
     raw_root: Path,
     manifest_path: Path,
 ) -> None:
+    try_init_telemetry()
     cik = _normalize_cik(cik)
     parsed_forms = tuple(f.strip() for f in form_types.split(",") if f.strip())
     if not parsed_forms:
@@ -190,6 +192,7 @@ def extract_s_filings(
     out_root: Path,
     quarantine_root: Path | None,
 ) -> None:
+    try_init_telemetry()
     cik = _normalize_cik(cik)
     table = pq.read_table(manifest_path)
     rows = table.to_pylist()
