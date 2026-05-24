@@ -55,18 +55,25 @@ def test_transcript_rejects_unknown_field() -> None:
         )
 
 
-def test_transcript_validates_quarter_range() -> None:
+@pytest.mark.parametrize("bad_quarter", [-1, 0, 5, 99])
+def test_transcript_rejects_out_of_range_quarter(bad_quarter: int) -> None:
     with pytest.raises(ValidationError):
-        _make_transcript(quarter=5)
-    with pytest.raises(ValidationError):
-        _make_transcript(quarter=0)
+        _make_transcript(quarter=bad_quarter)
 
 
-def test_transcript_validates_ticker_pattern() -> None:
+@pytest.mark.parametrize(
+    "bad_ticker",
+    [
+        "",  # min_length violation
+        "lowercase",  # regex: requires uppercase
+        "1AAPL",  # regex: must start with [A-Z], not a digit
+        "WITH_UNDER",  # regex: underscore not in [A-Z0-9.\-]
+        "WAYTOOLONGTICKER",  # max_length=8 violation
+    ],
+)
+def test_transcript_rejects_invalid_ticker(bad_ticker: str) -> None:
     with pytest.raises(ValidationError):
-        _make_transcript(ticker="lowercase")
-    with pytest.raises(ValidationError):
-        _make_transcript(ticker="")
+        _make_transcript(ticker=bad_ticker)
 
 
 def test_transcript_rejects_naive_event_datetime() -> None:
