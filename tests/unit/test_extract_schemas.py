@@ -302,9 +302,10 @@ def test_event_classification_accepts_string_input() -> None:
         dilution_language_flags=[],
     )
     assert out.event_classification is EventClassification.MILESTONE
-    # StrEnum members ARE strings at runtime; cast through `str` so mypy's
-    # narrowing doesn't flag the equality as non-overlapping.
-    assert str(out.event_classification) == "milestone"
+    # `.value` reads the underlying string explicitly. (StrEnum members ARE
+    # strings, but mypy narrows `out.event_classification` to the enum's
+    # singleton type and flags a string equality as non-overlapping.)
+    assert out.event_classification.value == "milestone"
 
 
 def test_event_classification_accepts_enum_member() -> None:

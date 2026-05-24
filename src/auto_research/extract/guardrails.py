@@ -36,7 +36,6 @@ remains typed so production code (workers, eval suites) can distinguish
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +43,7 @@ from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from auto_research._io import atomic_write_text
 from auto_research.extract.schemas import Citation
 
 # Default quarantine root. Callers in production omit `quarantine_root` and
@@ -84,7 +84,11 @@ def _walk_citations(
             yield from _walk_citations(item, f"{path}[{i}]")
         return
     # Primitive (str / int / float / bool / None / date / datetime). No
-    # citation can be reached from here; stop.
+    # citation can be reached from here; stop. Note: dicts are also
+    # treated as primitives — none of the current schemas have dict
+    # fields, and `extra="forbid"` blocks ad-hoc ones. If a future
+    # schema legitimately needs a dict that carries `Citation` values,
+    # extend this walker before adding the field.
 
 
 def validate_citation_grounding(output: BaseModel, source_text: str) -> None:
@@ -136,34 +140,20 @@ class QuarantineRecord(BaseModel):
     quarantined_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
-    """tmp → fsync → rename, so a torn write can't leave a truncated audit
-    record. Quarantine entries are rare (only on validator failure) so
-    the durability cost is negligible.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    tmp.write_text(content)
-    fd = os.open(tmp, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
-
-
-def validate_or_quarantine(
-    output: BaseModel,
+def validate_or_quarantine[OutputT: BaseModel](
+    output: OutputT,
     source_text: str,
     *,
     doc_id: str,
     worker: str,
     prompt_version: str,
     quarantine_root: Path | None = None,
-) -> BaseModel | None:
+) -> OutputT | None:
     """Production routing helper: workers call this after their LLM step.
 
-    On success: returns `output` unchanged.
+    On success: returns `output` unchanged (same concrete type, preserved
+    via the `OutputT` type parameter — a worker annotated
+    `-> TenKOutput | None` gets `TenKOutput | None` back, no cast required).
     On `CitationMismatch`: writes a `QuarantineRecord` to
     `<quarantine_root>/<worker>/<doc_id>.json` and returns `None`. The
     caller MUST treat `None` as "do not persist any part of this output."
@@ -188,7 +178,7 @@ def validate_or_quarantine(
             error=str(exc),
         )
         target = root / worker / f"{doc_id}.json"
-        _atomic_write_text(target, record.model_dump_json(indent=2))
+        atomic_write_text(target, record.model_dump_json(indent=2))
         return None
     return output
 

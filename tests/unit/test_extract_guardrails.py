@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from pydantic import ValidationError
 
 from auto_research.extract import guardrails
 from auto_research.extract.enums import EventClassification
@@ -99,6 +100,22 @@ def test_validator_passes_for_aligned_citation() -> None:
     source = "Acme Corp grew revenue 30% YoY in Q3."
     output = _minimal_eight_k(_claim_for(0, 9, source))  # "Acme Corp"
     validate_citation_grounding(output, source)  # must not raise
+
+
+def test_validator_passes_for_output_with_no_citations() -> None:
+    """An output whose lists are all empty has nothing to ground — the
+    walker yields zero citations and the validator returns. Edge case
+    is worth pinning: a regression where the walker spuriously raised
+    on absent citations would silently quarantine every empty extraction.
+    """
+    output = EightKOutput(
+        cik="0001045810",
+        accession_number="acc-empty",
+        event_classification=EventClassification.OTHER,
+        milestone_mentions=[],
+        dilution_language_flags=[],
+    )
+    validate_citation_grounding(output, "any text, doesn't matter")
 
 
 def test_validator_raises_citation_mismatch_for_wrong_quote() -> None:
@@ -235,8 +252,6 @@ def test_quarantine_record_is_frozen() -> None:
         output={"field": "value"},
         error="boom",
     )
-    from pydantic import ValidationError
-
     with pytest.raises(ValidationError):
         record.doc_id = "y"
 
