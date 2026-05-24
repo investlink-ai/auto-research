@@ -17,6 +17,13 @@ All extraction workers return `BaseModel` subclasses from
 `source_text[span[0]:span[1]] == source_quote` for every claim before
 persistence. Failures route to `data/quarantine/{worker}/{doc_id}.json`.
 
+Feature-store projections of the per-worker output models defined below
+live in `docs/DATA_MODEL.md` §3 (FeatureViews). The Pydantic fields
+here are the durable source-of-record; the FeatureViews are derived
+views shaped for Feast PIT semantics. Adding a feature column means
+adding a field here first and then projecting it there — not the
+reverse.
+
 ### 1.1 Base types
 
 ```python
