@@ -24,10 +24,6 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
-@pytest.mark.xfail(
-    reason="cumulative - passes once Task 7 registers the status subcommand",
-    strict=True,
-)
 def test_root_help_lists_every_subcommand(runner: CliRunner) -> None:
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0, result.output
@@ -286,3 +282,88 @@ def test_help_still_lists_fmp_and_eval_subcommands(runner: CliRunner) -> None:
     assert "fmp" in ingest_help.output
     eval_help = runner.invoke(cli, ["eval", "--help"])
     assert "extract" in eval_help.output
+
+
+def test_status_all_ok(runner: CliRunner) -> None:
+    from auto_research.cli import CheckResult
+
+    with (
+        patch(
+            "auto_research.cli._check_langfuse",
+            return_value=CheckResult("langfuse", "ok", "http://localhost:3000"),
+        ),
+        patch(
+            "auto_research.cli._check_mlflow",
+            return_value=CheckResult("mlflow", "ok", "file:///tmp/mlruns"),
+        ),
+        patch(
+            "auto_research.cli._check_feast",
+            return_value=CheckResult("feast", "ok", "3 feature_views"),
+        ),
+    ):
+        result = runner.invoke(cli, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "langfuse" in result.output
+    assert "mlflow" in result.output
+    assert "feast" in result.output
+
+
+def test_status_exits_1_when_any_check_errors(runner: CliRunner) -> None:
+    from auto_research.cli import CheckResult
+
+    with (
+        patch(
+            "auto_research.cli._check_langfuse",
+            return_value=CheckResult("langfuse", "error", "connection refused"),
+        ),
+        patch(
+            "auto_research.cli._check_mlflow",
+            return_value=CheckResult("mlflow", "ok", "ok"),
+        ),
+        patch(
+            "auto_research.cli._check_feast",
+            return_value=CheckResult("feast", "ok", "ok"),
+        ),
+    ):
+        result = runner.invoke(cli, ["status"])
+    assert result.exit_code == 1
+    assert "error" in result.output.lower()
+
+
+def test_check_mlflow_reports_configured_uri(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """File backend reports the resolved tracking URI; warn if dir is missing."""
+    from auto_research.cli import _check_mlflow
+
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"file:{tmp_path}/mlruns")
+    res = _check_mlflow()
+    assert res.name == "mlflow"
+    assert res.status in {"ok", "warn"}
+    assert "mlruns" in res.detail
+
+
+def test_check_feast_returns_warn_when_registry_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No registry.db -> warn (not error): 'not applied' is a fixable state."""
+    from auto_research.cli import _check_feast
+
+    monkeypatch.chdir(tmp_path)
+    res = _check_feast()
+    assert res.name == "feast"
+    assert res.status == "warn"
+    assert "feast_repo" in res.detail.lower()
+
+
+def test_check_langfuse_warn_when_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing env vars -> warn (not error): bootstrap state."""
+    from auto_research.cli import _check_langfuse
+
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_HOST", raising=False)
+    res = _check_langfuse()
+    assert res.name == "langfuse"
+    assert res.status == "warn"

@@ -17,10 +17,14 @@ Required environment for the full W1 smoke (`make smoke`):
 
 from __future__ import annotations
 
+import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import click
+import httpx
 import pyarrow.parquet as pq
 
 from auto_research.extract.workers.s_filings import extract_s_filing
@@ -190,6 +194,97 @@ def feast_materialize(start: str, end: str) -> None:
         check=False,
     )
     raise SystemExit(proc.returncode)
+
+
+CheckStatus = Literal["ok", "warn", "error"]
+
+
+@dataclass(frozen=True, slots=True)
+class CheckResult:
+    name: str
+    status: CheckStatus
+    detail: str
+
+
+def _check_langfuse() -> CheckResult:
+    """Probe Langfuse: env presence + HTTP GET to /api/public/health."""
+    host = os.environ.get("LANGFUSE_HOST", "http://localhost:3000").strip()
+    otlp = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+    pk = os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip()
+    sk = os.environ.get("LANGFUSE_SECRET_KEY", "").strip()
+    missing = [
+        name
+        for name, value in (
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", otlp),
+            ("LANGFUSE_PUBLIC_KEY", pk),
+            ("LANGFUSE_SECRET_KEY", sk),
+        )
+        if not value
+    ]
+    if missing:
+        return CheckResult(
+            "langfuse",
+            "warn",
+            f"missing env: {', '.join(missing)} (copy .env.example to .env)",
+        )
+    try:
+        resp = httpx.get(f"{host}/api/public/health", timeout=2.0)
+        if resp.status_code == 200:
+            return CheckResult("langfuse", "ok", host)
+        return CheckResult(
+            "langfuse", "error", f"{host} returned HTTP {resp.status_code}"
+        )
+    except httpx.HTTPError as exc:
+        return CheckResult("langfuse", "error", f"{host}: {exc.__class__.__name__}")
+
+
+def _check_mlflow() -> CheckResult:
+    """Report the configured tracking URI; warn if file-backend dir missing."""
+    from auto_research.experiment import configured_tracking_uri
+
+    uri = configured_tracking_uri()
+    if uri.startswith("file://"):
+        path = Path(uri.removeprefix("file://"))
+        if path.exists():
+            return CheckResult("mlflow", "ok", uri)
+        return CheckResult("mlflow", "warn", f"{uri} (directory not yet created)")
+    return CheckResult("mlflow", "ok", uri)
+
+
+def _check_feast() -> CheckResult:
+    """Load the Feast registry from ./feast_repo. Warn if not yet applied."""
+    repo = Path("feast_repo")
+    if not repo.exists():
+        return CheckResult("feast", "warn", "feast_repo/ not found in CWD")
+    registry_db = repo / "data" / "registry.db"
+    if not registry_db.exists():
+        return CheckResult(
+            "feast",
+            "warn",
+            "feast_repo/ present but registry.db missing - run `auto-research feast apply`",
+        )
+    try:
+        from feast import FeatureStore
+
+        store = FeatureStore(repo_path=str(repo))
+        views = store.list_feature_views()
+        return CheckResult("feast", "ok", f"{len(views)} feature_view(s)")
+    except Exception as exc:
+        return CheckResult("feast", "error", f"registry load failed: {exc}")
+
+
+_STATUS_SYMBOL = {"ok": "ok", "warn": "warn", "error": "error"}
+
+
+@cli.command(help="Print Langfuse / MLflow / Feast registry health.")
+def status() -> None:
+    checks = [_check_langfuse(), _check_mlflow(), _check_feast()]
+    for check in checks:
+        click.echo(
+            f"[{_STATUS_SYMBOL[check.status]:<4}] {check.name:<10} {check.detail}"
+        )
+    if any(c.status == "error" for c in checks):
+        raise SystemExit(1)
 
 
 def _not_implemented(name: str, follow_up: str) -> click.UsageError:
