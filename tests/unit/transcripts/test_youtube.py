@@ -562,9 +562,7 @@ def test_constructor_raises_if_yt_dlp_missing(monkeypatch: pytest.MonkeyPatch) -
 
     real_import = builtins.__import__
 
-    def fake_import(
-        name: str, *args: object, **kwargs: object
-    ) -> object:
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
         if name == "yt_dlp":
             raise ImportError("No module named 'yt_dlp'")
         return real_import(name, *args, **kwargs)

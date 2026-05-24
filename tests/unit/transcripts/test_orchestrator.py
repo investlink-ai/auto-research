@@ -646,6 +646,11 @@ class _RaisingFindSource:
         self.find_calls += 1
         raise RuntimeError("yt-dlp DownloadError: HTTP 403")
 
+    def download(self, audio_url: str) -> bytes:
+        # Unreachable in this test (find_audio_url always raises first),
+        # but the AudioSource Protocol requires it.
+        raise RuntimeError("download should not be called")
+
     def close(self) -> None:
         pass
 
