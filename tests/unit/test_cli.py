@@ -67,8 +67,13 @@ def test_ingest_edgar_invokes_fetch_filings_for_cik(runner: CliRunner) -> None:
     # CIK is forwarded as a positional argument; form_types split on comma.
     assert mock_fetch.call_args.args[0] == "0001045810"
     assert tuple(mock_fetch.call_args.kwargs["form_types"]) == ("S-3", "S-1")
-    assert mock_fetch.call_args.kwargs["raw_root"] == Path("data/raw")
-    assert mock_fetch.call_args.kwargs["manifest_path"] == Path("data/manifest.parquet")
+    # --raw-root and --manifest-path are resolved to absolute paths by Click
+    # (`resolve_path=True`), so ingest writes survive a CWD change between
+    # invocations. The default values are still rooted at the project tree.
+    assert mock_fetch.call_args.kwargs["raw_root"].is_absolute()
+    assert mock_fetch.call_args.kwargs["raw_root"].name == "raw"
+    assert mock_fetch.call_args.kwargs["manifest_path"].is_absolute()
+    assert mock_fetch.call_args.kwargs["manifest_path"].name == "manifest.parquet"
 
 
 def test_ingest_edgar_default_form_types_is_s_filings(runner: CliRunner) -> None:
@@ -78,6 +83,47 @@ def test_ingest_edgar_default_form_types_is_s_filings(runner: CliRunner) -> None
         result = runner.invoke(cli, ["ingest", "edgar", "--cik", "0001045810"])
     assert result.exit_code == 0, result.output
     assert tuple(mock_fetch.call_args.kwargs["form_types"]) == ("S-3", "S-1")
+
+
+def test_ingest_edgar_normalizes_unpadded_cik(runner: CliRunner) -> None:
+    """Operator-friendly: --cik 1045810 must be forwarded as '0001045810'.
+
+    Without this normalization, the manifest's entity_id (always 10-digit
+    via edgar.py:_pad_cik) silently mismatches an unpadded extract filter.
+    """
+    with patch("auto_research.cli.fetch_filings_for_cik", autospec=True) as mock_fetch:
+        mock_fetch.return_value = []
+        result = runner.invoke(cli, ["ingest", "edgar", "--cik", "  1045810  "])
+    assert result.exit_code == 0, result.output
+    assert mock_fetch.call_args.args[0] == "0001045810"
+
+
+def test_ingest_edgar_rejects_non_digit_cik(runner: CliRunner) -> None:
+    result = runner.invoke(cli, ["ingest", "edgar", "--cik", "NVDA"])
+    assert result.exit_code != 0
+    assert "--cik must be digits" in result.output
+
+
+def test_ingest_edgar_rejects_empty_form_types(runner: CliRunner) -> None:
+    """Empty / comma-only --form-types must error at parse time, not silently no-op."""
+    with patch("auto_research.cli.fetch_filings_for_cik", autospec=True) as mock_fetch:
+        result = runner.invoke(
+            cli, ["ingest", "edgar", "--cik", "0001045810", "--form-types", ","]
+        )
+    assert result.exit_code != 0
+    assert "at least one" in result.output
+    mock_fetch.assert_not_called()
+
+
+def test_ingest_edgar_catches_edgar_config_error(runner: CliRunner) -> None:
+    """A missing SEC_USER_AGENT surfaces as a clean UsageError, not a traceback."""
+    from auto_research.ingest.edgar import EdgarConfigError
+
+    with patch("auto_research.cli.fetch_filings_for_cik", autospec=True) as mock_fetch:
+        mock_fetch.side_effect = EdgarConfigError("SEC_USER_AGENT is not set")
+        result = runner.invoke(cli, ["ingest", "edgar", "--cik", "0001045810"])
+    assert result.exit_code != 0
+    assert "SEC_USER_AGENT" in result.output
 
 
 def _write_edgar_manifest_row(
@@ -218,7 +264,125 @@ def test_extract_s_filings_logs_and_skips_missing_raw_file(
     assert result.exit_code == 0, result.output
     mock_extract.assert_not_called()
     assert "skipping 0001045810-24-000003" in result.output
-    assert "quarantined=1" in result.output
+    # Missing files count as `skipped`, distinct from worker-quarantined.
+    assert "skipped=1" in result.output
+    assert "quarantined=0" in result.output
+
+
+def test_extract_s_filings_catches_arbitrary_worker_exceptions(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """A reliability primitive (CostCapExceeded, CircuitOpen) or Anthropic 401
+    raised by extract_s_filing must not abort the batch; the row is counted
+    as `failed` and the loop continues."""
+    raw = tmp_path / "raw" / "x.txt"
+    raw.parent.mkdir(parents=True)
+    raw.write_text("body")
+    manifest_path = tmp_path / "manifest.parquet"
+    _write_edgar_manifest_row(
+        manifest_path,
+        cik="0001045810",
+        accession="0001045810-24-000099",
+        form_type="S-3",
+        raw_path=raw,
+    )
+    with patch("auto_research.cli.extract_s_filing", autospec=True) as mock_extract:
+        mock_extract.side_effect = RuntimeError("circuit breaker open")
+        result = runner.invoke(
+            cli,
+            [
+                "extract",
+                "s-filings",
+                "--cik",
+                "0001045810",
+                "--manifest-path",
+                str(manifest_path),
+                "--out-root",
+                str(tmp_path / "extracted"),
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    assert "extraction failed for 0001045810-24-000099" in result.output
+    assert "failed=1" in result.output
+
+
+def test_extract_s_filings_forwards_quarantine_root(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """--quarantine-root must reach extract_s_filing so operators can scope
+    the quarantine tree (hermetic tests, alternate audit roots)."""
+    raw = tmp_path / "raw" / "x.txt"
+    raw.parent.mkdir(parents=True)
+    raw.write_text("body")
+    manifest_path = tmp_path / "manifest.parquet"
+    _write_edgar_manifest_row(
+        manifest_path,
+        cik="0001045810",
+        accession="0001045810-24-000100",
+        form_type="S-3",
+        raw_path=raw,
+    )
+    quarantine = tmp_path / "alt_quarantine"
+    with patch("auto_research.cli.extract_s_filing", autospec=True) as mock_extract:
+        mock_extract.return_value = None  # worker quarantined
+        result = runner.invoke(
+            cli,
+            [
+                "extract",
+                "s-filings",
+                "--cik",
+                "0001045810",
+                "--manifest-path",
+                str(manifest_path),
+                "--out-root",
+                str(tmp_path / "extracted"),
+                "--quarantine-root",
+                str(quarantine),
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    assert mock_extract.call_args.kwargs["quarantine_root"] == quarantine
+
+
+def test_extract_s_filings_normalizes_unpadded_cik(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Operator passes --cik 1045810; the manifest stores '0001045810'.
+    Without normalization, the equality filter returns zero candidates."""
+    raw = tmp_path / "raw" / "x.txt"
+    raw.parent.mkdir(parents=True)
+    raw.write_text("body")
+    manifest_path = tmp_path / "manifest.parquet"
+    _write_edgar_manifest_row(
+        manifest_path,
+        cik="0001045810",
+        accession="0001045810-24-000101",
+        form_type="S-3",
+        raw_path=raw,
+    )
+    with patch("auto_research.cli.extract_s_filing", autospec=True) as mock_extract:
+        class _Out:
+            def model_dump_json(self, *, indent: int = 2) -> str:
+                return "{}"
+
+        mock_extract.return_value = _Out()
+        result = runner.invoke(
+            cli,
+            [
+                "extract",
+                "s-filings",
+                "--cik",
+                "1045810",  # unpadded — must normalize to 0001045810
+                "--manifest-path",
+                str(manifest_path),
+                "--out-root",
+                str(tmp_path / "extracted"),
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    mock_extract.assert_called_once()
+    assert "candidates=1" in result.output
+    assert "persisted=1" in result.output
 
 
 def test_feast_apply_shells_out_to_feast_cli(runner: CliRunner) -> None:
@@ -229,6 +393,9 @@ def test_feast_apply_shells_out_to_feast_cli(runner: CliRunner) -> None:
     mock_run.assert_called_once()
     args, kwargs = mock_run.call_args
     assert args[0] == ["feast", "apply"]
+    # cwd is the absolute resolved feast_repo path — relative cwd would let
+    # callers from non-root directories silently target the wrong directory.
+    assert kwargs["cwd"].is_absolute()
     assert kwargs["cwd"].name == "feast_repo"
     assert kwargs["check"] is False
 
@@ -263,6 +430,28 @@ def test_feast_materialize_missing_args_errors(runner: CliRunner) -> None:
     result = runner.invoke(cli, ["feast", "materialize"])
     assert result.exit_code != 0
     assert "--start" in result.output
+
+
+def test_feast_materialize_help_documents_iso_8601_datetime(runner: CliRunner) -> None:
+    """The feast CLI requires ISO 8601 *datetime* (not date) for materialize.
+    The help text must say so or operators waste a roundtrip diagnosing the
+    opaque parse error from feast."""
+    result = runner.invoke(cli, ["feast", "materialize", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "ISO 8601" in result.output
+
+
+def test_feast_apply_errors_cleanly_when_feast_repo_missing(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invoking `feast apply` from a directory without feast_repo/ must
+    emit a clean UsageError instead of a FileNotFoundError traceback."""
+    monkeypatch.chdir(tmp_path)
+    with patch("auto_research.cli.subprocess.run", autospec=True) as mock_run:
+        result = runner.invoke(cli, ["feast", "apply"])
+    assert result.exit_code != 0
+    assert "feast_repo/ not found" in result.output
+    mock_run.assert_not_called()
 
 
 def test_ingest_fmp_is_not_yet_implemented(runner: CliRunner) -> None:

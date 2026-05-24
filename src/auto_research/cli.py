@@ -27,8 +27,9 @@ import click
 import httpx
 import pyarrow.parquet as pq
 
+from auto_research._io import atomic_write_text
 from auto_research.extract.workers.s_filings import extract_s_filing
-from auto_research.ingest.edgar import fetch_filings_for_cik
+from auto_research.ingest.edgar import EdgarConfigError, fetch_filings_for_cik
 
 _ENV_VAR_EPILOG = """
 \b
@@ -50,6 +51,37 @@ _DEFAULT_RAW_ROOT = Path("data/raw")
 _DEFAULT_MANIFEST = Path("data/manifest.parquet")
 _S_FILING_FORM_TYPES = frozenset({"S-1", "S-3"})
 _DEFAULT_EXTRACTED_ROOT = Path("data/extracted")
+
+
+def _normalize_cik(raw: str) -> str:
+    """Strip whitespace and zero-pad to 10 digits (canonical EDGAR form).
+
+    The manifest stores entity_id in the padded form (edgar.py calls
+    `_pad_cik` at write time). Accepting unpadded or whitespace-padded
+    input at the CLI boundary keeps `ingest edgar --cik X` and
+    `extract s-filings --cik X` symmetric for the same operator input.
+    """
+    cleaned = raw.strip()
+    if not cleaned.isdigit():
+        raise click.UsageError(
+            f"--cik must be digits only (e.g., 0001045810 or 1045810); got {raw!r}"
+        )
+    return cleaned.zfill(10)
+
+
+def _feast_repo_or_exit() -> Path:
+    """Resolve `_FEAST_REPO_DIR` against CWD; raise a clean UsageError if missing.
+
+    `subprocess.run(..., cwd=Path)` raises an unhelpful FileNotFoundError if
+    the directory is absent. Surface the prerequisite at the CLI boundary so
+    the operator gets a one-line remediation instead of a traceback.
+    """
+    repo = _FEAST_REPO_DIR.resolve()
+    if not repo.is_dir():
+        raise click.UsageError(
+            f"feast_repo/ not found at {repo}. Run from the project root."
+        )
+    return repo
 
 
 @click.group(
@@ -78,14 +110,14 @@ def ingest() -> None: ...
 )
 @click.option(
     "--raw-root",
-    type=click.Path(file_okay=False, path_type=Path),
+    type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
     default=_DEFAULT_RAW_ROOT,
     show_default=True,
     help="Root directory for raw bytes.",
 )
 @click.option(
     "--manifest-path",
-    type=click.Path(dir_okay=False, path_type=Path),
+    type=click.Path(dir_okay=False, path_type=Path, resolve_path=True),
     default=_DEFAULT_MANIFEST,
     show_default=True,
     help="Manifest Parquet file.",
@@ -96,13 +128,21 @@ def ingest_edgar(
     raw_root: Path,
     manifest_path: Path,
 ) -> None:
+    cik = _normalize_cik(cik)
     parsed_forms = tuple(f.strip() for f in form_types.split(",") if f.strip())
-    results = fetch_filings_for_cik(
-        cik,
-        form_types=parsed_forms,
-        raw_root=raw_root,
-        manifest_path=manifest_path,
-    )
+    if not parsed_forms:
+        raise click.UsageError(
+            "--form-types must contain at least one non-empty form type"
+        )
+    try:
+        results = fetch_filings_for_cik(
+            cik,
+            form_types=parsed_forms,
+            raw_root=raw_root,
+            manifest_path=manifest_path,
+        )
+    except EdgarConfigError as exc:
+        raise click.UsageError(str(exc)) from exc
     fetched = sum(1 for r in results if not r.cache_hit)
     cached = sum(1 for r in results if r.cache_hit)
     click.echo(
@@ -122,19 +162,34 @@ def extract() -> None: ...
 @click.option("--cik", required=True, help="Zero-padded 10-digit CIK.")
 @click.option(
     "--manifest-path",
-    type=click.Path(dir_okay=False, exists=True, path_type=Path),
+    type=click.Path(dir_okay=False, exists=True, path_type=Path, resolve_path=True),
     default=_DEFAULT_MANIFEST,
     show_default=True,
     help="Manifest Parquet file.",
 )
 @click.option(
     "--out-root",
-    type=click.Path(file_okay=False, path_type=Path),
+    type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
     default=_DEFAULT_EXTRACTED_ROOT,
     show_default=True,
     help="Where to persist SFilingOutput JSON (worker-keyed subdir).",
 )
-def extract_s_filings(cik: str, manifest_path: Path, out_root: Path) -> None:
+@click.option(
+    "--quarantine-root",
+    type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
+    default=None,
+    help=(
+        "Override the worker's default quarantine root "
+        "(forwarded to extract_s_filing). Defaults to data/quarantine/."
+    ),
+)
+def extract_s_filings(
+    cik: str,
+    manifest_path: Path,
+    out_root: Path,
+    quarantine_root: Path | None,
+) -> None:
+    cik = _normalize_cik(cik)
     table = pq.read_table(manifest_path)
     rows = table.to_pylist()
     candidates = [
@@ -148,26 +203,43 @@ def extract_s_filings(cik: str, manifest_path: Path, out_root: Path) -> None:
     out_dir = out_root / "s_filings"
     persisted = 0
     quarantined = 0
+    skipped = 0
+    failed = 0
     for row in candidates:
         raw_path = Path(row["path"])
         try:
             raw_doc = raw_path.read_text(errors="replace")
         except OSError as exc:
-            click.echo(f"warn: skipping {row['doc_id']}: {exc}", err=True)
-            quarantined += 1
+            click.echo(f"warn: skipping {row['doc_id']} (file unreadable): {exc}", err=True)
+            skipped += 1
             continue
-        result = extract_s_filing(raw_doc=raw_doc, doc_id=row["doc_id"])
+        try:
+            result = extract_s_filing(
+                raw_doc=raw_doc,
+                doc_id=row["doc_id"],
+                quarantine_root=quarantine_root,
+            )
+        except Exception as exc:
+            click.echo(
+                f"warn: extraction failed for {row['doc_id']}: "
+                f"{exc.__class__.__name__}: {exc}",
+                err=True,
+            )
+            failed += 1
+            continue
         if result is None:
             quarantined += 1
             continue
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / f"{row['doc_id']}.json").write_text(
-            result.model_dump_json(indent=2)
+        atomic_write_text(
+            out_dir / f"{row['doc_id']}.json",
+            result.model_dump_json(indent=2),
         )
         persisted += 1
     click.echo(
         f"extract s-filings: cik={cik} candidates={len(candidates)} "
-        f"persisted={persisted} quarantined={quarantined}"
+        f"persisted={persisted} quarantined={quarantined} "
+        f"skipped={skipped} failed={failed}"
     )
 
 
@@ -177,20 +249,28 @@ def feast_group() -> None: ...
 
 @feast_group.command("apply", help="Run `feast apply` in feast_repo/.")
 def feast_apply() -> None:
-    proc = subprocess.run(["feast", "apply"], cwd=_FEAST_REPO_DIR, check=False)
+    proc = subprocess.run(["feast", "apply"], cwd=_feast_repo_or_exit(), check=False)
     raise SystemExit(proc.returncode)
 
 
 @feast_group.command(
     "materialize",
-    help="Run `feast materialize START END` in feast_repo/. Dates are ISO-8601.",
+    help="Run `feast materialize START END` in feast_repo/. Dates are ISO 8601.",
 )
-@click.option("--start", required=True, help="Inclusive ISO date (YYYY-MM-DD).")
-@click.option("--end", required=True, help="Inclusive ISO date (YYYY-MM-DD).")
+@click.option(
+    "--start",
+    required=True,
+    help="Inclusive ISO 8601 datetime (e.g., 2024-01-01T00:00:00).",
+)
+@click.option(
+    "--end",
+    required=True,
+    help="Inclusive ISO 8601 datetime (e.g., 2024-01-31T00:00:00).",
+)
 def feast_materialize(start: str, end: str) -> None:
     proc = subprocess.run(
         ["feast", "materialize", start, end],
-        cwd=_FEAST_REPO_DIR,
+        cwd=_feast_repo_or_exit(),
         check=False,
     )
     raise SystemExit(proc.returncode)
