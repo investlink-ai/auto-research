@@ -16,14 +16,18 @@ coverage workhorse.
 
 from __future__ import annotations
 
+import time
 from typing import Final
 
 import httpx
+from opentelemetry import trace
 
 from auto_research.ingest import _http
 from auto_research.ingest.rate_limit import TokenBucket
 from auto_research.ingest.transcripts._base import TranscriptConfigError
 from auto_research.ingest.transcripts._config import load_sources_config
+
+_tracer = trace.get_tracer(__name__)
 
 SOURCE_NAME: Final = "direct_mp3"
 SOURCE_LABEL: Final = "direct-MP3"
@@ -115,25 +119,33 @@ class DirectMp3Source:
             server_error=_http.ServerError,
             empty_response=_http.EmptyResponseError,
         )
-        for attempt in Retrying(
-            stop=stop_after_attempt(self._max_attempts),
-            wait=_http.make_retry_wait(),
-            retry=retry_if_exception_type(retryable),
-            reraise=True,
-        ):
-            with attempt:
-                self.rate_limiter.wait()
-                resp = self._client.get(audio_url)
-                _http.classify_response(
-                    resp,
-                    rate_limited=_http.RateLimited,
-                    server_error=_http.ServerError,
-                    empty_response=_http.EmptyResponseError,
-                    source_label=SOURCE_LABEL,
-                )
-                resp.raise_for_status()
-                return resp.content
-        raise RuntimeError("unreachable: tenacity always returns or raises")
+        with _tracer.start_as_current_span("transcript.download") as span:
+            span.set_attribute("transcript.source_name", SOURCE_NAME)
+            start_ns = time.perf_counter_ns()
+            for attempt in Retrying(
+                stop=stop_after_attempt(self._max_attempts),
+                wait=_http.make_retry_wait(),
+                retry=retry_if_exception_type(retryable),
+                reraise=True,
+            ):
+                with attempt:
+                    self.rate_limiter.wait()
+                    resp = self._client.get(audio_url)
+                    _http.classify_response(
+                        resp,
+                        rate_limited=_http.RateLimited,
+                        server_error=_http.ServerError,
+                        empty_response=_http.EmptyResponseError,
+                        source_label=SOURCE_LABEL,
+                    )
+                    resp.raise_for_status()
+                    span.set_attribute("transcript.bytes", len(resp.content))
+                    span.set_attribute(
+                        "transcript.duration_ms",
+                        (time.perf_counter_ns() - start_ns) // 1_000_000,
+                    )
+                    return resp.content
+            raise RuntimeError("unreachable: tenacity always returns or raises")
 
 
 __all__ = ["SOURCE_NAME", "TICKER_URL_TEMPLATES", "DirectMp3Source"]
