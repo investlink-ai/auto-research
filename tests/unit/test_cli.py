@@ -7,6 +7,8 @@ patch the wrapped modules at the `auto_research.cli` boundary.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 from click.testing import CliRunner
 
@@ -37,3 +39,34 @@ def test_root_help_documents_required_env_vars(runner: CliRunner) -> None:
         "MLFLOW_TRACKING_URI",
     ):
         assert var in result.output, f"{var} missing from root --help epilog"
+
+
+def test_ingest_edgar_invokes_fetch_filings_for_cik(runner: CliRunner) -> None:
+    """The CLI parses --cik / --form-types and forwards to the ingest function."""
+    with patch("auto_research.cli.fetch_filings_for_cik", autospec=True) as mock_fetch:
+        mock_fetch.return_value = []
+        result = runner.invoke(
+            cli,
+            [
+                "ingest",
+                "edgar",
+                "--cik",
+                "0001045810",
+                "--form-types",
+                "S-3,S-1",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    mock_fetch.assert_called_once()
+    # CIK is forwarded as a positional argument; form_types split on comma.
+    assert mock_fetch.call_args.args[0] == "0001045810"
+    assert tuple(mock_fetch.call_args.kwargs["form_types"]) == ("S-3", "S-1")
+
+
+def test_ingest_edgar_default_form_types_is_s_filings(runner: CliRunner) -> None:
+    """Smoke default: --form-types omitted -> ('S-3', 'S-1')."""
+    with patch("auto_research.cli.fetch_filings_for_cik", autospec=True) as mock_fetch:
+        mock_fetch.return_value = []
+        result = runner.invoke(cli, ["ingest", "edgar", "--cik", "0001045810"])
+    assert result.exit_code == 0, result.output
+    assert tuple(mock_fetch.call_args.kwargs["form_types"]) == ("S-3", "S-1")
