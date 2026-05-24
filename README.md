@@ -72,9 +72,12 @@ discipline:
    `decoding_params`) — see `src/auto_research/extract/cache.py`. Model
    swaps and decoding changes never reuse stale entries.
 3. **Promote** to the Langfuse `production` tag via
-   `uv run python scripts/promote_prompt.py <prompt_name> <version>` —
-   the script runs the gold-set eval and refuses the tag flip below the
-   F1 threshold or above the per-doc cost ceiling.
+   `uv run python scripts/promote_prompt.py <prompt_name>` — the script
+   reads the in-code `*_PROMPT_VERSION` constant for that prompt, runs
+   the gold-set eval, and refuses the tag flip below the F1 threshold
+   or above the per-doc cost ceiling. (No candidate-version CLI arg —
+   the gate always evaluates and promotes the same version that's
+   currently in code, so eval and artifact can't diverge.)
 
 See `AGENTS.md` INV-6 for the formal invariant.
 
