@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -570,3 +571,77 @@ def test_check_langfuse_warn_when_env_missing(monkeypatch: pytest.MonkeyPatch) -
     res = _check_langfuse()
     assert res.name == "langfuse"
     assert res.status == "warn"
+
+
+def test_mask_url_credentials_strips_basic_auth() -> None:
+    """INV-7: any basic-auth pair in a URL must be masked before display."""
+    from auto_research.cli import _mask_url_credentials
+
+    assert _mask_url_credentials("http://admin:s3cr3t@host:3000/path") == (
+        "http://***@host:3000/path"
+    )
+    assert _mask_url_credentials("http://user@host/") == "http://***@host/"
+    # No auth -> identity.
+    assert _mask_url_credentials("http://localhost:3000") == "http://localhost:3000"
+
+
+def test_check_langfuse_masks_credentials_in_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LANGFUSE_HOST with embedded credentials must never echo them in detail."""
+    from auto_research.cli import _check_langfuse
+
+    monkeypatch.setenv("LANGFUSE_HOST", "http://admin:s3cr3t@langfuse.internal/")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://x/")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
+    # Force the HTTP probe to error so we exercise the non-200 detail path
+    # (the most exposure-prone branch) without standing up a real server.
+    with patch("auto_research.cli.httpx.get", side_effect=httpx.ConnectError("x")):
+        res = _check_langfuse()
+    assert res.status == "error"
+    assert "s3cr3t" not in res.detail
+    assert "admin" not in res.detail
+    assert "***@langfuse.internal" in res.detail
+
+
+def test_check_langfuse_strips_trailing_slash_in_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LANGFUSE_HOST=http://host:3000/ must not produce //api/public/health."""
+    from auto_research.cli import _check_langfuse
+
+    monkeypatch.setenv("LANGFUSE_HOST", "http://langfuse.local:3000/")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://x/")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
+    with patch("auto_research.cli.httpx.get") as mock_get:
+        mock_get.return_value.status_code = 200
+        _check_langfuse()
+    called_url = mock_get.call_args.args[0]
+    assert called_url == "http://langfuse.local:3000/api/public/health"
+
+
+def test_check_mlflow_returns_error_on_import_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the experiment module fails to import, status must surface a clean
+    error CheckResult — not crash the list-comp mid-build before any line
+    prints."""
+    import builtins
+    from typing import Any
+
+    from auto_research.cli import _check_mlflow
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "auto_research.experiment":
+            raise ImportError("simulated broken experiment module")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    res = _check_mlflow()
+    assert res.name == "mlflow"
+    assert res.status == "error"
+    assert "import failed" in res.detail

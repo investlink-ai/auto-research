@@ -22,6 +22,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
 import click
 import httpx
@@ -286,9 +287,25 @@ class CheckResult:
     detail: str
 
 
+def _mask_url_credentials(url: str) -> str:
+    """Return `url` with any embedded basic-auth credentials replaced by `***`.
+
+    Defends INV-7: a LANGFUSE_HOST like `http://user:pass@host/` must not
+    print credentials to stdout via the status command's detail line.
+    """
+    parts = urlsplit(url)
+    if not (parts.username or parts.password):
+        return url
+    host = parts.hostname or ""
+    netloc = f"***@{host}:{parts.port}" if parts.port else f"***@{host}"
+    return urlunsplit(parts._replace(netloc=netloc))
+
+
 def _check_langfuse() -> CheckResult:
     """Probe Langfuse: env presence + HTTP GET to /api/public/health."""
-    host = os.environ.get("LANGFUSE_HOST", "http://localhost:3000").strip()
+    host = (
+        os.environ.get("LANGFUSE_HOST", "http://localhost:3000").strip().rstrip("/")
+    )
     otlp = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
     pk = os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip()
     sk = os.environ.get("LANGFUSE_SECRET_KEY", "").strip()
@@ -307,22 +324,38 @@ def _check_langfuse() -> CheckResult:
             "warn",
             f"missing env: {', '.join(missing)} (copy .env.example to .env)",
         )
+    display_host = _mask_url_credentials(host)
     try:
         resp = httpx.get(f"{host}/api/public/health", timeout=2.0)
         if resp.status_code == 200:
-            return CheckResult("langfuse", "ok", host)
+            return CheckResult("langfuse", "ok", display_host)
         return CheckResult(
-            "langfuse", "error", f"{host} returned HTTP {resp.status_code}"
+            "langfuse",
+            "error",
+            f"{display_host} returned HTTP {resp.status_code}",
         )
     except httpx.HTTPError as exc:
-        return CheckResult("langfuse", "error", f"{host}: {exc.__class__.__name__}")
+        return CheckResult(
+            "langfuse", "error", f"{display_host}: {exc.__class__.__name__}"
+        )
 
 
 def _check_mlflow() -> CheckResult:
-    """Report the configured tracking URI; warn if file-backend dir missing."""
-    from auto_research.experiment import configured_tracking_uri
+    """Report the configured tracking URI; warn if file-backend dir missing.
 
-    uri = configured_tracking_uri()
+    Both the lazy import and the URI-resolution call are guarded so a broken
+    experiment module surfaces as `[error] mlflow ...` in the status output,
+    not as an unhandled exception that crashes the whole list comprehension
+    before any line prints.
+    """
+    try:
+        from auto_research.experiment import configured_tracking_uri
+    except Exception as exc:
+        return CheckResult("mlflow", "error", f"import failed: {exc}")
+    try:
+        uri = configured_tracking_uri()
+    except Exception as exc:
+        return CheckResult("mlflow", "error", f"URI resolution failed: {exc}")
     if uri.startswith("file:"):
         path = Path(uri.removeprefix("file://").removeprefix("file:"))
         if path.exists():
