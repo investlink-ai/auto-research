@@ -17,6 +17,7 @@ Required environment for the full W1 smoke (`make smoke`):
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import click
@@ -37,6 +38,8 @@ Required environment variables (see .env.example):
   FMP_API_KEY                Reserved for ingest fmp (Issue TBD)
 """
 
+
+_FEAST_REPO_DIR = Path("feast_repo")
 
 _DEFAULT_EDGAR_FORM_TYPES = ("S-3", "S-1")
 _DEFAULT_RAW_ROOT = Path("data/raw")
@@ -162,3 +165,28 @@ def extract_s_filings(cik: str, manifest_path: Path, out_root: Path) -> None:
         f"extract s-filings: cik={cik} candidates={len(candidates)} "
         f"persisted={persisted} quarantined={quarantined}"
     )
+
+
+@cli.group(name="feast", help="Wrap the Feast CLI against feast_repo/.")
+def feast_group() -> None: ...
+
+
+@feast_group.command("apply", help="Run `feast apply` in feast_repo/.")
+def feast_apply() -> None:
+    proc = subprocess.run(["feast", "apply"], cwd=_FEAST_REPO_DIR, check=False)
+    raise SystemExit(proc.returncode)
+
+
+@feast_group.command(
+    "materialize",
+    help="Run `feast materialize START END` in feast_repo/. Dates are ISO-8601.",
+)
+@click.option("--start", required=True, help="Inclusive ISO date (YYYY-MM-DD).")
+@click.option("--end", required=True, help="Inclusive ISO date (YYYY-MM-DD).")
+def feast_materialize(start: str, end: str) -> None:
+    proc = subprocess.run(
+        ["feast", "materialize", start, end],
+        cwd=_FEAST_REPO_DIR,
+        check=False,
+    )
+    raise SystemExit(proc.returncode)

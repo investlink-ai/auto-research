@@ -221,3 +221,47 @@ def test_extract_s_filings_logs_and_skips_missing_raw_file(
     mock_extract.assert_not_called()
     assert "skipping 0001045810-24-000003" in result.output
     assert "quarantined=1" in result.output
+
+
+def test_feast_apply_shells_out_to_feast_cli(runner: CliRunner) -> None:
+    with patch("auto_research.cli.subprocess.run", autospec=True) as mock_run:
+        mock_run.return_value.returncode = 0
+        result = runner.invoke(cli, ["feast", "apply"])
+    assert result.exit_code == 0, result.output
+    mock_run.assert_called_once()
+    args, kwargs = mock_run.call_args
+    assert args[0] == ["feast", "apply"]
+    assert kwargs["cwd"].name == "feast_repo"
+    assert kwargs["check"] is False
+
+
+def test_feast_apply_propagates_nonzero_exit(runner: CliRunner) -> None:
+    with patch("auto_research.cli.subprocess.run", autospec=True) as mock_run:
+        mock_run.return_value.returncode = 2
+        result = runner.invoke(cli, ["feast", "apply"])
+    assert result.exit_code == 2
+
+
+def test_feast_materialize_requires_start_and_end(runner: CliRunner) -> None:
+    with patch("auto_research.cli.subprocess.run", autospec=True) as mock_run:
+        mock_run.return_value.returncode = 0
+        result = runner.invoke(
+            cli,
+            [
+                "feast",
+                "materialize",
+                "--start",
+                "2024-01-01",
+                "--end",
+                "2024-01-31",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    args, _ = mock_run.call_args
+    assert args[0] == ["feast", "materialize", "2024-01-01", "2024-01-31"]
+
+
+def test_feast_materialize_missing_args_errors(runner: CliRunner) -> None:
+    result = runner.invoke(cli, ["feast", "materialize"])
+    assert result.exit_code != 0
+    assert "--start" in result.output
