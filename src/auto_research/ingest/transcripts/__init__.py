@@ -276,7 +276,30 @@ def fetch_transcript(
     if source is None:
         source = _open_source(source_name)
     try:
-        audio_url = source.find_audio_url(ticker_upper, year, quarter)
+        # find_audio_url may raise on infrastructure failures
+        # (network / yt-dlp version drift / etc.). Per the
+        # AudioSource Protocol, None means 'this source has no
+        # coverage for this quarter' (permanent), while a raise
+        # means 'infrastructure broke' (retryable). Map them to
+        # no_coverage vs. error rows accordingly so a transient
+        # failure doesn't poison the cache with a permanent miss.
+        try:
+            audio_url = source.find_audio_url(ticker_upper, year, quarter)
+        except Exception:
+            _logger.warning(
+                "source %s raised during find_audio_url for %s %sQ%s — recording error",
+                source_name,
+                ticker_upper,
+                year,
+                quarter,
+            )
+            manifest.append(
+                manifest_path,
+                [_error_row(ticker_upper, year, quarter, source_name=source_name)],
+                unique_keys=_ERROR_DEDUP_KEYS,
+            )
+            raise
+
         if audio_url is None:
             _logger.info(
                 "source %s reports no coverage for %s %sQ%s",
@@ -299,7 +322,28 @@ def fetch_transcript(
         if engine is None:
             engine = WhisperEngine()
         try:
-            content = source.download(audio_url)
+            try:
+                content = source.download(audio_url)
+            except Exception:
+                # Infrastructure failure during download (yt-dlp
+                # crash, network blip, anti-bot wall). Same logic
+                # as find_audio_url: record a retryable error row
+                # rather than letting the exception propagate
+                # without manifest evidence.
+                _logger.warning(
+                    "source %s raised during download for %s %sQ%s — recording error",
+                    source_name,
+                    ticker_upper,
+                    year,
+                    quarter,
+                )
+                manifest.append(
+                    manifest_path,
+                    [_error_row(ticker_upper, year, quarter, source_name=source_name)],
+                    unique_keys=_ERROR_DEDUP_KEYS,
+                )
+                raise
+
             if not content:
                 # Empty body slipped past the source's own retries.
                 # Retryable: don't poison the cache with a permanent

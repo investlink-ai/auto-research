@@ -7,7 +7,7 @@ platform is a new module + new rows here.
 
 V1 ships empty. Tickers absent from the registry are written to the
 manifest as a retryable `status="error"` row with no fetch attempted;
-a Playwright-driven coverage survey populates this map for real.
+the coverage-survey worker populates this map for real.
 
 The data lives here (a constant dict) rather than as YAML/JSON
 because (a) we want strict types — every entry validated against
