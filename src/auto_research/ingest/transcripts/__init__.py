@@ -74,13 +74,20 @@ def _open_direct_mp3() -> AudioSource:
     return DirectMp3Source()
 
 
+def _open_youtube() -> AudioSource:
+    from auto_research.ingest.transcripts.sources.youtube import YouTubeSource
+
+    return YouTubeSource()
+
+
 # Source-name → factory. Each factory does its own lazy import so
-# unrelated sources (q4inc with Playwright, youtube with yt-dlp) don't
-# need to be installed for the others to work. The orchestrator
-# asserts `_SOURCE_FACTORIES.keys() == KNOWN_SOURCES` at import — a
-# new entry in either set without the other fails loud at startup.
+# unrelated sources (e.g. youtube → yt-dlp) don't load until used.
+# The orchestrator asserts `_SOURCE_FACTORIES.keys() == KNOWN_SOURCES`
+# at import — a new entry in either set without the other fails loud
+# at startup.
 _SOURCE_FACTORIES: Final[dict[str, Callable[[], AudioSource]]] = {
     "direct_mp3": _open_direct_mp3,
+    "youtube": _open_youtube,
 }
 
 # Run the registry sanity-check at import time so a typo in REGISTRY

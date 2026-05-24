@@ -21,11 +21,15 @@ from __future__ import annotations
 # Source-name set. Each name MUST correspond to a module under
 # `transcripts.sources.<name>` exposing an `AudioSource`-compatible
 # class. Adding a new source is a new module + an entry here.
-KNOWN_SOURCES: frozenset[str] = frozenset({"direct_mp3"})
+KNOWN_SOURCES: frozenset[str] = frozenset({"direct_mp3", "youtube"})
 
-# ticker → source-name. Empty in v1; populated after the
-# Playwright-driven coverage survey of the universe.
-REGISTRY: dict[str, str] = {}
+# ticker → source-name. NVDA seeded as the canary for the youtube
+# discovery path; the full universe gets populated by the
+# coverage-survey worker (which probes each ticker's reachability
+# and picks the best source per ticker).
+REGISTRY: dict[str, str] = {
+    "NVDA": "youtube",
+}
 
 
 def lookup(ticker: str) -> str | None:

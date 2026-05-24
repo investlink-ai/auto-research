@@ -7,19 +7,19 @@ import pytest
 from auto_research.ingest.transcripts import registry
 
 
-def test_registry_starts_empty() -> None:
-    """v1 ships with no tickers wired; the registry is populated
-    after the Playwright-driven coverage survey. If this changes,
-    update this test with the rationale."""
-    assert registry.REGISTRY == {}
+def test_registry_seeds_only_nvda_canary() -> None:
+    """NVDA is the youtube canary; broader coverage is populated by
+    the coverage-survey worker. If this changes, update this test
+    with the rationale (and likely the parent issue's scope)."""
+    assert registry.REGISTRY == {"NVDA": "youtube"}
 
 
-def test_known_sources_contains_direct_mp3() -> None:
-    assert "direct_mp3" in registry.KNOWN_SOURCES
+def test_known_sources_contains_implemented_platforms() -> None:
+    assert {"direct_mp3", "youtube"} <= registry.KNOWN_SOURCES
 
 
 def test_lookup_returns_none_for_unregistered() -> None:
-    assert registry.lookup("NVDA") is None
+    assert registry.lookup("NEVER_REGISTERED") is None
 
 
 def test_lookup_returns_source_when_registered(
