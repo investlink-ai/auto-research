@@ -190,7 +190,62 @@ failing test or eval delta first.
 
 ---
 
-## 7. Where to look when…
+## 7. Observability
+
+Strategy ratified in `docs/specs/2026-05-22-design.md` §15: one tracing
+backend (Langfuse via OTLP) for LLM-touching code, one experiment store
+(MLflow) for backtests/signals, DuckDB notebooks for ad-hoc analysis,
+no infra metrics layer (Prometheus/Grafana is out of scope by design
+for v1).
+
+**Single init point.** Every process that does I/O calls
+`auto_research.telemetry.try_init_telemetry()` at start. The strict
+`init_telemetry()` variant is reserved for tests and the integration
+smoke; the CLI uses the env-tolerant wrapper so commands stay usable
+when Langfuse isn't running locally (a one-line stderr warning fires
+exactly once per process; spans become no-ops).
+
+**Entry-point catalog.**
+
+| Entry point | Init call site |
+|---|---|
+| `auto-research ingest edgar` | `src/auto_research/cli.py:ingest_edgar` |
+| `auto-research extract s-filings` | `src/auto_research/cli.py:extract_s_filings` |
+| Integration tests under `tests/integration/` | `init_telemetry()` (strict) |
+| Future: nightly batch worker (#19), live critic | call `try_init_telemetry()` at process start |
+
+**Manual-span boundaries.** Auto-instrumentation via OpenLLMetry
+covers Anthropic / Whisper / future LangChain SDK calls. Manual spans
+exist only at orchestration boundaries where parent/child grouping
+matters operationally:
+
+| Span | Emitter | Key attributes |
+|---|---|---|
+| `edgar.fetch_filings_for_cik` | `ingest/edgar.py` | `edgar.cik`, `edgar.form_types`, `edgar.n_filings`, `edgar.n_fetched`, `edgar.n_cache_hits` |
+| `transcript.fetch` | `ingest/transcripts/__init__.py` | `transcript.ticker`, `.year`, `.quarter`, `.source_name`, `.outcome` (cached / unregistered / no_coverage / ok / error) |
+| `transcript.find_audio_url` | `ingest/transcripts/sources/youtube.py` | `transcript.query`, `transcript.result_count`, `transcript.matched` |
+| `transcript.download` | `youtube.py` + `direct_mp3.py` | `transcript.source_name`, `transcript.bytes`, `transcript.duration_ms` |
+| `extract.s_filings` | `extract/workers/s_filings.py` | `extract.worker`, `extract.doc_id`, `extract.outcome` (cache_hit / persisted / quarantined) |
+
+LLM cost (`llm.cost.est_usd`) is set on the active span by
+`extract/client.py` after each SDK call — workers do not duplicate
+this; under `extract.s_filings` the attribute now rolls up to the
+named worker boundary.
+
+**No-op safety.** When telemetry isn't initialized in a process,
+`get_current_span()` returns OTel's default no-op span and
+`start_as_current_span` is a cheap pass-through. Production code
+emits spans unconditionally; the cost when nothing is listening is
+a few attribute dict writes that go nowhere.
+
+**Test discipline.** Unit tests assert span emission via the
+`span_recorder` fixture in `tests/conftest.py` (in-memory
+`InMemorySpanExporter`). End-to-end delivery to Langfuse is covered by
+`tests/integration/test_telemetry_export.py` (requires Docker up).
+
+---
+
+## 8. Where to look when…
 
 | Task | Start here |
 |---|---|
