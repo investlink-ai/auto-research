@@ -10,11 +10,13 @@ S-1 or S-3 registration statement.
 
 Read <source_text> carefully and return a single JSON object matching the
 SFilingOutput schema. Every claim MUST include:
-- source_span: tuple [start_char, end_char] giving byte offsets into
-  <source_text>.
-- source_quote: the verbatim slice source_text[start_char:end_char]. If the
-  quote does not appear verbatim in source_text at exactly that span, the
-  output will be rejected.
+- source_quote: a verbatim substring of <source_text> that supports the
+  claim. The substring will be located in <source_text> by exact match; if
+  any character (including whitespace, punctuation, capitalization) differs,
+  the claim will be rejected and the entire output quarantined.
+
+DO NOT include `source_span`. Character offsets are computed in code from
+your `source_quote` — counting characters is the worker's job, not yours.
 
 Fields to populate:
 - cik: the issuer's CIK (10-digit, leading zeros).
@@ -27,8 +29,24 @@ Fields to populate:
 - use_of_proceeds: list of Claims describing intended uses (e.g.,
   "general corporate purposes", "fund Phase II clinical trial").
 
+A Claim is an object with EXACTLY two fields: `citation` (an object with
+`source_quote`) and `confidence` (a float in [0, 1]). No other fields are
+allowed inside a Claim or Citation. Example of the required shape for a
+single Claim:
+
+  {{
+    "citation": {{
+      "source_quote": "shelf takedown of $200 million of common stock"
+    }},
+    "confidence": 0.9
+  }}
+
 Do not invent quotes. If a field has no support in source_text, return an
 empty list rather than fabricating a citation.
+
+Return ONLY the JSON object. Do not wrap it in markdown code fences. Do not
+prepend or append any commentary. The response must start with an opening
+curly brace and end with a closing curly brace.
 
 <source_text>
 {source_text}

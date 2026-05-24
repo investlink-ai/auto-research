@@ -104,10 +104,14 @@ def test_cache_hit_skips_llm_call(tmp_path: Path) -> None:
 
 
 def test_corrupted_citation_routes_to_quarantine(tmp_path: Path) -> None:
+    """A hallucinated quote (not present verbatim in `raw_doc`) must
+    route to quarantine. Spans are computed by the worker, so the way
+    to simulate a hallucination is to corrupt the quote itself."""
     bad = _valid_output_for(_SAMPLE_S3)
-    # Shift the span by 1 character — `source_quote` no longer matches the slice
-    span = bad["dilution_event"]["citation"]["source_span"]
-    bad["dilution_event"]["citation"]["source_span"] = [span[0] + 1, span[1] + 1]
+    # Mutate the quote so it no longer appears in `_SAMPLE_S3`:
+    bad["dilution_event"]["citation"]["source_quote"] = (
+        "shelf takedown of $999 trillion of common stock"
+    )
     client = _fake_client(bad)
     out = extract_s_filing(
         raw_doc=_SAMPLE_S3,
