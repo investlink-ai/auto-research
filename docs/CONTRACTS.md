@@ -88,8 +88,11 @@ class SupplierMention(BaseModel):
   optional (e.g., `resolved_ticker` before entity resolution runs).
 - Adding a field is non-breaking; removing or renaming requires a
   `prompt_version` bump in Langfuse (see INV-6) and a Feast schema migration.
-- Worker functions are `(raw_doc: RawDoc, prompt_version: str) → Output` —
-  pure functions. Content-hash cached on `sha256(raw_doc.bytes + prompt_version)`.
+- Worker functions are
+  `(raw_doc: RawDoc, prompt_version: str, schema_version: str, model_id: str, decoding_params: dict) → Output`
+  — pure functions. Content-hash cached on
+  `sha256(raw_doc.bytes + prompt_version + schema_version + model_id + canonical_json(decoding_params))`
+  (see `src/auto_research/extract/cache.py`).
 
 ---
 
