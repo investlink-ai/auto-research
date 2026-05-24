@@ -13,7 +13,7 @@ doc is the live map.
 ```
         ┌────────────────────────────────────────────┐
         │             DATA SOURCES                     │
-        │   EDGAR  •  FMP transcripts  •  prices       │
+        │  EDGAR  •  YouTube/yt-dlp + Whisper  •  prices │
         └─────────────────┬──────────────────────────┘
                           ▼
         ┌────────────────────────────────────────────┐
@@ -89,7 +89,9 @@ crosses the boundary into signals — that would bypass PIT discipline.
 src/auto_research/
 ├── ingest/                   # data sources
 │   ├── edgar.py              # SEC EDGAR client (10-K, 10-Q, 8-K, S-1, S-3)
-│   ├── fmp.py                # FMP transcripts + bid-ask half-spread
+│   ├── transcripts/          # earnings-call audio → Whisper transcripts
+│   │   ├── _whisper.py       # OpenAI Whisper engine
+│   │   └── sources/          # per-platform: direct_mp3, youtube (yt-dlp)
 │   └── manifest.py           # append-only fetch ledger
 │
 ├── extract/                  # LLM plane
@@ -177,7 +179,9 @@ failing test or eval delta first.
 | Service | Used by | Purpose |
 |---|---|---|
 | **Anthropic API** (Batch + caching) | `extract/`, `agents/` | Workers + LangGraph nodes + Pydantic AI critic |
-| **FMP API** | `ingest/fmp.py`, `backtest/costs.py` | Transcripts + bid-ask half-spread |
+| **OpenAI Whisper** | `ingest/transcripts/_whisper.py` | Earnings-call audio → text |
+| **YouTube via yt-dlp** | `ingest/transcripts/sources/youtube.py` | Aggregator-mirrored earnings audio |
+| **FMP API** | `backtest/costs.py` | Bid-ask half-spread |
 | **Voyage AI** | `extract/rag_retrieval.py`, `extract/entity_resolution.py` | `voyage-3` embeddings (BGE fallback) |
 | **EDGAR** | `ingest/edgar.py` | Free SEC filings |
 | **Langfuse self-hosted** (Docker) | All LLM-touching code via OpenLLMetry | Traces, prompt registry, cost tracking |
