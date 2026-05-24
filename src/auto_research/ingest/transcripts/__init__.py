@@ -252,8 +252,9 @@ def fetch_transcript(
         return None
 
     # Unregistered ticker → retryable error row, not a permanent
-    # cache lock. When PR #6f populates the registry, the next call
-    # short-circuits past this branch and fetches normally.
+    # cache lock. When the registry is later populated for this
+    # ticker, the next call short-circuits past this branch and
+    # fetches normally.
     source_name = registry.lookup(ticker_upper)
     if source_name is None:
         _logger.info("no transcript source registered for %s", ticker_upper)

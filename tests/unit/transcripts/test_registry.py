@@ -8,9 +8,9 @@ from auto_research.ingest.transcripts import registry
 
 
 def test_registry_starts_empty() -> None:
-    """v1 ships with no tickers wired. PR #6f populates after a
-    Playwright coverage survey. If this changes, the test is the
-    place to update with the rationale."""
+    """v1 ships with no tickers wired; the registry is populated
+    after the Playwright-driven coverage survey. If this changes,
+    update this test with the rationale."""
     assert registry.REGISTRY == {}
 
 

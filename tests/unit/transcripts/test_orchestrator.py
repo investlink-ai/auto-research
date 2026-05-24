@@ -148,7 +148,7 @@ def test_fetch_writes_audio_and_manifest_row(
 
 def test_unregistered_ticker_records_error(tmp_path: Path) -> None:
     """Unregistered tickers write a retryable `status='error'` row —
-    NOT a permanent no_coverage. When PR #6f populates the registry
+    NOT a permanent no_coverage. When the registry is later populated
     for this ticker, the next fetch must proceed (not hit cache).
     Also: no audio file written to disk (early return before download)."""
     raw_root = tmp_path / "raw"

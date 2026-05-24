@@ -2,12 +2,12 @@
 
 Data, not code: each ticker resolves to a short source-name string,
 and the orchestrator wires the matching `sources/*.py` module. This
-keeps platform additions (q4inc, youtube, …) from touching the
-orchestrator — a new platform is a new module + new rows here.
+keeps platform additions from touching the orchestrator — a new
+platform is a new module + new rows here.
 
 V1 ships empty. Tickers absent from the registry are written to the
-manifest as `status="no_coverage"` with no fetch attempted. PR #6f's
-Playwright-driven coverage survey populates this map for real.
+manifest as a retryable `status="error"` row with no fetch attempted;
+a Playwright-driven coverage survey populates this map for real.
 
 The data lives here (a constant dict) rather than as YAML/JSON
 because (a) we want strict types — every entry validated against
@@ -20,13 +20,10 @@ from __future__ import annotations
 
 # Source-name set. Each name MUST correspond to a module under
 # `transcripts.sources.<name>` exposing an `AudioSource`-compatible
-# class. Sources added in follow-up PRs extend this set:
-#   - "direct_mp3" — generic raw-MP3 URL on the IR page (PR #6 / this)
-#   - "q4inc"     — Q4 Inc webcast via Playwright + ffmpeg (PR #6d)
-#   - "youtube"   — YouTube replay via yt-dlp (PR #6e)
+# class. Adding a new source is a new module + an entry here.
 KNOWN_SOURCES: frozenset[str] = frozenset({"direct_mp3"})
 
-# ticker → source-name. Empty in v1; populated by PR #6f after a
+# ticker → source-name. Empty in v1; populated after the
 # Playwright-driven coverage survey of the universe.
 REGISTRY: dict[str, str] = {}
 

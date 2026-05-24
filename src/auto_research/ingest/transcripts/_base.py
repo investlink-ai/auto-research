@@ -7,12 +7,11 @@ The `AudioSource` Protocol is the seam that lets each platform have
 its own extractor while the orchestrator (`fetch_transcript` in
 `__init__.py`) stays source-agnostic.
 
-`Transcript` is the shape we return upstream. Fields match Issue #6's
-AC: `ticker`, `year`, `quarter`, `event_datetime`, `prepared_remarks`,
-`q_and_a`. Frozen via `model_config = ConfigDict(frozen=True)` for
-the same reasons as universe entries — a transcript is a fact at a
-point in time and downstream code mutating it would create silent
-bugs.
+`Transcript` is the shape we return upstream: `ticker`, `year`,
+`quarter`, `event_datetime`, `prepared_remarks`, `q_and_a`. Frozen
+via `model_config = ConfigDict(frozen=True)` for the same reasons as
+universe entries — a transcript is a fact at a point in time and
+downstream code mutating it would create silent bugs.
 
 V1 has no speaker diarization. The Q&A boundary is detected by string
 match on conventional markers ("Question-and-Answer Session", "We

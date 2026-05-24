@@ -7,12 +7,12 @@ Playwright, YouTube with yt-dlp) follows the same shape, just with
 heavier discovery/download machinery inside `find_audio_url` and
 `download`.
 
-Coverage in the universe is uncertain (the static IR-probe in
-PR #6's investigation found a few candidates among smaller industrial
-caps, but Cloudflare blocked the most-promising ones). PR #6f's
-Playwright-driven re-survey will populate the registry with whatever
-tickers actually use this pattern. Until then this source is the
-canonical reference implementation rather than a coverage workhorse.
+Coverage in the universe is uncertain. A static IR-probe found a few
+candidates among smaller industrial caps, but Cloudflare blocked the
+most-promising ones; a Playwright-driven re-survey populates the
+registry with whatever tickers actually use this pattern. Until then
+this source is the canonical reference implementation rather than a
+coverage workhorse.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from auto_research.ingest.transcripts._base import TranscriptConfigError
 # discovery), kept here because each ticker's IR layout is bespoke:
 # `https://investor.acme.com/audio/2024Q1-earnings.mp3` etc.
 #
-# Empty in v1. PR #6f populates after the Playwright re-survey.
+# Empty in v1; populated after the Playwright-driven coverage survey.
 TICKER_URL_TEMPLATES: dict[str, str] = {}
 
 
