@@ -55,6 +55,32 @@ uv run mlflow ui              # opens http://localhost:5000
 | `make check` | `quick` + `test` | none (default pre-PR gate) |
 | `make check-full` | `quick` + `test` + `integration` | Langfuse running |
 
+## Prompt lifecycle
+
+Prompts live as `<NAME>_PROMPT` constants in
+`src/auto_research/extract/prompts/`, colocated with
+`<NAME>_PROMPT_VERSION = "vN"`. Code is the source of truth at runtime;
+Langfuse holds the registry for version history and tag state. The
+discipline:
+
+1. **Edit** a prompt file → the `bump-prompt-version` skill blocks the
+   commit unless `*_PROMPT_VERSION` also bumps. If the partnered
+   Pydantic output model's fields changed, the skill also requires
+   bumping the model's `SCHEMA_VERSION` ClassVar.
+2. **Cache** is keyed on the full completion config
+   (`raw_doc`, `prompt_version`, `schema_version`, `model_id`,
+   `decoding_params`) — see `src/auto_research/extract/cache.py`. Model
+   swaps and decoding changes never reuse stale entries.
+3. **Promote** to the Langfuse `production` tag via
+   `uv run python scripts/promote_prompt.py <prompt_name>` — the script
+   reads the in-code `*_PROMPT_VERSION` constant for that prompt, runs
+   the gold-set eval, and refuses the tag flip below the F1 threshold
+   or above the per-doc cost ceiling. (No candidate-version CLI arg —
+   the gate always evaluates and promotes the same version that's
+   currently in code, so eval and artifact can't diverge.)
+
+See `AGENTS.md` INV-6 for the formal invariant.
+
 ## Workflow
 
 [`AGENTS.md`](AGENTS.md) is the source of truth for both human and

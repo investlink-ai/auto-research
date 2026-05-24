@@ -79,10 +79,18 @@ impact + IBKR borrow proxy + commissions feed into `vbt.Portfolio.from_signals`.
 Any backtest result must be reported net of costs. Gross-Sharpe-only claims
 are invalid.
 
-**INV-6. Determinism: prompts are version-pinned.** Extraction workers are
-`(raw_doc, prompt_version) → ExtractionOutput` pure functions with content-hash
-idempotent cache. Prompt registry lives in Langfuse. Changing a prompt without
-bumping its version invalidates the cache contract.
+**INV-6. Determinism: completion configs are version-pinned.** Extraction
+workers are
+`(raw_doc, prompt_version, schema_version, model_id, decoding_params) → ExtractionOutput`
+pure functions with content-hash idempotent cache
+(`src/auto_research/extract/cache.py`). Prompt registry lives in Langfuse;
+prompt and output-schema versions are colocated in code
+(`extract/prompts/<name>.py` and `extract/schemas.py` `ClassVar`).
+Changing any of the five inputs without invalidating the cache key
+silently corrupts outputs. The `bump-prompt-version` skill defends
+prompt + schema co-versioning; the cache key itself defends `model_id`
+and `decoding_params`. Promotion to the Langfuse `production` tag is
+gated by `scripts/promote_prompt.py` — eval-gated, not a manual flip.
 
 **INV-7. Secrets never leak.** No agent or script reads `.env` directly, dumps
 environment variables, or logs Anthropic / FMP / Voyage credentials. Diagnostics

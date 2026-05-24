@@ -1,0 +1,27 @@
+{
+  "prompt_name": "s_filings_dilution",
+  "thresholds": {
+    "min_f1": 0.7,
+    "max_usd_per_doc": null
+  },
+  "samples": [
+    {
+      "doc_id": "gold-001",
+      "raw_doc": "This shelf takedown of $200 million of common stock will be used for general corporate purposes and to fund the Phase II clinical trial.",
+      "expected": {
+        "form_type": "S-3",
+        "dilution_event_quote": "shelf takedown of $200 million of common stock",
+        "use_of_proceeds_phrases": ["general corporate purposes", "Phase II clinical trial"]
+      }
+    },
+    {
+      "doc_id": "gold-002",
+      "raw_doc": "We are conducting an at-the-market offering of up to $50 million of common stock. Proceeds will fund commercialization activities.",
+      "expected": {
+        "form_type": "S-3",
+        "dilution_event_quote": "at-the-market offering of up to $50 million of common stock",
+        "use_of_proceeds_phrases": ["commercialization activities"]
+      }
+    }
+  ]
+}

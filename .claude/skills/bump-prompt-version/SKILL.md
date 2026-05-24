@@ -9,10 +9,13 @@ allowed-tools: Read, Grep, Bash, Edit
 
 **Invariant being defended (AGENTS.md INV-6):**
 
-> Extraction workers are `(raw_doc, prompt_version) → ExtractionOutput` pure
-> functions with content-hash idempotent cache. Prompt registry lives in
-> Langfuse. Changing a prompt without bumping its version invalidates the
-> cache contract.
+> Extraction workers are
+> `(raw_doc, prompt_version, schema_version, model_id, decoding_params) → ExtractionOutput`
+> pure functions with content-hash idempotent cache. Prompt registry lives
+> in Langfuse; prompt and schema versions are colocated in code. Changing
+> any of the five inputs without invalidating the cache key silently
+> corrupts outputs. This skill defends prompt + schema co-versioning; the
+> cache key itself defends `model_id` and `decoding_params`.
 
 The cache key is `sha256(raw_doc.bytes + prompt_version)`. If the prompt text
 changes but `prompt_version` doesn't:
