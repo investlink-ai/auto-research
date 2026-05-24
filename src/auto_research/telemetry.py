@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import base64
 import os
+import sys
 import threading
 from typing import Final
 
 _INIT_LOCK: Final[threading.Lock] = threading.Lock()
 _INITIALIZED: bool = False
+_TRY_INIT_WARNED: bool = False
 
 
 class TelemetryNotConfiguredError(RuntimeError):
@@ -79,3 +81,27 @@ def init_telemetry(*, service_name: str = "auto-research") -> None:
 def is_initialized() -> bool:
     """Return True iff init_telemetry has succeeded in this process."""
     return _INITIALIZED
+
+
+def try_init_telemetry(*, service_name: str = "auto-research") -> bool:
+    """Best-effort `init_telemetry()` for CLI / interactive entry points.
+
+    Returns True iff telemetry is initialized (either now or already).
+    On `TelemetryNotConfiguredError`, prints a single one-line warning
+    to stderr and returns False — the CLI must remain usable without
+    a running Langfuse, but operators should know spans aren't being
+    emitted. The warning is deduplicated per process via
+    `_TRY_INIT_WARNED`; re-running a command does not spam stderr.
+
+    Tests and the integration smoke continue to call `init_telemetry`
+    directly so a misconfigured environment fails loud, not silently.
+    """
+    global _TRY_INIT_WARNED
+    try:
+        init_telemetry(service_name=service_name)
+    except TelemetryNotConfiguredError as exc:
+        if not _TRY_INIT_WARNED:
+            print(f"warn: telemetry disabled — {exc}", file=sys.stderr)
+            _TRY_INIT_WARNED = True
+        return False
+    return True

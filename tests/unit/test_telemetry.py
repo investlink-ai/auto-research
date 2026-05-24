@@ -38,3 +38,34 @@ def test_is_initialized_starts_false(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(t, "_INITIALIZED", False)
     assert is_initialized() is False
+
+
+def test_try_init_telemetry_returns_false_when_env_missing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Missing env -> warn once to stderr, return False, don't raise."""
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    from auto_research import telemetry as t
+
+    monkeypatch.setattr(t, "_INITIALIZED", False)
+    monkeypatch.setattr(t, "_TRY_INIT_WARNED", False)
+
+    assert t.try_init_telemetry() is False
+    captured = capsys.readouterr()
+    assert "telemetry" in captured.err.lower()
+
+    # Idempotent warning — second call does not double-print.
+    assert t.try_init_telemetry() is False
+    captured2 = capsys.readouterr()
+    assert captured2.err == ""
+
+
+def test_try_init_telemetry_returns_true_when_already_initialized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from auto_research import telemetry as t
+
+    monkeypatch.setattr(t, "_INITIALIZED", True)
+    assert t.try_init_telemetry() is True
