@@ -46,15 +46,38 @@ FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "chunking"
 # ---------- Fixture discovery + parameterization ----------------------------
 
 
-def _discover_10k_fixtures() -> list[str]:
-    """Return the stem of every `sample_10k*.htm` fixture present.
+def _discover_10k_fixtures() -> list[tuple[str, str]]:
+    """Return `[(stem, tier), …]` for every checked-in `sample_10k*.htm`.
 
-    Adding a new ticker via `scripts/build_chunking_fixture.py` writes
-    `sample_10k_<ticker>.htm` + `.meta.json` here, and this helper
-    automatically extends parameterized test coverage to it — no test
-    edits required.
+    `tier` is read from the matching `.meta.json` (`"core"` or
+    `"broad"`); fixtures missing a tier annotation default to
+    `"broad"` so they don't accidentally land in default-CI without
+    intent. Adding a new ticker via `scripts/build_chunking_fixture.py`
+    automatically extends test coverage at whichever tier the build
+    script tags it with.
+
+    Tier semantics:
+      - `core`: covered by default `make test`. A small, intentional
+        subset of templates that catches the bug classes most likely
+        to break under chunker changes.
+      - `broad`: covered by `make test-broad` (nightly / on-demand).
+        Wider industry/year/template coverage; useful for catching
+        filer-template variance the core set misses.
+
+    The default-tier-when-missing is `broad` (not `core`) — adding a
+    new fixture should require explicit intent to expand the CI
+    surface, not just dropping a file in the directory.
     """
-    return sorted(p.stem for p in FIXTURE_DIR.glob("sample_10k*.htm"))
+    out: list[tuple[str, str]] = []
+    for htm in sorted(FIXTURE_DIR.glob("sample_10k*.htm")):
+        stem = htm.stem
+        meta_path = FIXTURE_DIR / f"{stem}.meta.json"
+        if not meta_path.exists():
+            continue
+        meta = json.loads(meta_path.read_text())
+        tier = meta.get("tier", "broad")
+        out.append((stem, tier))
+    return out
 
 
 @dataclasses.dataclass(frozen=True)
@@ -87,7 +110,8 @@ def _load_fixture(stem: str) -> _LoadedFixture:
 
 # Cache parsed fixtures at module scope so each parametrized test
 # doesn't re-pay the chunking cost (section detection on a 220 KB doc
-# takes ~50 ms, multiplied across 30+ tests across 3 fixtures is real).
+# takes ~500 ms, multiplied across ~13 per-doc tests across N fixtures
+# is real).
 _FIXTURE_CACHE: dict[str, _LoadedFixture] = {}
 
 
@@ -97,12 +121,28 @@ def _cached_fixture(stem: str) -> _LoadedFixture:
     return _FIXTURE_CACHE[stem]
 
 
-@pytest.fixture(params=_discover_10k_fixtures(), ids=lambda s: s)
-def filing(request: pytest.FixtureRequest) -> _LoadedFixture:
-    """Parameterized fixture yielding one `_LoadedFixture` per 10-K fixture.
+def _fixture_params() -> list[Any]:
+    """Build pytest parametrize args with per-tier marks.
 
-    A test using this fixture runs once per checked-in ticker. Adding
-    a new fixture via the build script extends coverage automatically.
+    `tier=="broad"` fixtures get `pytest.mark.broad_fixture`, which
+    `make test` excludes via `-m "not broad_fixture"`. Default
+    pytest invocations (e.g. `make test-broad`) include them.
+    """
+    params = []
+    for stem, tier in _discover_10k_fixtures():
+        marks = [pytest.mark.broad_fixture] if tier == "broad" else []
+        params.append(pytest.param(stem, id=stem, marks=marks))
+    return params
+
+
+@pytest.fixture(params=_fixture_params())
+def filing(request: pytest.FixtureRequest) -> _LoadedFixture:
+    """Parameterized fixture yielding one `_LoadedFixture` per 10-K.
+
+    Each test using this fixture runs once per discovered ticker.
+    Broad-tier fixtures (per their meta.json `tier` field) are
+    marked `broad_fixture`; `make test` excludes them via marker
+    filter while `make test-broad` includes everything.
     """
     return _cached_fixture(request.param)
 
@@ -464,22 +504,27 @@ def test_real_10k_metadata_is_populated(filing: _LoadedFixture) -> None:
 
 
 def test_financial_section_emits_chunks_with_table_html(filing: _LoadedFixture) -> None:
-    """At least one parent chunk has `table_html` populated, regardless
-    of which Item the table lives in.
+    """If a fixture's trimmed range contains `<table>` elements, at
+    least one parent chunk must have `table_html` populated.
 
-    Filers structure 10-Ks differently — NVDA's Item 8 is a short
-    pointer ("the information required by this Item is set forth in
-    our Consolidated Financial Statements"), and the actual tables
-    live later in document order (inside the Item 14 span in NVDA's
-    case). AMD inlines tables in Item 8 itself. The chunker's table
-    policy (ADR D5) operates per-table, not per-section, so the test
-    asserts the policy holds anywhere in the doc.
+    Some fixtures legitimately have no inline tables in the trimmed
+    range — filers like TSLA push financial-statement tables to the
+    appendix (past Item 15), which the per-Item byte budget in the
+    build script may not include. The contract is "if tables exist,
+    table_html is populated", not "every fixture has tables". The
+    chunker is exercised against table-containing docs (NVDA, AMD,
+    AVGO, AAPL, MSFT, GOOGL) and the policy holds.
     """
+    if "<table" not in filing.html.lower():
+        pytest.skip(
+            f"[{filing.stem}] trimmed range contains no <table> elements; "
+            "table-policy contract not exercised by this fixture"
+        )
     table_chunks = [p for p in filing.parsed.parents if p.table_html is not None]
     assert table_chunks, (
-        f"[{filing.stem}] expected ≥1 parent with table_html attached; "
-        f"got {len(filing.parsed.parents)} parents with sections "
-        f"{sorted({p.section_name for p in filing.parsed.parents})}"
+        f"[{filing.stem}] fixture contains <table> elements but no parent "
+        f"emitted with table_html; got {len(filing.parsed.parents)} parents "
+        f"with sections {sorted({p.section_name for p in filing.parsed.parents})}"
     )
 
 
@@ -512,7 +557,11 @@ def test_item_1a_has_at_least_some_narrative_chunks(filing: _LoadedFixture) -> N
 
 def test_at_least_one_table_html_is_pandas_readable(filing: _LoadedFixture) -> None:
     tables = [p for p in filing.parsed.parents if p.table_html is not None]
-    assert tables, f"[{filing.stem}] expected table parents"
+    if not tables:
+        pytest.skip(
+            f"[{filing.stem}] no table chunks in this fixture; "
+            "see test_financial_section_emits_chunks_with_table_html"
+        )
     for t in tables:
         try:
             dfs = pd.read_html(io.StringIO(t.table_html))

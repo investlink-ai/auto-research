@@ -1,4 +1,4 @@
-.PHONY: quick check check-full test integration eval live-smoke lint typecheck setup-nlp smoke
+.PHONY: quick check check-full test test-broad integration eval live-smoke lint typecheck setup-nlp smoke
 
 # Fast pre-commit gate — run constantly during development.
 quick: lint typecheck
@@ -26,7 +26,21 @@ typecheck:
 # Unit tests — hermetic, no network, no Docker, no API keys.
 # tests/feast is included here: it scaffolds a tmp Feast registry from local
 # files and runs `feast apply` in-process; no network.
+#
+# Chunking fixtures are tiered: `core` fixtures run by default (small,
+# intentional set of templates), `broad` fixtures cover wider industry/
+# year/template variance and run only via `make test-broad`. Each
+# chunking fixture has a `tier` field in its meta.json.
 test:
+	uv run pytest tests/unit tests/feast -m "not broad_fixture"
+
+# Same as `make test` plus the broad-tier chunking fixtures. MANUAL —
+# not run in CI (default or nightly). Touching `src/auto_research/
+# extract/chunking.py` (Tier 2 per AGENTS.md §3) requires running this
+# locally before merge and citing the green output in the PR evidence
+# block. This is the regression-coverage backstop for filer-template
+# variance the core set doesn't reach.
+test-broad:
 	uv run pytest tests/unit tests/feast
 
 # Integration tests — require Langfuse running (docker compose up -d).

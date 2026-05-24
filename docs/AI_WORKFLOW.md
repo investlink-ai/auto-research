@@ -195,6 +195,7 @@ non-applicability reason in one line if a row doesn't apply.
 | DeepEval score delta | `extract/guardrails.py`, `schemas.py` | Baseline vs new (F1, hallucination rate) |
 | Ragas score delta | `extract/chunking.py`, `extract/rag_retrieval.py` | `context_recall`, `faithfulness` |
 | Backtest tier gate output | `signals/`, `backtest/engine.py` | `T1_GATE` / `T2_GATE` pass per signal |
+| `make test-broad` green | `extract/chunking.py` | Paste the final pytest summary line. Broad-tier chunking fixtures (different filer templates + fiscal years) are excluded from default CI for speed; they are this module's regression backstop and must be exercised manually on every chunker PR. |
 
 ---
 

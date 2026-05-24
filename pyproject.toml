@@ -61,6 +61,7 @@ markers = [
     "eval: tests that hit external LLM/eval APIs (excluded from CI by default)",
     "integration: tests that hit external services (excluded from CI by default)",
     "live: tests that hit real external services over real network (excluded from CI by default; run via `make live-smoke` with credentials)",
+    "broad_fixture: parameterized variant against a broad-tier chunking fixture (excluded from default `make test`; run via `make test-broad`)",
 ]
 
 [tool.ruff]

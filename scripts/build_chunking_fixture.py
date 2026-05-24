@@ -62,10 +62,12 @@ def _http_get(url: str) -> bytes:
 def _find_primary_10k_url(cik: int, accession: str) -> str:
     """Resolve a 10-K filing's primary HTML document.
 
-    EDGAR's filing index page lists every document in the submission;
-    the primary 10-K is conventionally `<ticker>-<period>.htm` (no
-    suffix like `_ex...` for exhibits). We pick the first .htm that
-    doesn't match the ex-pattern and isn't an iXBRL viewer redirect.
+    EDGAR's filing index page lists every document in the submission.
+    The primary 10-K may appear either as a direct `.htm` link or
+    wrapped inside the iXBRL viewer (`/ix?doc=<actual-path>`). Both
+    forms are valid; this resolver collects both, strips the
+    `/ix?doc=` wrapper, then filters out exhibits/certifications/
+    subsidiary lists by filename token.
     """
     accession_dashed = accession
     accession_undashed = accession.replace("-", "")
@@ -73,31 +75,46 @@ def _find_primary_10k_url(cik: int, accession: str) -> str:
         f"{SEC_BASE}/Archives/edgar/data/{cik}/{accession_undashed}/{accession_dashed}-index.htm"
     )
     body = _http_get(index_url).decode("utf-8", errors="replace")
-    # Strip ix?doc= wrappers and find direct .htm links to the same submission folder.
-    links = re.findall(rf'href="(/Archives/edgar/data/{cik}/{accession_undashed}/[^"]+\.htm)"', body)
-    candidates: list[str] = []
-    for raw in links:
-        if "/ix?" in raw:
-            continue
-        name = raw.rsplit("/", 1)[-1].lower()
-        # Skip exhibits, certifications, subsidiaries lists, etc.
-        if any(
-            tok in name
-            for tok in ("ex", "exhibit", "subsidiaries", "consent", "cert", "_xbrl")
-        ):
-            continue
-        candidates.append(raw)
-    # Prefer the largest candidate (the primary doc is by far the longest)
+
+    # Collect both direct and iXBRL-wrapped links to .htm files in this
+    # submission's folder; unwrap `/ix?doc=` so the resolver sees a
+    # canonical path either way.
+    direct = re.findall(
+        rf'href="(/Archives/edgar/data/{cik}/{accession_undashed}/[^"]+\.htm)"', body
+    )
+    wrapped = re.findall(
+        rf'href="/ix\?doc=(/Archives/edgar/data/{cik}/{accession_undashed}/[^"]+\.htm)"',
+        body,
+    )
+    seen: set[str] = set()
+    paths: list[str] = []
+    for p in [*wrapped, *direct]:  # wrapped first — usually the primary doc
+        if p not in seen:
+            seen.add(p)
+            paths.append(p)
+
+    # Drop exhibits, certifications, subsidiary lists, consents, etc.
+    exhibit_tokens = (
+        "_ex",
+        "-ex",
+        "/ex",
+        "exhibit",
+        "subsidiaries",
+        "subsidiary",
+        "consent",
+        "cert",
+        "_xbrl",
+        "descriptionof",
+        "listofregistrants",
+    )
+    candidates = [p for p in paths if not any(tok in p.lower() for tok in exhibit_tokens)]
     if not candidates:
-        # Fallback: try the ix?doc= form
-        ix = re.findall(rf'href="/ix\?doc=(/Archives/edgar/data/{cik}/{accession_undashed}/[^"]+\.htm)"', body)
-        if ix:
-            return f"{SEC_BASE}{ix[0]}"
         raise RuntimeError(f"could not find primary 10-K doc in {index_url}")
     if len(candidates) == 1:
         return f"{SEC_BASE}{candidates[0]}"
-    # Multiple candidates — pick the one whose name is shortest (heuristic
-    # for the primary doc, which usually has the simplest filename).
+    # Multiple candidates — pick the shortest filename (heuristic: the
+    # primary doc's filename is typically `<ticker>-<period>.htm`
+    # without modifier suffixes).
     candidates.sort(key=lambda p: len(p.rsplit("/", 1)[-1]))
     return f"{SEC_BASE}{candidates[0]}"
 
@@ -217,6 +234,18 @@ def main() -> int:
         "--out-stem",
         help="Override the fixture file stem (default: sample_10k_<ticker_lower>)",
     )
+    parser.add_argument(
+        "--tier",
+        choices=["core", "broad"],
+        default="broad",
+        help=(
+            "Which test-tier this fixture belongs to. `core` fixtures run "
+            "in default CI via `make test`; `broad` fixtures run only via "
+            "`make test-broad` (typically nightly). New fixtures default to "
+            "broad — promote to core explicitly once they've earned their "
+            "place in the CI surface."
+        ),
+    )
     args = parser.parse_args()
 
     out_stem = args.out_stem or f"sample_10k_{args.ticker.lower()}"
@@ -270,6 +299,7 @@ def main() -> int:
         "fiscal_period": args.fiscal_period,
         "doc_type": "10-K",
         "doc_id": args.accession,
+        "tier": args.tier,
         "expected_sections": expected,
         "source_url": primary_url,
         "filename_convention": (
