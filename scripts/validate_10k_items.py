@@ -44,7 +44,7 @@ FORM_10K_URL = "https://www.sec.gov/files/form10-k.pdf"
 USER_AGENT = "auto-research/0.1 research@example.com"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = REPO_ROOT / "tests" / "fixtures" / "chunking" / "sample_10k.htm"
+FIXTURE = REPO_ROOT / "tests" / "fixtures" / "chunking" / "sample_10k_nvda.htm"
 
 
 def _item_sort_key(item: str) -> tuple[int, str]:

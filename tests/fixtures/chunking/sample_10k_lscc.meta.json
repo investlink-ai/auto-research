@@ -1,0 +1,16 @@
+{
+  "ticker": "LSCC",
+  "filing_date": "2026-02-13",
+  "fiscal_period": "FY2026",
+  "doc_type": "10-K",
+  "doc_id": "0001437749-26-004100",
+  "tier": "broad",
+  "expected_sections": [
+    "Item 1A",
+    "Item 7",
+    "Item 8"
+  ],
+  "source_url": "https://www.sec.gov/Archives/edgar/data/855658/000143774926004100/lscc20260103_10k.htm",
+  "filename_convention": "Uses .htm extension per SEC EDGAR's 25+-year convention. Production input from EDGAR always ends in .htm; fixture matches so any extension-aware tooling behaves identically in tests and live.",
+  "note": "Real EDGAR 10-K for LSCC, fiscal period FY2026, filed 2026-02-13. Public-domain SEC filing. Trimmed via scripts/build_chunking_fixture.py to fit the 500 KB pre-commit cap while preserving real section headers for Item 1A, Item 7, Item 8 in document order and at least one inline financial table for Item 8 table-policy tests."
+}
