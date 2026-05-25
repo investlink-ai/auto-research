@@ -9,6 +9,7 @@ from auto_research.ingest._http import RateLimited
 from auto_research.ingest.rate_limit import TokenBucket
 from auto_research.ingest.transcripts._base import TranscriptConfigError
 from auto_research.ingest.transcripts.sources import direct_mp3
+from tests._otel_helpers import SpanRecorder
 
 
 def _fast_limiter() -> TokenBucket:
@@ -188,3 +189,29 @@ def test_source_in_known_sources() -> None:
     from auto_research.ingest.transcripts import registry
 
     assert direct_mp3.SOURCE_NAME in registry.KNOWN_SOURCES
+
+
+# ---------- OTel instrumentation (refs #52) ----------
+
+
+def test_download_emits_span(span_recorder: SpanRecorder) -> None:
+    payload = b"\xff\xfb" + b"\x00" * 256
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payload, headers={"content-type": "audio/mpeg"})
+
+    src = direct_mp3.DirectMp3Source(
+        rate_limiter=_fast_limiter(),
+        transport=_mock_transport(handler),
+    )
+    try:
+        result = src.download("https://example.com/audio.mp3")
+    finally:
+        src.close()
+    assert result == payload
+
+    attrs = span_recorder.attrs("transcript.download")
+    assert attrs["transcript.source_name"] == "direct_mp3"
+    assert attrs["transcript.bytes"] == len(payload)
+    duration_ms = attrs["transcript.duration_ms"]
+    assert isinstance(duration_ms, int) and duration_ms >= 0

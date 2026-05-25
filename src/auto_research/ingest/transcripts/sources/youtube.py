@@ -39,10 +39,13 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Final, Protocol
+
+from opentelemetry import trace
 
 from auto_research.ingest.rate_limit import TokenBucket
 from auto_research.ingest.transcripts._base import TranscriptConfigError
@@ -115,6 +118,7 @@ _AUDIO_MAGIC_PREFIXES: Final[tuple[bytes, ...]] = (
 # `ftyp` at byte offset 4. These need offset-aware matching.
 
 _logger = logging.getLogger(__name__)
+_tracer = trace.get_tracer(__name__)
 
 
 def _looks_like_audio(head: bytes) -> bool:
@@ -292,66 +296,75 @@ class YouTubeSource:
         company = TICKER_QUERIES.get(ticker_upper, ticker_upper)
         query = f"{company} earnings call Q{quarter} {year}"
 
-        self.rate_limiter.wait()
-        opts = {
-            "quiet": True,
-            "extract_flat": True,
-            "skip_download": True,
-            "no_warnings": True,
-        }
-        # No try/except here: infrastructure failures from yt-dlp
-        # propagate to the orchestrator's error-row branch. The
-        # entry-processing loop below has its own None-filter so a
-        # blocked search result doesn't crash this call.
-        with self._factory(opts) as ydl:
-            info = ydl.extract_info(
-                f"ytsearch{self._search_limit}:{query}", download=False
-            )
+        with _tracer.start_as_current_span("transcript.find_audio_url") as span:
+            span.set_attribute("transcript.ticker", ticker_upper)
+            span.set_attribute("transcript.year", year)
+            span.set_attribute("transcript.quarter", quarter)
+            span.set_attribute("transcript.query", query)
 
-        entries = (info or {}).get("entries") or []
-        seen_in_band = 0
-        for entry in entries:
-            if entry is None:
-                # yt-dlp emits None for results that were discovered
-                # but couldn't be flat-extracted (private / blocked
-                # / age-gated / region-restricted). Skip silently.
-                continue
-            duration = entry.get("duration")
-            if not isinstance(duration, int | float):
-                continue
-            if not (self._min_duration_sec <= duration <= self._max_duration_sec):
-                continue
-            seen_in_band += 1
-            title = entry.get("title") or ""
-            if not _title_matches_call(
-                title,
-                company=company,
-                ticker=ticker_upper,
-                year=year,
-                quarter=quarter,
-            ):
-                _logger.debug(
-                    "youtube: in-band but title rejected for %s %sQ%s: %r",
-                    ticker_upper,
-                    year,
-                    quarter,
-                    title[:120],
+            self.rate_limiter.wait()
+            opts = {
+                "quiet": True,
+                "extract_flat": True,
+                "skip_download": True,
+                "no_warnings": True,
+            }
+            # No try/except here: infrastructure failures from yt-dlp
+            # propagate to the orchestrator's error-row branch. The
+            # entry-processing loop below has its own None-filter so a
+            # blocked search result doesn't crash this call.
+            with self._factory(opts) as ydl:
+                info = ydl.extract_info(
+                    f"ytsearch{self._search_limit}:{query}", download=False
                 )
-                continue
-            url = entry.get("webpage_url") or entry.get("url")
-            if isinstance(url, str) and url.startswith("https://"):
-                return url
-        _logger.info(
-            "youtube: no title-and-duration match for %s %sQ%s "
-            "(query=%r, in_band=%d, total=%d)",
-            ticker_upper,
-            year,
-            quarter,
-            query,
-            seen_in_band,
-            len(entries),
-        )
-        return None
+
+            entries = (info or {}).get("entries") or []
+            span.set_attribute("transcript.result_count", len(entries))
+            seen_in_band = 0
+            for entry in entries:
+                if entry is None:
+                    # yt-dlp emits None for results that were discovered
+                    # but couldn't be flat-extracted (private / blocked
+                    # / age-gated / region-restricted). Skip silently.
+                    continue
+                duration = entry.get("duration")
+                if not isinstance(duration, int | float):
+                    continue
+                if not (self._min_duration_sec <= duration <= self._max_duration_sec):
+                    continue
+                seen_in_band += 1
+                title = entry.get("title") or ""
+                if not _title_matches_call(
+                    title,
+                    company=company,
+                    ticker=ticker_upper,
+                    year=year,
+                    quarter=quarter,
+                ):
+                    _logger.debug(
+                        "youtube: in-band but title rejected for %s %sQ%s: %r",
+                        ticker_upper,
+                        year,
+                        quarter,
+                        title[:120],
+                    )
+                    continue
+                url = entry.get("webpage_url") or entry.get("url")
+                if isinstance(url, str) and url.startswith("https://"):
+                    span.set_attribute("transcript.matched", True)
+                    return url
+            span.set_attribute("transcript.matched", False)
+            _logger.info(
+                "youtube: no title-and-duration match for %s %sQ%s "
+                "(query=%r, in_band=%d, total=%d)",
+                ticker_upper,
+                year,
+                quarter,
+                query,
+                seen_in_band,
+                len(entries),
+            )
+            return None
 
     def download(self, audio_url: str) -> bytes:
         """Extract the best audio stream at `audio_url` and return its bytes.
@@ -367,75 +380,87 @@ class YouTubeSource:
         `AudioSource` Protocol, these are infrastructure failures —
         the orchestrator routes them to a retryable error row.
         """
-        self.rate_limiter.wait()
-        with tempfile.TemporaryDirectory(prefix="yt-") as tmpdir:
-            outtmpl = str(Path(tmpdir) / "audio.%(ext)s")
-            opts = {
-                "quiet": True,
-                "no_warnings": True,
-                # `bestaudio` selects YouTube's highest-quality
-                # audio-only stream. We deliberately do NOT fall
-                # back to `best` (the full A/V container) — that
-                # would silently 4-5x storage and download cost,
-                # write a misleading `.bin` filename downstream,
-                # and mask format-availability regressions. If no
-                # audio-only stream is available, yt-dlp raises
-                # and the orchestrator records an error row.
-                "format": "bestaudio",
-                "outtmpl": outtmpl,
-                "noplaylist": True,
-                "skip_download": False,
-                # Throttle yt-dlp's INTERNAL request volume. Our
-                # TokenBucket only sees one wait() per download
-                # call, but yt-dlp internally fetches the manifest
-                # plus N segments — without these, that's 20-100
-                # unthrottled requests to YouTube CDNs per call.
-                "sleep_interval": _YTDLP_SLEEP_INTERVAL,
-                "max_sleep_interval": _YTDLP_MAX_SLEEP_INTERVAL,
-                "sleep_interval_requests": _YTDLP_SLEEP_INTERVAL,
-            }
-            try:
-                with self._factory(opts) as ydl:
-                    ydl.extract_info(audio_url, download=True)
-            except RuntimeError:
-                # Already a typed error from this source — propagate as-is.
-                raise
-            except Exception as exc:
-                raise RuntimeError(
-                    f"yt-dlp failed to fetch audio from {audio_url}: {exc}"
-                ) from exc
+        with _tracer.start_as_current_span("transcript.download") as span:
+            span.set_attribute("transcript.source_name", SOURCE_NAME)
+            start_ns = time.perf_counter_ns()
+            # rate_limiter.wait() lives INSIDE the span so duration_ms
+            # reflects total wall-clock from the caller's perspective,
+            # matching direct_mp3.download. Excluding it would hide
+            # rate-limit pressure as a diagnostic signal.
+            self.rate_limiter.wait()
+            with tempfile.TemporaryDirectory(prefix="yt-") as tmpdir:
+                outtmpl = str(Path(tmpdir) / "audio.%(ext)s")
+                opts = {
+                    "quiet": True,
+                    "no_warnings": True,
+                    # `bestaudio` selects YouTube's highest-quality
+                    # audio-only stream. We deliberately do NOT fall
+                    # back to `best` (the full A/V container) — that
+                    # would silently 4-5x storage and download cost,
+                    # write a misleading `.bin` filename downstream,
+                    # and mask format-availability regressions. If no
+                    # audio-only stream is available, yt-dlp raises
+                    # and the orchestrator records an error row.
+                    "format": "bestaudio",
+                    "outtmpl": outtmpl,
+                    "noplaylist": True,
+                    "skip_download": False,
+                    # Throttle yt-dlp's INTERNAL request volume. Our
+                    # TokenBucket only sees one wait() per download
+                    # call, but yt-dlp internally fetches the manifest
+                    # plus N segments — without these, that's 20-100
+                    # unthrottled requests to YouTube CDNs per call.
+                    "sleep_interval": _YTDLP_SLEEP_INTERVAL,
+                    "max_sleep_interval": _YTDLP_MAX_SLEEP_INTERVAL,
+                    "sleep_interval_requests": _YTDLP_SLEEP_INTERVAL,
+                }
+                try:
+                    with self._factory(opts) as ydl:
+                        ydl.extract_info(audio_url, download=True)
+                except RuntimeError:
+                    # Already a typed error from this source — propagate as-is.
+                    raise
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"yt-dlp failed to fetch audio from {audio_url}: {exc}"
+                    ) from exc
 
-            # Pick the matching audio file by outtmpl pattern (NOT
-            # just "largest in tmpdir"): yt-dlp emits exactly one
-            # file matching `audio.*` for our config; any other
-            # artifact (e.g. .info.json if a future opt enables it)
-            # is rejected.
-            audio_files = sorted(Path(tmpdir).glob("audio.*"))
-            if not audio_files:
-                raise RuntimeError(
-                    f"yt-dlp completed without writing output for {audio_url}"
-                )
-            if len(audio_files) > 1:
-                # Pick the largest among matching — usually only one,
-                # but be defensive about future post-processor changes.
-                audio_file = max(audio_files, key=lambda p: p.stat().st_size)
-            else:
-                audio_file = audio_files[0]
+                # Pick the matching audio file by outtmpl pattern (NOT
+                # just "largest in tmpdir"): yt-dlp emits exactly one
+                # file matching `audio.*` for our config; any other
+                # artifact (e.g. .info.json if a future opt enables it)
+                # is rejected.
+                audio_files = sorted(Path(tmpdir).glob("audio.*"))
+                if not audio_files:
+                    raise RuntimeError(
+                        f"yt-dlp completed without writing output for {audio_url}"
+                    )
+                if len(audio_files) > 1:
+                    # Pick the largest among matching — usually only one,
+                    # but be defensive about future post-processor changes.
+                    audio_file = max(audio_files, key=lambda p: p.stat().st_size)
+                else:
+                    audio_file = audio_files[0]
 
-            audio = audio_file.read_bytes()
-            if len(audio) < _MIN_AUDIO_BYTES:
-                raise RuntimeError(
-                    f"yt-dlp output for {audio_url} is suspiciously small "
-                    f"({len(audio)} bytes < {_MIN_AUDIO_BYTES} floor); likely an "
-                    "error page or partial fetch."
+                audio = audio_file.read_bytes()
+                if len(audio) < _MIN_AUDIO_BYTES:
+                    raise RuntimeError(
+                        f"yt-dlp output for {audio_url} is suspiciously small "
+                        f"({len(audio)} bytes < {_MIN_AUDIO_BYTES} floor); likely an "
+                        "error page or partial fetch."
+                    )
+                if not _looks_like_audio(audio[:16]):
+                    raise RuntimeError(
+                        f"yt-dlp output for {audio_url} does not look like audio "
+                        f"(first bytes: {audio[:16]!r}); likely an HTML challenge or "
+                        "JSON error response."
+                    )
+                span.set_attribute("transcript.bytes", len(audio))
+                span.set_attribute(
+                    "transcript.duration_ms",
+                    (time.perf_counter_ns() - start_ns) // 1_000_000,
                 )
-            if not _looks_like_audio(audio[:16]):
-                raise RuntimeError(
-                    f"yt-dlp output for {audio_url} does not look like audio "
-                    f"(first bytes: {audio[:16]!r}); likely an HTML challenge or "
-                    "JSON error response."
-                )
-            return audio
+                return audio
 
 
 __all__ = [

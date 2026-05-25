@@ -40,6 +40,9 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import urlparse
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
 from auto_research.ingest import _http, manifest
 from auto_research.ingest.transcripts import registry
 from auto_research.ingest.transcripts._base import (
@@ -49,6 +52,7 @@ from auto_research.ingest.transcripts._base import (
     TranscriptConfigError,
 )
 from auto_research.ingest.transcripts._whisper import WhisperEngine
+from auto_research.telemetry import truncate_status_description as _truncate
 
 SOURCE: Final = "transcripts"
 
@@ -66,6 +70,7 @@ _CACHED_STATUSES: Final = ("ok", "no_coverage")
 _UNREGISTERED_SUFFIX: Final = "unregistered"
 
 _logger = logging.getLogger(__name__)
+_tracer = trace.get_tracer(__name__)
 
 
 def _open_direct_mp3() -> AudioSource:
@@ -251,87 +256,57 @@ def fetch_transcript(
     ticker_upper = ticker.upper()
     doc_id = _doc_id(ticker_upper, year, quarter)
 
-    # Idempotency check first — cheapest path.
-    if manifest.contains(
-        manifest_path, source=SOURCE, doc_id=doc_id, status=_CACHED_STATUSES
-    ):
-        _logger.debug("transcript cached: %s", doc_id)
-        return None
+    with _tracer.start_as_current_span("transcript.fetch") as span:
+        span.set_attribute("transcript.ticker", ticker_upper)
+        span.set_attribute("transcript.year", year)
+        span.set_attribute("transcript.quarter", quarter)
 
-    # Unregistered ticker → retryable error row, not a permanent
-    # cache lock. When the registry is later populated for this
-    # ticker, the next call short-circuits past this branch and
-    # fetches normally.
-    source_name = registry.lookup(ticker_upper)
-    if source_name is None:
-        _logger.info("no transcript source registered for %s", ticker_upper)
-        manifest.append(
-            manifest_path,
-            [_error_row(ticker_upper, year, quarter, source_name=_UNREGISTERED_SUFFIX)],
-            unique_keys=_ERROR_DEDUP_KEYS,
-        )
-        return None
-
-    owns_source = source is None
-    if source is None:
-        source = _open_source(source_name)
-    try:
-        # find_audio_url may raise on infrastructure failures
-        # (network / yt-dlp version drift / etc.). Per the
-        # AudioSource Protocol, None means 'this source has no
-        # coverage for this quarter' (permanent), while a raise
-        # means 'infrastructure broke' (retryable). Map them to
-        # no_coverage vs. error rows accordingly so a transient
-        # failure doesn't poison the cache with a permanent miss.
-        try:
-            audio_url = source.find_audio_url(ticker_upper, year, quarter)
-        except Exception:
-            _logger.warning(
-                "source %s raised during find_audio_url for %s %sQ%s — recording error",
-                source_name,
-                ticker_upper,
-                year,
-                quarter,
-            )
-            manifest.append(
-                manifest_path,
-                [_error_row(ticker_upper, year, quarter, source_name=source_name)],
-                unique_keys=_ERROR_DEDUP_KEYS,
-            )
-            raise
-
-        if audio_url is None:
-            _logger.info(
-                "source %s reports no coverage for %s %sQ%s",
-                source_name,
-                ticker_upper,
-                year,
-                quarter,
-            )
-            manifest.append(
-                manifest_path,
-                [_no_coverage_row(ticker_upper, year, quarter, source_name=source_name)],
-            )
+        # Idempotency check first — cheapest path.
+        if manifest.contains(
+            manifest_path, source=SOURCE, doc_id=doc_id, status=_CACHED_STATUSES
+        ):
+            span.set_attribute("transcript.outcome", "cached")
+            _logger.debug("transcript cached: %s", doc_id)
             return None
 
-        # Engine constructed here — AFTER find_audio_url so a coverage-
-        # survey loop dominated by None responses never pays the
-        # OPENAI_API_KEY / ffmpeg cost, but BEFORE source.download so a
-        # missing env doesn't leave an orphan audio file on disk.
-        owns_engine = engine is None
-        if engine is None:
-            engine = WhisperEngine()
+        # Unregistered ticker → retryable error row, not a permanent
+        # cache lock. When the registry is later populated for this
+        # ticker, the next call short-circuits past this branch and
+        # fetches normally.
+        source_name = registry.lookup(ticker_upper)
+        if source_name is None:
+            span.set_attribute("transcript.source_name", _UNREGISTERED_SUFFIX)
+            _logger.info("no transcript source registered for %s", ticker_upper)
+            manifest.append(
+                manifest_path,
+                [_error_row(ticker_upper, year, quarter, source_name=_UNREGISTERED_SUFFIX)],
+                unique_keys=_ERROR_DEDUP_KEYS,
+            )
+            # outcome set AFTER manifest.append so a manifest write
+            # failure surfaces as a status=ERROR span with the manifest
+            # exception (via OTel auto-recording), not as a misleading
+            # outcome=unregistered + ERROR mix.
+            span.set_attribute("transcript.outcome", "unregistered")
+            return None
+
+        span.set_attribute("transcript.source_name", source_name)
+
+        owns_source = source is None
+        if source is None:
+            source = _open_source(source_name)
         try:
+            # find_audio_url may raise on infrastructure failures
+            # (network / yt-dlp version drift / etc.). Per the
+            # AudioSource Protocol, None means 'this source has no
+            # coverage for this quarter' (permanent), while a raise
+            # means 'infrastructure broke' (retryable). Map them to
+            # no_coverage vs. error rows accordingly so a transient
+            # failure doesn't poison the cache with a permanent miss.
             try:
-                content = source.download(audio_url)
-            except Exception:
-                # Infrastructure failure during download (yt-dlp
-                # crash, network blip, anti-bot wall). Same logic
-                # as find_audio_url: record a retryable error row
-                # rather than letting the exception propagate
-                # without manifest evidence.
+                audio_url = source.find_audio_url(ticker_upper, year, quarter)
+            except Exception as exc:
                 _logger.warning(
-                    "source %s raised during download for %s %sQ%s — recording error",
+                    "source %s raised during find_audio_url for %s %sQ%s — recording error",
                     source_name,
                     ticker_upper,
                     year,
@@ -342,14 +317,13 @@ def fetch_transcript(
                     [_error_row(ticker_upper, year, quarter, source_name=source_name)],
                     unique_keys=_ERROR_DEDUP_KEYS,
                 )
+                span.set_attribute("transcript.outcome", "error")
+                span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
                 raise
 
-            if not content:
-                # Empty body slipped past the source's own retries.
-                # Retryable: don't poison the cache with a permanent
-                # no_coverage on a transient host hiccup.
-                _logger.warning(
-                    "source %s returned empty body for %s %sQ%s; recording error",
+            if audio_url is None:
+                _logger.info(
+                    "source %s reports no coverage for %s %sQ%s",
                     source_name,
                     ticker_upper,
                     year,
@@ -357,52 +331,133 @@ def fetch_transcript(
                 )
                 manifest.append(
                     manifest_path,
-                    [_error_row(ticker_upper, year, quarter, source_name=source_name)],
-                    unique_keys=_ERROR_DEDUP_KEYS,
+                    [_no_coverage_row(ticker_upper, year, quarter, source_name=source_name)],
                 )
+                span.set_attribute("transcript.outcome", "no_coverage")
                 return None
 
-            sha = hashlib.sha256(content).hexdigest()
-            dest = _destination_path(ticker_upper, year, quarter, raw_root, audio_url)
-            _http.atomic_write_bytes(dest, content)
+            # Engine constructed here — AFTER find_audio_url so a coverage-
+            # survey loop dominated by None responses never pays the
+            # OPENAI_API_KEY / ffmpeg cost, but BEFORE source.download so a
+            # missing env doesn't leave an orphan audio file on disk.
+            owns_engine = engine is None
+            if engine is None:
+                engine = WhisperEngine()
             try:
-                transcript = engine.transcribe(
-                    content,
-                    ticker=ticker_upper,
-                    year=year,
-                    quarter=quarter,
-                    event_datetime=event_datetime,
-                )
-            except Exception:
-                # Audio is on disk but transcription failed. Record
-                # an error row so the operator can see the orphan
-                # has a tracked failure (otherwise the file looks
-                # untracked); the row is NOT cached so the next run
-                # retries and overwrites.
-                _logger.warning(
-                    "Whisper transcribe failed for %s %sQ%s — audio at %s, "
-                    "recording error row",
-                    ticker_upper,
-                    year,
-                    quarter,
-                    dest,
-                )
-                manifest.append(
-                    manifest_path,
-                    [_error_row(ticker_upper, year, quarter, source_name=source_name)],
-                    unique_keys=_ERROR_DEDUP_KEYS,
-                )
-                raise
-            manifest.append(manifest_path, [_ok_row(transcript, source_name, dest, sha)])
-            return transcript
+                try:
+                    content = source.download(audio_url)
+                except Exception as exc:
+                    # Infrastructure failure during download (yt-dlp
+                    # crash, network blip, anti-bot wall). Same logic
+                    # as find_audio_url: record a retryable error row
+                    # rather than letting the exception propagate
+                    # without manifest evidence.
+                    _logger.warning(
+                        "source %s raised during download for %s %sQ%s — recording error",
+                        source_name,
+                        ticker_upper,
+                        year,
+                        quarter,
+                    )
+                    manifest.append(
+                        manifest_path,
+                        [_error_row(ticker_upper, year, quarter, source_name=source_name)],
+                        unique_keys=_ERROR_DEDUP_KEYS,
+                    )
+                    span.set_attribute("transcript.outcome", "error")
+                    span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+                    raise
+
+                if not content:
+                    # Empty body slipped past the source's own retries.
+                    # Retryable: don't poison the cache with a permanent
+                    # no_coverage on a transient host hiccup.
+                    _logger.warning(
+                        "source %s returned empty body for %s %sQ%s; recording error",
+                        source_name,
+                        ticker_upper,
+                        year,
+                        quarter,
+                    )
+                    manifest.append(
+                        manifest_path,
+                        [_error_row(ticker_upper, year, quarter, source_name=source_name)],
+                        unique_keys=_ERROR_DEDUP_KEYS,
+                    )
+                    span.set_attribute("transcript.outcome", "error")
+                    # Match the exception branches' status discipline so
+                    # dashboards filtering by OTel status surface empty-body
+                    # failures alongside SDK / network raises.
+                    span.set_status(
+                        Status(StatusCode.ERROR, "source returned empty body")
+                    )
+                    return None
+
+                sha = hashlib.sha256(content).hexdigest()
+                dest = _destination_path(ticker_upper, year, quarter, raw_root, audio_url)
+                _http.atomic_write_bytes(dest, content)
+                try:
+                    transcript = engine.transcribe(
+                        content,
+                        ticker=ticker_upper,
+                        year=year,
+                        quarter=quarter,
+                        event_datetime=event_datetime,
+                    )
+                except Exception as exc:
+                    # Audio is on disk but transcription failed. Record
+                    # an error row so the operator can see the orphan
+                    # has a tracked failure (otherwise the file looks
+                    # untracked); the row is NOT cached so the next run
+                    # retries and overwrites.
+                    _logger.warning(
+                        "Whisper transcribe failed for %s %sQ%s — audio at %s, "
+                        "recording error row",
+                        ticker_upper,
+                        year,
+                        quarter,
+                        dest,
+                    )
+                    manifest.append(
+                        manifest_path,
+                        [_error_row(ticker_upper, year, quarter, source_name=source_name)],
+                        unique_keys=_ERROR_DEDUP_KEYS,
+                    )
+                    span.set_attribute("transcript.outcome", "error")
+                    span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+                    raise
+                manifest.append(manifest_path, [_ok_row(transcript, source_name, dest, sha)])
+                span.set_attribute("transcript.outcome", "ok")
+                return transcript
+            finally:
+                if owns_engine:
+                    # Swallow close-time exceptions so a cleanup failure
+                    # doesn't crash a successful transcription AND doesn't
+                    # produce a contradictory outcome=ok + status=ERROR
+                    # span. close() failures are a separate concern from
+                    # transcription success; surface them via the logger.
+                    try:
+                        engine.close()
+                    except Exception:
+                        _logger.exception(
+                            "engine.close() raised for %s %sQ%s; ignoring",
+                            ticker_upper,
+                            year,
+                            quarter,
+                        )
         finally:
-            if owns_engine:
-                engine.close()
-    finally:
-        if owns_source:
-            close_fn = getattr(source, "close", None)
-            if callable(close_fn):
-                close_fn()
+            if owns_source:
+                close_fn = getattr(source, "close", None)
+                if callable(close_fn):
+                    try:
+                        close_fn()
+                    except Exception:
+                        _logger.exception(
+                            "source.close() raised for %s %sQ%s; ignoring",
+                            ticker_upper,
+                            year,
+                            quarter,
+                        )
 
 
 __all__ = [

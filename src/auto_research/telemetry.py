@@ -15,11 +15,35 @@ from __future__ import annotations
 
 import base64
 import os
+import sys
 import threading
 from typing import Final
 
 _INIT_LOCK: Final[threading.Lock] = threading.Lock()
 _INITIALIZED: bool = False
+_TRY_INIT_WARNED: bool = False
+
+# Cap for exception strings shipped in OTel span.status descriptions.
+# OTLP / Langfuse / gRPC all impose practical limits, and OTel does NOT
+# truncate Status.description like it does span attributes — a multi-MB
+# anti-bot HTML body in a yt-dlp ExtractorError would otherwise ride
+# along on every error span. 512 chars is enough to identify the failure
+# class without bloating the payload.
+_STATUS_DESCRIPTION_MAX_CHARS: Final = 512
+
+
+def truncate_status_description(message: str) -> str:
+    """Cap a span.status description so huge exception payloads (anti-bot
+    HTML, raw response bodies) don't ride along on every error span.
+
+    Returns the input unchanged if under the cap, otherwise the prefix
+    plus a `...[truncated N more chars]` suffix so reviewers know data
+    was elided.
+    """
+    if len(message) <= _STATUS_DESCRIPTION_MAX_CHARS:
+        return message
+    remaining = len(message) - _STATUS_DESCRIPTION_MAX_CHARS
+    return f"{message[:_STATUS_DESCRIPTION_MAX_CHARS]}...[truncated {remaining} more chars]"
 
 
 class TelemetryNotConfiguredError(RuntimeError):
@@ -79,3 +103,43 @@ def init_telemetry(*, service_name: str = "auto-research") -> None:
 def is_initialized() -> bool:
     """Return True iff init_telemetry has succeeded in this process."""
     return _INITIALIZED
+
+
+def try_init_telemetry(*, service_name: str = "auto-research") -> bool:
+    """Best-effort `init_telemetry()` for CLI / interactive entry points.
+
+    Returns True iff telemetry is initialized (either now or already).
+    Any failure — missing env (`TelemetryNotConfiguredError`), unreachable
+    OTLP endpoint, missing/broken `traceloop-sdk` install, malformed URL,
+    etc. — is caught, a single one-line warning is printed to stderr, and
+    False is returned. The CLI must remain usable without a running
+    Langfuse; a misconfigured exporter must not abort the user's work.
+
+    The warning is deduplicated per process via `_TRY_INIT_WARNED`;
+    re-running a command does not spam stderr.
+
+    Tests and the integration smoke continue to call `init_telemetry`
+    directly so a misconfigured environment fails loud, not silently.
+    """
+    global _TRY_INIT_WARNED
+    try:
+        init_telemetry(service_name=service_name)
+    except TelemetryNotConfiguredError as exc:
+        if not _TRY_INIT_WARNED:
+            print(f"warn: telemetry disabled - {exc}", file=sys.stderr)
+            _TRY_INIT_WARNED = True
+        return False
+    except Exception as exc:
+        # Broad catch is deliberate: any failure to initialize Traceloop
+        # (DNS, ImportError, version drift, malformed endpoint) is a
+        # config problem on the operator's side, not a reason to block
+        # ingest/extract from running. Surface it on stderr once and
+        # carry on with spans as no-ops.
+        if not _TRY_INIT_WARNED:
+            print(
+                f"warn: telemetry init failed ({exc.__class__.__name__}): {exc}",
+                file=sys.stderr,
+            )
+            _TRY_INIT_WARNED = True
+        return False
+    return True

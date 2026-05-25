@@ -28,6 +28,7 @@ from auto_research.ingest.transcripts.sources.youtube import (
     _title_matches_call,
     _year_tokens,
 )
+from tests._otel_helpers import SpanRecorder
 
 
 def _fast_limiter() -> TokenBucket:
@@ -612,3 +613,55 @@ def test_short_ticker_overrides_present() -> None:
             f"{ticker} needs an override — its symbol is a common "
             "English substring and bare-symbol queries false-match."
         )
+
+
+# ---------- OTel instrumentation (refs #52) ----------
+
+
+def test_find_audio_url_emits_span_matched_true(
+    span_recorder: SpanRecorder,
+) -> None:
+    """A matched search result records matched=True + result_count."""
+    src = _make_source(
+        search_response={
+            "entries": [
+                _entry(
+                    title="NVIDIA Q1 FY25 Earnings Call",
+                    webpage_url="https://youtube.com/watch?v=match",
+                ),
+            ],
+        }
+    )
+    url = src.find_audio_url("NVDA", 2025, 1)
+    assert url == "https://youtube.com/watch?v=match"
+
+    attrs = span_recorder.attrs("transcript.find_audio_url")
+    assert attrs["transcript.ticker"] == "NVDA"
+    assert attrs["transcript.year"] == 2025
+    assert attrs["transcript.quarter"] == 1
+    assert attrs["transcript.matched"] is True
+    assert attrs["transcript.result_count"] == 1
+
+
+def test_find_audio_url_emits_span_matched_false(
+    span_recorder: SpanRecorder,
+) -> None:
+    src = _make_source(search_response={"entries": []})
+    assert src.find_audio_url("NVDA", 2025, 1) is None
+    attrs = span_recorder.attrs("transcript.find_audio_url")
+    assert attrs["transcript.matched"] is False
+    assert attrs["transcript.result_count"] == 0
+
+
+def test_download_emits_span(
+    span_recorder: SpanRecorder,
+) -> None:
+    src = _make_source(audio_bytes=_VALID_AUDIO_BYTES)
+    audio = src.download("https://youtube.com/watch?v=fake")
+    attrs = span_recorder.attrs("transcript.download")
+    assert attrs["transcript.source_name"] == "youtube"
+    assert attrs["transcript.bytes"] == len(audio)
+    # duration_ms is wall-clock; a fast in-memory fake completes in <1ms,
+    # so just assert non-negative.
+    duration_ms = attrs["transcript.duration_ms"]
+    assert isinstance(duration_ms, int) and duration_ms >= 0

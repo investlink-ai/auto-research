@@ -27,6 +27,7 @@ from auto_research.ingest.transcripts import (
     fetch_transcript,
     registry,
 )
+from tests._otel_helpers import SpanRecorder
 
 
 class _FakeSource:
@@ -725,3 +726,206 @@ def test_download_exception_records_error_row(
     statuses = table.column("status").to_pylist()
     assert "error" in statuses, "transient download failure must be recorded"
     assert "no_coverage" not in statuses
+
+
+# ---------- OTel instrumentation (refs #52) ----------
+
+
+def test_fetch_transcript_span_outcome_cached(
+    registered_acme: None,
+    span_recorder: SpanRecorder,
+    tmp_path: Path,
+) -> None:
+    """Manifest already has an `ok` row → outcome=cached, no source call."""
+    manifest_path = tmp_path / "manifest.parquet"
+    source = _FakeSource(audio_url="https://example.com/a.mp3")
+    engine = _FakeEngine(_canned_transcript())
+
+    # First call populates the manifest.
+    fetch_transcript(
+        "ACME",
+        2024,
+        2,
+        raw_root=tmp_path / "raw",
+        manifest_path=manifest_path,
+        source=source,
+        engine=engine,
+        event_datetime=datetime(2024, 5, 22, 20, 30, tzinfo=UTC),
+    )
+    # Second call short-circuits via the cache check.
+    fetch_transcript(
+        "ACME",
+        2024,
+        2,
+        raw_root=tmp_path / "raw",
+        manifest_path=manifest_path,
+        source=source,
+        engine=engine,
+        event_datetime=datetime(2024, 5, 22, 20, 30, tzinfo=UTC),
+    )
+
+    spans = span_recorder.by_name("transcript.fetch")
+    assert len(spans) == 2
+    assert spans[0].attributes is not None
+    assert spans[1].attributes is not None
+    assert spans[0].attributes["transcript.outcome"] == "ok"
+    assert spans[1].attributes["transcript.outcome"] == "cached"
+
+
+def test_fetch_transcript_span_outcome_unregistered(
+    span_recorder: SpanRecorder,
+    tmp_path: Path,
+) -> None:
+    """Ticker absent from registry → outcome=unregistered."""
+    fetch_transcript(
+        "ZZZ_UNKNOWN",
+        2024,
+        1,
+        raw_root=tmp_path / "raw",
+        manifest_path=tmp_path / "manifest.parquet",
+        event_datetime=datetime(2024, 4, 1, tzinfo=UTC),
+    )
+    attrs = span_recorder.attrs("transcript.fetch")
+    assert attrs["transcript.ticker"] == "ZZZ_UNKNOWN"
+    assert attrs["transcript.outcome"] == "unregistered"
+    assert attrs["transcript.source_name"] == "unregistered"
+
+
+def test_fetch_transcript_span_outcome_no_coverage(
+    registered_acme: None,
+    span_recorder: SpanRecorder,
+    tmp_path: Path,
+) -> None:
+    source = _FakeSource(audio_url=None)
+    fetch_transcript(
+        "ACME",
+        2024,
+        2,
+        raw_root=tmp_path / "raw",
+        manifest_path=tmp_path / "manifest.parquet",
+        source=source,
+        event_datetime=datetime(2024, 5, 22, 20, 30, tzinfo=UTC),
+    )
+    attrs = span_recorder.attrs("transcript.fetch")
+    assert attrs["transcript.outcome"] == "no_coverage"
+    assert attrs["transcript.source_name"] == "direct_mp3"
+
+
+def test_fetch_transcript_span_outcome_error_on_source_raise(
+    registered_acme: None,
+    span_recorder: SpanRecorder,
+    tmp_path: Path,
+) -> None:
+    """find_audio_url raising → outcome=error + span.status=ERROR."""
+    from opentelemetry.trace import StatusCode
+
+    class _RaisingSource:
+        name = "direct_mp3"
+
+        def find_audio_url(self, ticker: str, year: int, quarter: int) -> str | None:
+            raise RuntimeError("infrastructure down")
+
+        def download(self, audio_url: str) -> bytes:  # pragma: no cover
+            raise AssertionError("download should not be called")
+
+        def close(self) -> None:
+            pass
+
+    with pytest.raises(RuntimeError):
+        fetch_transcript(
+            "ACME",
+            2024,
+            2,
+            raw_root=tmp_path / "raw",
+            manifest_path=tmp_path / "manifest.parquet",
+            source=_RaisingSource(),
+            event_datetime=datetime(2024, 5, 22, 20, 30, tzinfo=UTC),
+        )
+    span = span_recorder.one("transcript.fetch")
+    attrs = span_recorder.attrs("transcript.fetch")
+    assert attrs["transcript.outcome"] == "error"
+    assert span.status.status_code == StatusCode.ERROR
+
+
+def test_fetch_transcript_span_outcome_ok(
+    registered_acme: None,
+    span_recorder: SpanRecorder,
+    tmp_path: Path,
+) -> None:
+    source = _FakeSource(audio_url="https://example.com/a.mp3")
+    engine = _FakeEngine(_canned_transcript())
+    fetch_transcript(
+        "ACME",
+        2024,
+        2,
+        raw_root=tmp_path / "raw",
+        manifest_path=tmp_path / "manifest.parquet",
+        source=source,
+        engine=engine,
+        event_datetime=datetime(2024, 5, 22, 20, 30, tzinfo=UTC),
+    )
+    attrs = span_recorder.attrs("transcript.fetch")
+    assert attrs["transcript.outcome"] == "ok"
+    assert attrs["transcript.ticker"] == "ACME"
+    assert attrs["transcript.year"] == 2024
+    assert attrs["transcript.quarter"] == 2
+    assert attrs["transcript.source_name"] == "direct_mp3"
+
+
+def test_fetch_transcript_empty_body_sets_error_status(
+    registered_acme: None,
+    span_recorder: SpanRecorder,
+    tmp_path: Path,
+) -> None:
+    """Empty source body sets outcome=error AND span.status=ERROR so
+    dashboards filtering by OTel status surface this failure mode
+    consistently with the exception branches. Refs #52 review."""
+    from opentelemetry.trace import StatusCode
+
+    source = _FakeSource(audio_url="https://example.com/a.mp3", payload=b"")
+    # Inject a fake engine — orchestrator constructs the real WhisperEngine
+    # before the empty-body branch fires, and CI has no OPENAI_API_KEY.
+    engine = _FakeEngine(_canned_transcript())
+    fetch_transcript(
+        "ACME",
+        2024,
+        2,
+        raw_root=tmp_path / "raw",
+        manifest_path=tmp_path / "manifest.parquet",
+        source=source,
+        engine=engine,
+        event_datetime=datetime(2024, 5, 22, 20, 30, tzinfo=UTC),
+    )
+    span = span_recorder.one("transcript.fetch")
+    assert span.attributes is not None
+    assert span.attributes["transcript.outcome"] == "error"
+    assert span.status.status_code == StatusCode.ERROR
+
+
+def test_fetch_transcript_swallows_engine_close_exception(
+    registered_acme: None,
+    span_recorder: SpanRecorder,
+    tmp_path: Path,
+) -> None:
+    """A successful transcription with a close()-time failure must
+    still record outcome=ok and must not raise. Refs #52 review."""
+
+    class _ClosingFailingEngine(_FakeEngine):
+        def close(self) -> None:
+            raise RuntimeError("ffmpeg subprocess cleanup failed")
+
+    source = _FakeSource(audio_url="https://example.com/a.mp3")
+    engine = _ClosingFailingEngine(_canned_transcript())
+    transcript = fetch_transcript(
+        "ACME",
+        2024,
+        2,
+        raw_root=tmp_path / "raw",
+        manifest_path=tmp_path / "manifest.parquet",
+        source=source,
+        engine=engine,
+        event_datetime=datetime(2024, 5, 22, 20, 30, tzinfo=UTC),
+    )
+    assert transcript is not None
+    attrs = span_recorder.attrs("transcript.fetch")
+    assert attrs["transcript.outcome"] == "ok"

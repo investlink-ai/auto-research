@@ -645,3 +645,111 @@ def test_check_mlflow_returns_error_on_import_failure(
     assert res.name == "mlflow"
     assert res.status == "error"
     assert "import failed" in res.detail
+
+
+# --------------------------------------------------------------------------- #
+# Telemetry wiring                                                             #
+# --------------------------------------------------------------------------- #
+
+
+def test_ingest_edgar_initializes_telemetry(runner: CliRunner) -> None:
+    """ingest edgar must call try_init_telemetry at command start (refs #52)."""
+    with (
+        patch("auto_research.cli.try_init_telemetry", autospec=True) as mock_init,
+        patch("auto_research.cli.fetch_filings_for_cik", autospec=True) as mock_fetch,
+    ):
+        mock_init.return_value = True
+        mock_fetch.return_value = []
+        result = runner.invoke(
+            cli,
+            ["ingest", "edgar", "--cik", "0001045810"],
+        )
+    assert result.exit_code == 0, result.output
+    mock_init.assert_called_once()
+
+
+def test_feast_apply_initializes_telemetry(runner: CliRunner, tmp_path: Path) -> None:
+    """feast apply does I/O (subprocess + registry writes) and must
+    initialize telemetry per docs/ARCHITECTURE.md §7."""
+    feast_repo = tmp_path / "feast_repo"
+    feast_repo.mkdir()
+    with (
+        runner.isolated_filesystem(temp_dir=tmp_path) as cwd,
+        patch("auto_research.cli.try_init_telemetry", autospec=True) as mock_init,
+        patch("auto_research.cli.subprocess.run") as mock_run,
+    ):
+        Path(cwd, "feast_repo").mkdir()
+        mock_init.return_value = True
+        mock_run.return_value.returncode = 0
+        result = runner.invoke(cli, ["feast", "apply"])
+    assert result.exit_code == 0
+    mock_init.assert_called_once()
+
+
+def test_feast_materialize_initializes_telemetry(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """feast materialize runs minutes of online-store writes; must
+    initialize telemetry."""
+    with (
+        runner.isolated_filesystem(temp_dir=tmp_path) as cwd,
+        patch("auto_research.cli.try_init_telemetry", autospec=True) as mock_init,
+        patch("auto_research.cli.subprocess.run") as mock_run,
+    ):
+        Path(cwd, "feast_repo").mkdir()
+        mock_init.return_value = True
+        mock_run.return_value.returncode = 0
+        result = runner.invoke(
+            cli,
+            [
+                "feast",
+                "materialize",
+                "--start",
+                "2024-01-01T00:00:00",
+                "--end",
+                "2024-01-31T00:00:00",
+            ],
+        )
+    assert result.exit_code == 0
+    mock_init.assert_called_once()
+
+
+def test_extract_s_filings_initializes_telemetry(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """extract s-filings must call try_init_telemetry even on an empty manifest."""
+    manifest_path = tmp_path / "manifest.parquet"
+    empty = pa.table(
+        {
+            "source": pa.array([], type=pa.string()),
+            "entity_id": pa.array([], type=pa.string()),
+            "doc_id": pa.array([], type=pa.string()),
+            "form_type": pa.array([], type=pa.string()),
+            "event_datetime": pa.array([], type=pa.timestamp("us", tz="UTC")),
+            "fetched_at": pa.array([], type=pa.timestamp("us", tz="UTC")),
+            "content_sha256": pa.array([], type=pa.string()),
+            "path": pa.array([], type=pa.string()),
+            "status": pa.array([], type=pa.string()),
+        }
+    )
+    pq.write_table(empty, manifest_path)
+
+    with patch("auto_research.cli.try_init_telemetry", autospec=True) as mock_init:
+        # Returning False (missing env) is fine — the helper must still
+        # have been called, and the command must still succeed.
+        mock_init.return_value = False
+        result = runner.invoke(
+            cli,
+            [
+                "extract",
+                "s-filings",
+                "--cik",
+                "0001045810",
+                "--manifest-path",
+                str(manifest_path),
+                "--out-root",
+                str(tmp_path / "extracted"),
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    mock_init.assert_called_once()
