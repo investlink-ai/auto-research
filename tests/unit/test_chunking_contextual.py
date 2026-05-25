@@ -2,12 +2,13 @@
 
 Hermetic: the Anthropic SDK is mocked. Each test exercises one AC bullet
 or one behavior (cache hit, prompt-version invalidation, ≤100-token cap,
-prepend ordering, prompt-caching block shape).
+prepend ordering, prompt-caching block shape, drop-don't-cache policy,
+metadata injection, partial-progress on per-child failure).
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock
@@ -16,12 +17,12 @@ import anthropic
 import pytest
 from anthropic.types import Message, TextBlock, Usage
 
+import auto_research.extract.chunking_contextual as chunking_contextual
 from auto_research.extract.chunking import (
     ChildChunk,
     ChunkMetadata,
     ChunkSet,
     ParentChunk,
-    count_tokens,
 )
 from auto_research.extract.chunking_contextual import (
     ContextualChildChunk,
@@ -29,22 +30,31 @@ from auto_research.extract.chunking_contextual import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _reset_client_singleton() -> None:
+    """Prevent _CLIENT state from leaking between tests under pytest-randomly."""
+    chunking_contextual._CLIENT = None
+
+
 def _metadata() -> ChunkMetadata:
     return ChunkMetadata(
-        ticker="NVDA",
-        filing_date=date(2025, 11, 19),
-        fiscal_period="Q3-2026",
-        doc_type="10-Q",
-        doc_id="nvda-q3-2026",
+        ticker="CRDO",
+        filing_date=date(2024, 6, 18),
+        fiscal_period="FY2024",
+        doc_type="10-K",
+        doc_id="crdo-fy2024",
     )
 
 
 def _make_chunkset(
     *,
-    parent_text: str = "Item 7. MD&A. We expect China export controls to weigh on H100 sales.",
+    parent_text: str = (
+        "Item 7. MD&A. AEC product revenue concentration remained heavily "
+        "weighted toward three hyperscaler customers in fiscal 2024."
+    ),
     child_texts: tuple[str, ...] = (
-        "China export controls reduced H100 revenue by ~$2B in Q3.",
-        "Mitigation: H20 variant sales ramped to $1.2B in the same period.",
+        "AEC revenue represented 62% of total product revenue in FY2024.",
+        "Customer concentration: top three hyperscalers accounted for ~70%.",
     ),
 ) -> ChunkSet:
     metadata = _metadata()
@@ -73,18 +83,23 @@ def _make_chunkset(
     return ChunkSet(parents=(parent,), children=children)
 
 
-def _make_response(text: str) -> Message:
+def _make_response(
+    text: str,
+    *,
+    output_tokens: int = 20,
+    stop_reason: str = "end_turn",
+) -> Message:
     return Message(
         id="msg_test",
         content=[TextBlock(type="text", text=text, citations=None)],
         model="claude-haiku-4-5",
         role="assistant",
-        stop_reason="end_turn",
+        stop_reason=stop_reason,  # type: ignore[arg-type]
         stop_sequence=None,
         type="message",
         usage=Usage(
             input_tokens=100,
-            output_tokens=20,
+            output_tokens=output_tokens,
             cache_creation=None,
             cache_creation_input_tokens=None,
             cache_read_input_tokens=None,
@@ -95,17 +110,21 @@ def _make_response(text: str) -> Message:
     )
 
 
-def _fake_client(*texts: str) -> anthropic.Anthropic:
+def _fake_client(*responses: Message | str) -> anthropic.Anthropic:
+    """Build a MagicMock SDK whose `messages.create` returns each response
+    in order. Strings are wrapped into a happy-path Message."""
     fake = MagicMock()
-    fake.messages.create.side_effect = [_make_response(t) for t in texts]
+    fake.messages.create.side_effect = [
+        r if isinstance(r, Message) else _make_response(r) for r in responses
+    ]
     return cast(anthropic.Anthropic, fake)
 
 
 def test_contextualize_chunks_returns_one_per_child(tmp_path: Path) -> None:
     chunkset = _make_chunkset()
     client = _fake_client(
-        "This chunk is from NVDA Q3-2026 10-Q MD&A on China export controls.",
-        "This chunk is from NVDA Q3-2026 10-Q MD&A on H20 variant ramp.",
+        "This chunk is from CRDO FY2024 10-K Item 7 on AEC revenue concentration.",
+        "This chunk is from CRDO FY2024 10-K Item 7 on top-customer concentration.",
     )
 
     out = contextualize_chunks(
@@ -114,7 +133,7 @@ def test_contextualize_chunks_returns_one_per_child(tmp_path: Path) -> None:
 
     assert len(out) == 2
     assert all(isinstance(c, ContextualChildChunk) for c in out)
-    assert out[0].context.startswith("This chunk is from NVDA Q3-2026")
+    assert out[0].context.startswith("This chunk is from CRDO FY2024")
     # `embedding_text` prepends context with a blank line before the chunk.
     assert out[0].embedding_text.startswith(out[0].context + "\n\n")
     assert out[0].embedding_text.endswith(chunkset.children[0].text)
@@ -124,7 +143,7 @@ def test_contextualize_chunks_second_call_is_cache_hit(tmp_path: Path) -> None:
     chunkset = _make_chunkset(child_texts=("Only one child here.",))
     sdk = MagicMock()
     sdk.messages.create.return_value = _make_response(
-        "This chunk is from NVDA Q3-2026 10-Q MD&A example."
+        "This chunk is from CRDO FY2024 10-K Item 7 example."
     )
 
     contextualize_chunks(
@@ -147,7 +166,7 @@ def test_contextualize_chunks_prompt_version_bump_invalidates_cache(
     chunkset = _make_chunkset(child_texts=("Only one child here.",))
     sdk = MagicMock()
     sdk.messages.create.return_value = _make_response(
-        "This chunk is from NVDA Q3-2026 10-Q MD&A example."
+        "This chunk is from CRDO FY2024 10-K Item 7 example."
     )
 
     contextualize_chunks(
@@ -171,45 +190,78 @@ def test_contextualize_chunks_prompt_version_bump_invalidates_cache(
     assert sdk.messages.create.call_count == 2
 
 
-def test_contextualize_chunks_drops_over_cap_context(tmp_path: Path) -> None:
-    """A >100-token generated context falls through to `context=""` rather
-    than quarantining — contextual chunking is a retrieval-lift feature,
-    not a citation-grounding invariant."""
+def test_contextualize_chunks_drops_over_cap_context_and_does_not_cache(
+    tmp_path: Path,
+) -> None:
+    """Over-cap (per Anthropic's own output_tokens) drops to context="" and
+    is NOT cached — a re-run gets a fresh shot at generation."""
     chunkset = _make_chunkset(child_texts=("Only one child here.",))
-    bloated = " ".join(["overlong"] * 200)  # ~200 tokens by cl100k_base
-    client = _fake_client(bloated)
+    sdk = MagicMock()
+    sdk.messages.create.side_effect = [
+        _make_response("bloated text", output_tokens=200),
+        _make_response("This chunk is from CRDO FY2024 10-K Item 7 example.",
+                       output_tokens=18),
+    ]
 
     out = contextualize_chunks(
-        chunkset=chunkset, cache_root=tmp_path, anthropic_client=client,
+        chunkset=chunkset, cache_root=tmp_path,
+        anthropic_client=cast(anthropic.Anthropic, sdk),
     )
 
     assert out[0].context == ""
-    # Drop → `embedding_text` is the chunk text alone.
     assert out[0].embedding_text == chunkset.children[0].text
 
+    # Re-run: drop was NOT cached, so we hit the SDK again and recover.
+    out2 = contextualize_chunks(
+        chunkset=chunkset, cache_root=tmp_path,
+        anthropic_client=cast(anthropic.Anthropic, sdk),
+    )
+    assert sdk.messages.create.call_count == 2
+    assert out2[0].context.startswith("This chunk is from CRDO FY2024")
 
-def test_contextualize_chunks_enforces_100_token_cap_on_kept_contexts(
-    tmp_path: Path,
-) -> None:
+
+def test_contextualize_chunks_drops_truncated_response(tmp_path: Path) -> None:
+    """stop_reason='max_tokens' means the response is a sentence fragment
+    even if it happens to be ≤100 output_tokens. Drop, don't cache."""
     chunkset = _make_chunkset(child_texts=("Only one child here.",))
-    short = "This chunk is from NVDA Q3-2026 10-Q MD&A on China export controls."
-    client = _fake_client(short)
-
-    out = contextualize_chunks(
-        chunkset=chunkset, cache_root=tmp_path, anthropic_client=client,
+    sdk = MagicMock()
+    sdk.messages.create.return_value = _make_response(
+        "This chunk is from CRDO FY2024 10-K Item 7 discussing the company",
+        stop_reason="max_tokens",
+        output_tokens=80,
     )
 
+    out = contextualize_chunks(
+        chunkset=chunkset, cache_root=tmp_path,
+        anthropic_client=cast(anthropic.Anthropic, sdk),
+    )
+    assert out[0].context == ""
+
+
+def test_contextualize_chunks_enforces_120_token_cap(tmp_path: Path) -> None:
+    """Happy path: a response under the Anthropic output_token cap passes."""
+    chunkset = _make_chunkset(child_texts=("Only one child here.",))
+    sdk = MagicMock()
+    sdk.messages.create.return_value = _make_response(
+        "This chunk is from CRDO FY2024 10-K Item 7 on AEC revenue concentration.",
+        output_tokens=22,
+    )
+
+    out = contextualize_chunks(
+        chunkset=chunkset, cache_root=tmp_path,
+        anthropic_client=cast(anthropic.Anthropic, sdk),
+    )
     assert out[0].context  # non-empty
-    assert count_tokens(out[0].context) <= 100
 
 
-def test_contextualize_chunks_passes_parent_text_in_cached_system_block(
+def test_contextualize_chunks_passes_metadata_and_parent_in_cached_system_block(
     tmp_path: Path,
 ) -> None:
     """The Anthropic prompt cache hits only when the system block is stable
-    across calls. Parent text MUST live in the cached system block; child
-    text MUST live in the user message — so multiple children of the same
-    parent share a cached prefix."""
+    across calls. Parent text AND document metadata (ticker, fiscal period,
+    doc type, section) live in the cached system block so the model can
+    name them without hallucinating; the child text is the per-call user
+    message."""
     chunkset = _make_chunkset(
         parent_text="UNIQUE_PARENT_MARKER section text",
         child_texts=("UNIQUE_CHILD_MARKER inner text",),
@@ -224,10 +276,124 @@ def test_contextualize_chunks_passes_parent_text_in_cached_system_block(
     call = fake.messages.create.call_args
     system_blocks = call.kwargs["system"]
     assert isinstance(system_blocks, list)
-    # The shared `cached_system_block` helper emits one block with
-    # `cache_control: ephemeral`.
     assert system_blocks[0]["cache_control"] == {"type": "ephemeral"}
+    block_text = system_blocks[0]["text"]
+    # Metadata fields the prompt asks the model to name — they must be
+    # visible in the system block, not left to the model to invent.
+    assert "ticker: CRDO" in block_text
+    assert "fiscal_period: FY2024" in block_text
+    assert "doc_type: 10-K" in block_text
+    assert "section: Item 7" in block_text
     # Parent text is in the cached system block; child text is in user content.
-    assert "UNIQUE_PARENT_MARKER" in system_blocks[0]["text"]
+    assert "UNIQUE_PARENT_MARKER" in block_text
     assert "UNIQUE_PARENT_MARKER" not in call.kwargs["messages"][0]["content"]
     assert call.kwargs["messages"][0]["content"] == "UNIQUE_CHILD_MARKER inner text"
+
+
+def test_contextualize_chunks_collapses_multiline_response(tmp_path: Path) -> None:
+    """Multi-line model output collapses to a single line so embedding_text
+    doesn't get irregular newline runs after the prepend."""
+    chunkset = _make_chunkset(child_texts=("Only one child here.",))
+    sdk = MagicMock()
+    sdk.messages.create.return_value = _make_response(
+        "This chunk is from CRDO FY2024 10-K Item 7\n\non AEC concentration.",
+        output_tokens=20,
+    )
+
+    out = contextualize_chunks(
+        chunkset=chunkset, cache_root=tmp_path,
+        anthropic_client=cast(anthropic.Anthropic, sdk),
+    )
+    # Whitespace collapses; no embedded newlines survive.
+    assert "\n" not in out[0].context
+    # The embedding_text separator is the explicit "\n\n" between context
+    # and child, with no double-collapse weirdness.
+    assert out[0].embedding_text.count("\n\n") == 1
+
+
+def test_contextualize_chunks_per_child_exception_continues_batch(
+    tmp_path: Path,
+) -> None:
+    """A per-child SDK exception emits context="" for that child but does
+    not abort the batch — partial progress survives, and the failed child
+    is not cached (a re-run retries it)."""
+    chunkset = _make_chunkset()
+    sdk = MagicMock()
+    sdk.messages.create.side_effect = [
+        RuntimeError("boom"),
+        _make_response(
+            "This chunk is from CRDO FY2024 10-K Item 7 on customer concentration.",
+        ),
+    ]
+
+    out = contextualize_chunks(
+        chunkset=chunkset, cache_root=tmp_path,
+        anthropic_client=cast(anthropic.Anthropic, sdk),
+    )
+
+    assert len(out) == 2
+    assert out[0].context == ""  # failed child
+    assert out[1].context.startswith("This chunk is from CRDO FY2024")  # succeeded
+
+    # Failed child is NOT in cache — a re-run will retry it.
+    sdk.messages.create.side_effect = [
+        _make_response(
+            "This chunk is from CRDO FY2024 10-K Item 7 on AEC revenue.",
+        ),
+    ]
+    out2 = contextualize_chunks(
+        chunkset=chunkset, cache_root=tmp_path,
+        anthropic_client=cast(anthropic.Anthropic, sdk),
+    )
+    # Three total calls: 1 failure + 1 success on first run, 1 retry of the
+    # failed child on the second run (the successful child cache-hits).
+    assert sdk.messages.create.call_count == 3
+    assert all(c.context for c in out2)
+
+
+def test_contextualize_chunks_datetime_does_not_fragment_cache(
+    tmp_path: Path,
+) -> None:
+    """If a caller accidentally passes a `datetime` where a `date` is
+    expected (datetime subclasses date), the cache key should still
+    depend only on the calendar day — otherwise repeated runs with
+    slightly different timestamps thrash the cache."""
+    metadata_date = ChunkMetadata(
+        ticker="CRDO", filing_date=date(2024, 6, 18), fiscal_period="FY2024",
+        doc_type="10-K", doc_id="crdo-fy2024",
+    )
+    metadata_dt = ChunkMetadata(
+        ticker="CRDO",
+        filing_date=cast(date, datetime(2024, 6, 18, 16, 30, 0)),
+        fiscal_period="FY2024", doc_type="10-K", doc_id="crdo-fy2024",
+    )
+
+    def _chunkset_with(md: ChunkMetadata) -> ChunkSet:
+        parent = ParentChunk(
+            text="Item 7. MD&A.", section_name="Item 7", char_span=(0, 13),
+            token_count=4, table_html=None, metadata=md,
+        )
+        parent_id = f"{md.doc_id}::0-13"
+        child = ChildChunk(
+            text="One child.", char_span=(0, 10), token_count=2,
+            parent_id=parent_id, section_name="Item 7", from_table=False,
+            metadata=md,
+        )
+        return ChunkSet(parents=(parent,), children=(child,))
+
+    sdk = MagicMock()
+    sdk.messages.create.return_value = _make_response(
+        "This chunk is from CRDO FY2024 10-K Item 7 example."
+    )
+
+    contextualize_chunks(
+        chunkset=_chunkset_with(metadata_date), cache_root=tmp_path,
+        anthropic_client=cast(anthropic.Anthropic, sdk),
+    )
+    contextualize_chunks(
+        chunkset=_chunkset_with(metadata_dt), cache_root=tmp_path,
+        anthropic_client=cast(anthropic.Anthropic, sdk),
+    )
+    # date and datetime for the same calendar day must produce the same
+    # cache key → second call hits cache, no second SDK invocation.
+    assert sdk.messages.create.call_count == 1

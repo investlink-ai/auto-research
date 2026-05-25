@@ -14,7 +14,7 @@ interactions:
       Content-Type:
       - application/json
     body:
-      string: '{"id":"msg_01ContextualCacheCreate","type":"message","role":"assistant","content":[{"type":"text","text":"This chunk is from NVDA Q3-2026 10-Q MD&A discussing the impact of China export controls on H100 revenue.","citations":null}],"model":"claude-haiku-4-5","stop_reason":"end_turn","stop_sequence":null,"container":null,"stop_details":null,"usage":{"input_tokens":50,"output_tokens":30,"cache_creation":null,"cache_creation_input_tokens":5000,"cache_read_input_tokens":0,"inference_geo":null,"server_tool_use":null,"service_tier":"standard"}}'
+      string: '{"id":"msg_01ContextualCacheCreate","type":"message","role":"assistant","content":[{"type":"text","text":"This chunk is from CRDO FY2024 10-K Item 7 (MD&A) on the AEC revenue concentration in three hyperscaler customers.","citations":null}],"model":"claude-haiku-4-5","stop_reason":"end_turn","stop_sequence":null,"container":null,"stop_details":null,"usage":{"input_tokens":18,"output_tokens":34,"cache_creation":null,"cache_creation_input_tokens":1200,"cache_read_input_tokens":0,"inference_geo":null,"server_tool_use":null,"service_tier":"standard"}}'
 - request:
     method: POST
     uri: https://api.anthropic.com/v1/messages
@@ -30,5 +30,5 @@ interactions:
       Content-Type:
       - application/json
     body:
-      string: '{"id":"msg_01ContextualCacheRead","type":"message","role":"assistant","content":[{"type":"text","text":"This chunk is from NVDA Q3-2026 10-Q MD&A on the H20 variant revenue ramp during the quarter.","citations":null}],"model":"claude-haiku-4-5","stop_reason":"end_turn","stop_sequence":null,"container":null,"stop_details":null,"usage":{"input_tokens":50,"output_tokens":30,"cache_creation":null,"cache_creation_input_tokens":0,"cache_read_input_tokens":5000,"inference_geo":null,"server_tool_use":null,"service_tier":"standard"}}'
+      string: '{"id":"msg_01ContextualCacheRead","type":"message","role":"assistant","content":[{"type":"text","text":"This chunk is from CRDO FY2024 10-K Item 7 (MD&A) on the share of top-three hyperscaler customers in FY24 revenue.","citations":null}],"model":"claude-haiku-4-5","stop_reason":"end_turn","stop_sequence":null,"container":null,"stop_details":null,"usage":{"input_tokens":18,"output_tokens":32,"cache_creation":null,"cache_creation_input_tokens":0,"cache_read_input_tokens":1200,"inference_geo":null,"server_tool_use":null,"service_tier":"standard"}}'
 version: 1
