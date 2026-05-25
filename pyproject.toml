@@ -15,6 +15,7 @@ dependencies = [
     "exchange-calendars>=4.5",
     "feast>=0.50,<1",
     "httpx>=0.28.1",
+    "lancedb>=0.17,<0.18",
     "langfuse>=2,<3",
     "mlflow-skinny>=3.0",
     "numpy>=2.0",
@@ -22,10 +23,12 @@ dependencies = [
     "pandas>=2.2",
     "pyarrow>=23.0.1",
     "pydantic>=2.13.4",
+    "sentence-transformers>=3,<4",
     "tenacity>=8.5,<9",
     "tiktoken==0.13.0",
     "traceloop-sdk>=0.30",
     "unstructured[html]==0.21.5",
+    "voyageai>=0.3,<0.4",
     "yt-dlp>=2026.3",
 ]
 
