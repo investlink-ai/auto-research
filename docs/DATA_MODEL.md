@@ -92,6 +92,12 @@ versioned.
 Source location: `feast_repo/feature_views.py`. All FeatureViews use
 file-based Parquet offline storage under `feast_repo/data/`.
 
+The `Source` column in each table below names the producing Pydantic
+field on an extraction worker's output model. Those models are
+defined in `docs/CONTRACTS.md` §1.2 (per-worker outputs); this section
+documents only their feature-store projection, not the schemas
+themselves. Cross-reference: `docs/CONTRACTS.md` §1.2.
+
 ### 3.1 `ten_k_features`
 
 | Feature | Type | Source | Notes |

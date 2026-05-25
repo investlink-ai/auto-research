@@ -1,0 +1,17 @@
+{
+  "ticker": "AMD",
+  "filing_date": "2025-02-25",
+  "fiscal_period": "FY2024",
+  "doc_type": "10-K",
+  "doc_id": "0000002488-25-000012",
+  "expected_sections": [
+    "Item 1A",
+    "Item 7",
+    "Item 8"
+  ],
+  "source_url": "https://www.sec.gov/Archives/edgar/data/2488/000000248825000012/amd-20241228.htm",
+  "filename_convention": "Uses .htm extension per SEC EDGAR's 25+-year convention. Production input from EDGAR always ends in .htm; fixture matches so any extension-aware tooling behaves identically in tests and live.",
+  "note": "Real EDGAR 10-K for AMD, fiscal period FY2024, filed 2025-02-25. Public-domain SEC filing. Trimmed via scripts/build_chunking_fixture.py to fit the 500 KB pre-commit cap while preserving real section headers for Item 1A, Item 7, Item 8 in document order and at least one inline financial table for Item 8 table-policy tests.",
+  "tier": "core",
+  "tier_rationale": "AMD \u2014 direct industry peer, distinct styled-span header template."
+}

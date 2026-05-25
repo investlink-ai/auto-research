@@ -286,63 +286,95 @@ form classification). Wire to Langfuse prompt registry.
 
 ## Milestone 2 — W2: RAG layer + extraction quality
 
+> **W2 RAG-layer ADR (2026-05-24).** Issues #13–#18 inherit decisions
+> from `docs/decisions/2026-05-24-rag-enhancements.md` (D1–D11): embedding
+> model `voyage-finance-2`, reranker `bge-reranker-v2-m3`, parent-document
+> retrieval, chunk metadata fields, 10-K Item 8 table policy, contextual-
+> chunking cache-key includes prompt version (INV-6), per-corpus narrative
+> index alongside per-doc store, RRF weight tuning hook, char_span fidelity
+> as Tier 2 evidence. Read the ADR before picking up any of #13–#18.
+
 ### Issue 13 — `feat(extract): unstructured.io parsing + section-aware chunking`
 
-**Objective.** `extract/chunking.py` parses 10-K via unstructured.io
-respecting Item 1A / 7 / 8 boundaries. Output is `list[Chunk]` with
-`section_name`, `char_span`, `token_count`.
+**Objective.** `extract/chunking.py` parses SEC filings via the
+`unstructured` OSS Python library (Apache 2.0, local dependency — **not**
+the unstructured.io hosted SaaS), respecting Item 1A / 7 / 8 boundaries.
+Output is a `ChunkSet` containing `ParentChunk`s (≤4K tokens, the context
+unit) and `ChildChunk`s (~400–600 tokens, the retrieval unit). Both carry
+required metadata `(ticker, filing_date, fiscal_period, doc_type, doc_id)`.
+`Table` elements (10-K Item 8) emit as summary `ParentChunk`s with raw
+`table_html` attached, bypassing dense retrieval. See ADR
+`docs/decisions/2026-05-24-rag-enhancements.md` D1, D3, D4, D5, D7, D9.
 
 **Acceptance criteria.**
-- A real 10-K fixture parses into sections; assertions on section count + names.
-- Chunks under 4K tokens; boundary-respecting (no chunk spans a section break).
-- Test verifies `source_text[chunk.char_span] == chunk.text` (citation-friendly).
+- A real 10-K fixture parses into sections; assertions on section count + names (Item 1A, 7, 7A, 8 at minimum).
+- Every `ParentChunk` under 4K tokens (tiktoken `cl100k_base`); no parent spans a section break.
+- Every `ChildChunk` `char_span` is a subset of its parent's `char_span`; child token count in [200, 800].
+- Test verifies `source_text[chunk.char_span] == chunk.text` for every parent and child (citation-friendly, INV-2).
+- Test verifies char_span fidelity through `unstructured`'s known HTML edge cases: `&nbsp;`, `&#8217;`, nested `<span>`, CDATA. Mismatches route to `data/quarantine/{doc_id}.json` with reason.
+- All chunks carry non-null `(ticker, filing_date, fiscal_period, doc_type, doc_id)` metadata.
+- `Table` elements emit as `ParentChunk(section_name="Item 8", table_html=<raw>)` with a one-line summary as `text`; `table_html` is `None` on narrative chunks.
+- No network calls to `unstructured.io` during parsing (test runs with network disabled).
+- `unstructured`, `voyageai`, `sentence-transformers` versions pinned in `pyproject.toml` (ADR D3).
 
 **Labels.** `rag`, `medium` **Milestone.** W2 **Blocked by.** #1
 
 ### Issue 14 — `feat(extract): contextual chunking (Anthropic pattern)`
 
-**Objective.** For each chunk, generate a one-line context (e.g.,
-*"This chunk is from NVDA Q3-2025 10-Q MD&A discussing China export
+**Objective.** For each `ChildChunk` from #13, generate a one-line context
+(e.g., *"This chunk is from NVDA Q3-2025 10-Q MD&A discussing China export
 controls"*) via cached LLM call and prepend to chunk text before embedding.
 
 **Acceptance criteria.**
 - Context generation calls use prompt caching (verified via VCR).
 - Generated context is ≤ 100 tokens.
 - Stored alongside chunk for audit.
+- Cache key includes the contextual-chunking prompt version (ADR D6, INV-6). Test asserts a prompt-version bump invalidates the cache.
 - `bump-prompt-version` skill applied if the context prompt changes.
 
 **Labels.** `rag`, `extract`, `medium` **Milestone.** W2 **Blocked by.** #10, #13
 
 ### Issue 15 — `feat(extract): LanceDB + Voyage embeddings adapter (BGE local fallback)`
 
-**Objective.** Embedding adapter wraps Voyage `voyage-3` (primary) with
-`bge-small-en-v1.5` local fallback when `VOYAGE_API_KEY` absent or quota
-exceeded. Persist per-doc LanceDB store at `data/rag/{doc_id}.lance`.
+**Objective.** Embedding adapter wraps Voyage `voyage-finance-2` (primary,
+ADR D1) with `bge-small-en-v1.5` local fallback when `VOYAGE_API_KEY` absent
+or quota exceeded. Persist per-doc LanceDB store at `data/rag/{doc_id}.lance`
+**and** a per-corpus narrative index at
+`data/rag/_corpus_narrative.lance` (ADR D11) for Signal A1's cross-doc
+retrieval. LanceDB schema columns: `(text, vector, ticker, filing_date,
+fiscal_period, doc_type, doc_id, parent_id, section_name)`.
 
 **Acceptance criteria.**
 - Adapter unit tests cover both backends (Voyage VCR + BGE in-process).
 - Same query against the same store returns deterministic top-k order.
 - Fallback decision logged with reason (no key / quota / explicit override).
+- Both per-doc and per-corpus stores written from the same `embed(chunks)` call (atomicity test).
+- Index-time filter test: `filter="ticker='NVDA' AND filing_date >= '2025-01-01'"` returns only matching chunks.
 
 **Labels.** `rag`, `medium` **Milestone.** W2 **Blocked by.** #14
 
 ### Issue 16 — `feat(extract): hybrid retrieval (BM25 + dense + RRF)`
 
 **Objective.** `extract/rag_retrieval.py` runs BM25 (`rank_bm25`) and dense
-retrieval in parallel and merges via Reciprocal Rank Fusion.
+retrieval in parallel and merges via Reciprocal Rank Fusion. Exposes
+`bm25_weight: float = 1.0, dense_weight: float = 1.0` parameters (ADR D8)
+for future tuning; defaults to symmetric. Operates on `ChildChunk`s;
+returns parent-resolved hits (ADR D4).
 
 **Acceptance criteria.**
 - Hybrid retrieve returns ranked candidates with per-source scores.
 - Property test: RRF score is monotonic in component ranks.
 - Hand-built micro-corpus test verifies RRF beats either retriever alone on
   precision@5 for at least 2 of 3 example queries.
+- Weight params change ranking monotonically (test with `dense_weight=2.0`).
+- Children resolve to parents on return; consumer sees `ParentChunk`s.
 
 **Labels.** `rag`, `medium` **Milestone.** W2 **Blocked by.** #15
 
 ### Issue 17 — `feat(extract): BGE reranker on top-20 → top-5`
 
-**Objective.** Add `bge-reranker-base` (local) reranking pass on hybrid
-output before extraction.
+**Objective.** Add `bge-reranker-v2-m3` (local) reranking pass on hybrid
+output before extraction (ADR D2).
 
 **Acceptance criteria.**
 - Rerank reorders the top-20 deterministically on the same input.
@@ -354,8 +386,9 @@ output before extraction.
 ### Issue 18 — `feat(extract): entity resolution (Flow 3 — supplier mention → ticker)`
 
 **Objective.** `extract/entity_resolution.py` maps fuzzy supplier mentions
-to tradeable tickers. Universe + aliases embedded once with Voyage; mention
-text → top-3 candidates → LLM disambiguator picks or returns `unknown`.
+to tradeable tickers. Universe + aliases embedded once with Voyage
+`voyage-finance-2` (ADR D1); mention text → top-3 candidates → LLM
+disambiguator picks or returns `unknown`.
 
 **Acceptance criteria.**
 - Hand-built gold set of ~20 mentions; F1 ≥ 0.85 after reranker.
@@ -367,15 +400,20 @@ text → top-3 candidates → LLM disambiguator picks or returns `unknown`.
 ### Issue 19 — `feat(extract): 10-K, transcript, 8-K worker bodies + prompts`
 
 **Objective.** Implement the remaining three extraction workers and their
-prompts. 10-K uses contextual-RAG path for docs ≥ 100K tokens; others
-single-shot with caching.
+prompts. 10-K uses contextual-RAG path for docs ≥
+`SINGLE_SHOT_TOKEN_CUTOFF` tokens (ADR D10; defined in
+`extract/chunking.py`, default 100_000); others single-shot with caching.
+10-K worker has two extraction paths: narrative RAG over Items 1A/7/7A,
+and structured extraction over Item 8's `table_html` (ADR D5).
 
 **Acceptance criteria.**
 - Each worker produces a frozen output passing citation grounding on a
   real fixture.
 - Each prompt has its own version constant; all registered in Langfuse.
-- Hybrid extraction policy: single-shot for `< 100K` tokens (verified by
-  branch coverage); RAG path for `≥ 100K`.
+- Hybrid extraction policy: single-shot for `< SINGLE_SHOT_TOKEN_CUTOFF`
+  tokens (verified by branch coverage); RAG path for `≥`.
+- 10-K Item 8 financials extracted from `ParentChunk.table_html` via
+  typed Pydantic schema, not via dense retrieval over flattened table text.
 - `bump-prompt-version` skill applied.
 
 **Labels.** `extract`, `large` **Milestone.** W2 **Blocked by.** #11, #14, #17, #18

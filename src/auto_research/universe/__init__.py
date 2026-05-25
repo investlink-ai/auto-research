@@ -4,11 +4,24 @@ Reads `config/universe/universe_v1.json` (~90 names from spec §5) and returns
 a tuple of frozen `TickerEntry` models. The universe is versioned by
 filename; v1 covers AI infrastructure (~70) + frontier tech (~20).
 
-The `tradeable` flag is explicit per entry. Narrative-source names (AAPL,
-MSFT, GOOGL, NVDA, …) are checked in with `tradeable=False` — we *read*
-their filings to populate forward-demand signals on the tradeable book, but
-never trade them. Use `load_universe(tradeable_only=True)` to filter to the
-tradeable book.
+Two orthogonal flags carve the universe into operational roles:
+
+  - `tradeable`: do we take direct positions in this name? Narrative-
+    source names (AAPL, MSFT, GOOGL, NVDA, …) are `tradeable=False` —
+    we *read* their filings to populate forward-demand signals on the
+    tradeable book, but never trade them.
+
+  - `feature_source`: does the chunker/extractor pipeline process this
+    name's own filings? `False` for foreign filers (ASML, TSM, ARM,
+    NVMI, SIMO, GFS, CCJ) whose annual reports are 20-F / 40-F, not
+    10-K — the v1 chunker only handles 10-K. They remain in the
+    universe so entity resolution can map mentions in *other* names'
+    filings to a ticker (e.g., NVDA's 10-K naming "TSMC" → TSM). See
+    `docs/decisions/2026-05-25-foreign-filers-deferred.md`.
+
+Use `load_universe(tradeable_only=True)` for the tradeable book and
+`load_universe(feature_source_only=True)` for names the extraction
+pipeline should ingest. Filters compose (both can be set).
 """
 
 from __future__ import annotations
@@ -21,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 SubUniverse = Literal["ai_infra", "frontier_tech"]
 MarketCapTier = Literal["mega", "large", "mid", "small", "micro"]
+FilingForm = Literal["10-K", "20-F", "40-F"]
 
 
 class TickerEntry(BaseModel):
@@ -33,6 +47,11 @@ class TickerEntry(BaseModel):
     sector: str = Field(min_length=1)
     market_cap_tier: MarketCapTier
     tradeable: bool
+    # Below default to "U.S. 10-K filer that we ingest" so all
+    # existing entries validate without per-row changes. Only the
+    # 7 foreign filers carry non-default values explicitly.
+    filing_form: FilingForm = "10-K"
+    feature_source: bool = True
 
 
 def _default_path() -> Path:
@@ -62,12 +81,17 @@ def load_universe(
     path: Path | None = None,
     *,
     tradeable_only: bool = False,
+    feature_source_only: bool = False,
 ) -> tuple[TickerEntry, ...]:
     """Load the universe from JSON and return a tuple of frozen entries.
 
     Raises `ValueError` for empty files or duplicate tickers, and Pydantic
     `ValidationError` for unknown sub-universe / market-cap tier values
     or malformed rows.
+
+    Filters compose: `load_universe(tradeable_only=True,
+    feature_source_only=True)` returns names we both trade AND extract
+    features from (the standard "v1 pilot" set).
     """
     target = path if path is not None else _default_path()
     raw = json.loads(target.read_text())
@@ -85,7 +109,9 @@ def load_universe(
 
     if tradeable_only:
         entries = tuple(e for e in entries if e.tradeable)
+    if feature_source_only:
+        entries = tuple(e for e in entries if e.feature_source)
     return entries
 
 
-__all__ = ["MarketCapTier", "SubUniverse", "TickerEntry", "load_universe"]
+__all__ = ["FilingForm", "MarketCapTier", "SubUniverse", "TickerEntry", "load_universe"]

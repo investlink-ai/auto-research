@@ -1,0 +1,16 @@
+{
+  "ticker": "NRG",
+  "filing_date": "2026-02-24",
+  "fiscal_period": "FY2025",
+  "doc_type": "10-K",
+  "doc_id": "0001013871-26-000004",
+  "tier": "broad",
+  "expected_sections": [
+    "Item 1A",
+    "Item 7",
+    "Item 8"
+  ],
+  "source_url": "https://www.sec.gov/Archives/edgar/data/1013871/000101387126000004/nrg-20251231.htm",
+  "filename_convention": "Uses .htm extension per SEC EDGAR's 25+-year convention. Production input from EDGAR always ends in .htm; fixture matches so any extension-aware tooling behaves identically in tests and live.",
+  "note": "Real EDGAR 10-K for NRG, fiscal period FY2025, filed 2026-02-24. Public-domain SEC filing. Trimmed via scripts/build_chunking_fixture.py to fit the 500 KB pre-commit cap while preserving real section headers for Item 1A, Item 7, Item 8 in document order and at least one inline financial table for Item 8 table-policy tests."
+}

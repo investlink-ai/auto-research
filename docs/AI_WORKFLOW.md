@@ -89,7 +89,7 @@ Two tiers. No Tier 3/4 — no live capital, no shared infrastructure.
 | Markdown, comments | 0 | → 1 if it changes policy or invariants |
 | `docs/specs/`, `docs/plans/`, `docs/decisions/`, `AGENTS.md`, `CLAUDE.md`, `docs/AI_WORKFLOW.md`, `docs/AI_CODE_STYLE.md` | 1 | → 2 if it changes an invariant |
 | `src/auto_research/ingest/`, `src/auto_research/eval/`, observability glue, `dashboard.py` | 1 | — |
-| `src/auto_research/extract/` (worker bodies) | 1 | → 2 for `guardrails.py`, `schemas.py`, citation-grounding logic |
+| `src/auto_research/extract/` (worker bodies) | 1 | → 2 for `guardrails.py`, `schemas.py`, `chunking.py`, citation-grounding logic |
 | `feast/` (FeatureView definitions) | 2 | — PIT discipline |
 | `src/auto_research/backtest/cpcv.py`, `deflated_sharpe.py`, `labels.py`, `costs.py` | 2 | — López de Prado correctness |
 | `src/auto_research/agents/research_graph.py` | 2 | — `T1_GATE`/`T2_GATE` are code-checked authority |
@@ -195,6 +195,7 @@ non-applicability reason in one line if a row doesn't apply.
 | DeepEval score delta | `extract/guardrails.py`, `schemas.py` | Baseline vs new (F1, hallucination rate) |
 | Ragas score delta | `extract/chunking.py`, `extract/rag_retrieval.py` | `context_recall`, `faithfulness` |
 | Backtest tier gate output | `signals/`, `backtest/engine.py` | `T1_GATE` / `T2_GATE` pass per signal |
+| `make test-broad` green | `extract/chunking.py` | Paste the final pytest summary line. Broad-tier chunking fixtures (different filer templates + fiscal years) are excluded from default CI for speed; they are this module's regression backstop and must be exercised manually on every chunker PR. |
 
 ---
 

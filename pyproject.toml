@@ -23,7 +23,9 @@ dependencies = [
     "pyarrow>=23.0.1",
     "pydantic>=2.13.4",
     "tenacity>=8.5,<9",
+    "tiktoken==0.13.0",
     "traceloop-sdk>=0.30",
+    "unstructured[html]==0.21.5",
     "yt-dlp>=2026.3",
 ]
 
@@ -59,6 +61,7 @@ markers = [
     "eval: tests that hit external LLM/eval APIs (excluded from CI by default)",
     "integration: tests that hit external services (excluded from CI by default)",
     "live: tests that hit real external services over real network (excluded from CI by default; run via `make live-smoke` with credentials)",
+    "broad_fixture: parameterized variant against a broad-tier chunking fixture (excluded from default `make test`; run via `make test-broad`)",
 ]
 
 [tool.ruff]
@@ -103,14 +106,19 @@ mypy_path = "."
 # at pytest import time. Skip strict typecheck on the helper file
 # (it's six lines of asserts; the runtime tests cover its behavior).
 #
-# tests/conftest.py collides at the module level with
-# tests/integration/conftest.py for the same reason (no __init__.py
-# to disambiguate). Both files are pure pytest plumbing — mypy can
-# skip them without losing real coverage.
+# tests/conftest.py + tests/unit/conftest.py + tests/integration/
+# conftest.py all collide at the top-level `conftest` module name to
+# mypy because no `__init__.py` exists in the corresponding dirs.
+# pytest discovers conftest.py specially regardless of packaging, so
+# the simplest fix is to exclude them all from strict mypy — they hold
+# only session-fixture setup, not contract code. `_otel_helpers.py`
+# is a shared test helper that has the same dual-name issue.
 exclude = [
     "tests/feast/_pit_invariants\\.py$",
     "tests/conftest\\.py$",
     "tests/_otel_helpers\\.py$",
+    "tests/unit/conftest\\.py$",
+    "tests/integration/conftest\\.py$",
 ]
 
 # Third-party libs without type stubs. Keep this list short; each entry
