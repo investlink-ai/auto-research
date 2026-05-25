@@ -558,11 +558,13 @@ _HEADER_DENSITY_MIN_ALPHA: Final[int] = 80
 _HEADER_TITLE_LOOKAHEAD: Final[int] = 800
 # Separator chars accepted in title pattern: period, colon, em dash
 # (U+2014), en dash (U+2013), hyphen-minus. The non-ASCII dashes are
-# intentional — filers like BE and NRG use them as the Item-header
-# separator. Defined via \uXXXX escapes so the source stays pure
-# ASCII (and ruff's RUF001 ambiguous-character lint doesn't trip).
-_EM_DASH = "—"
-_EN_DASH = "–"  # noqa: RUF001 — intentional en dash separator
+# intentional separators used by filers like BE and NRG
+# (`Item 1A&#8212;Risk Factors`). Defined via `\uXXXX` escape
+# sequences so the source file stays pure ASCII (ruff's RUF001
+# ambiguous-character lint flags literal em/en dashes as visually
+# confusable with hyphen-minus, and escape form sidesteps it).
+_EM_DASH = "\u2014"
+_EN_DASH = "\u2013"
 _TITLE_PATTERN = re.compile(
     "^\\s*[.:" + _EM_DASH + _EN_DASH + "-]\\s*[A-Z]"
 )
@@ -570,8 +572,9 @@ _TITLE_PATTERN = re.compile(
 # Common HTML-entity dash variants. These must be preserved through
 # the entity-strip in `_is_real_section_header` because they ARE the
 # header separator in some filings (BE uses `Item 1A&#8212;Risk
-# Factors`, etc.). Mapped to literal Unicode dash chars so the
-# title-pattern's character class sees them.
+# Factors`, etc.). Mapped to the literal Unicode dash chars (via the
+# `_EM_DASH` / `_EN_DASH` escapes above) so the title-pattern's
+# character class sees them.
 _DASH_ENTITY_MAP: Final[dict[str, str]] = {
     "&#8212;": _EM_DASH,
     "&#8211;": _EN_DASH,
