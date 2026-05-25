@@ -160,6 +160,10 @@ ignore_missing_imports = true
 module = "sentence_transformers.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "voyageai.*"
+ignore_missing_imports = true
+
 [dependency-groups]
 dev = [
     "hypothesis>=6.152.9",

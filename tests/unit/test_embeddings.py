@@ -119,6 +119,32 @@ def test_embed_query_is_deterministic_top_k(
     assert [h.text for h in a] == [h.text for h in b]
 
 
+def test_voyage_quota_switches_to_bge_with_logged_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
+    caplog.set_level("INFO", logger="auto_research.extract.embeddings")
+
+    from voyageai.error import RateLimitError
+
+    class _QuotaError(RateLimitError):
+        def __init__(self) -> None:
+            super().__init__("simulated 429")  # type: ignore[no-untyped-call]
+
+    class _FakeVoyage:
+        def embed(self, texts: list[str], model: str, input_type: str) -> object:
+            raise _QuotaError()
+
+    adapter = EmbeddingAdapter(rag_root=tmp_path)
+    assert adapter.decision.reason == "voyage_used"
+    adapter.__dict__["_voyage_client"] = _FakeVoyage()
+
+    chunks = [_wrap(_make_child("data center revenue", doc_id="doc-Q"))]
+    adapter.embed(chunks)
+    assert adapter.decision == FallbackDecision("bge", "bge-small-en-v1.5", "quota")
+    assert any("reason=quota" in r.message for r in caplog.records)
+
+
 def test_query_filter_ticker_and_filing_date(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

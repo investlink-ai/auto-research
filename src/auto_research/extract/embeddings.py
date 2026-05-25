@@ -129,7 +129,27 @@ class EmbeddingAdapter:
                 texts, normalize_embeddings=True, convert_to_numpy=True
             )
             return arr.astype(np.float32)
-        raise NotImplementedError("voyage backend not yet implemented")
+
+        from voyageai.error import RateLimitError
+
+        try:
+            resp = self._voyage_client.embed(
+                texts, model=self._decision.model, input_type="document"
+            )
+        except RateLimitError:
+            self._decision = FallbackDecision("bge", "bge-small-en-v1.5", "quota")
+            _log.warning(
+                "embedding_quota_switch backend=bge model=%s reason=quota",
+                _BGE_MODEL_NAME,
+            )
+            return self._encode(texts)
+        return np.asarray(resp.embeddings, dtype=np.float32)
+
+    @cached_property
+    def _voyage_client(self) -> Any:
+        import voyageai
+
+        return voyageai.Client(api_key=os.environ["VOYAGE_API_KEY"])  # type: ignore[attr-defined]
 
     def _rows(
         self, chunks: Sequence[ContextualChildChunk], vectors: NDArray[np.float32]
