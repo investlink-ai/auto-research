@@ -24,6 +24,19 @@ class ChunkValidationError(ValueError):  # typed contract name
     """
 
 
+class UnsupportedDocTypeError(ValueError):
+    """Raised by `chunking.detect.get_detector` for unregistered doc types.
+
+    Distinct from `ChunkValidationError` so `parse_filing` can tag a
+    contract-failure OTel outcome (`unsupported_doc_type`) separately
+    from infra failures (`error`) and INV-2 failures
+    (`validation_failed`). Subclasses `ValueError` so callers that
+    catch the base type — including the new
+    `test_parse_filing_raises_clear_error_for_unregistered_doc_type`
+    — continue to work.
+    """
+
+
 @dataclass(frozen=True)
 class ChunkMetadata:
     """Per-document metadata copied onto every chunk (ADR D7).

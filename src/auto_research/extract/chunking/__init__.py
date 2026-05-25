@@ -57,11 +57,18 @@ prefixed submodules.
 
 from __future__ import annotations
 
-# `parse_filing` last — its module references `auto_research.extract.chunking
-# .validate_char_spans` via the package namespace so tests can monkey-
-# patch the validator. The reference is resolved at call time; importing
-# `parse_filing` last means the package's attribute dict already holds
-# `validate_char_spans` by the time `_entrypoint` finishes loading.
+# Import order is alphabetical by module name (ruff isort), which puts
+# `_entrypoint` first; this is safe because `_entrypoint.parse_filing`
+# resolves `validate_char_spans` at CALL time via the package namespace
+# (`import auto_research.extract.chunking as _pkg` in `_entrypoint.py`).
+# By the time `parse_filing` is invoked, the rest of this file has
+# finished and the symbol is bound. The call-time indirection also
+# preserves the test monkeypatch contract: a test that patches
+# `chunking.validate_char_spans` sees the override flow through
+# `parse_filing` because the entrypoint never captures a local
+# reference. The only failure mode is a future module imported by
+# `_entrypoint` calling `parse_filing` at import time — currently no
+# such call exists.
 from ._entrypoint import parse_filing as parse_filing
 
 # Foundational public surface — types, constants, INV-2 helpers.
@@ -70,8 +77,13 @@ from ._inv2 import quarantine_chunkset as quarantine_chunkset
 from ._inv2 import validate_char_spans as validate_char_spans
 from ._inv2 import validate_or_quarantine_chunkset as validate_or_quarantine_chunkset
 
-# Internal helpers re-exported for the test conftest (warmup) and the
-# fixture-builder script (`scripts/build_chunking_fixture.py`).
+# Internal helpers re-exported because the prior monolithic
+# `chunking.py` exposed them on the package surface; the
+# `_ensure_nlp_warmup` symbol is read directly by `tests/unit/conftest
+# .py`, and `_detect_sections` (below) by `scripts/build_chunking_
+# fixture.py`. The other underscore-prefixed re-exports are kept so the
+# refactor preserves the prior `dir(chunking)` surface for any caller
+# that probed it.
 from ._nlp_warmup import _ensure_nlp_warmup as _ensure_nlp_warmup
 from ._packing import _pack_narrative_html as _pack_narrative_html
 from ._packing import _parent_id as _parent_id
@@ -90,11 +102,13 @@ from ._types import ChunkMetadata as ChunkMetadata
 from ._types import ChunkSet as ChunkSet
 from ._types import ChunkValidationError as ChunkValidationError
 from ._types import ParentChunk as ParentChunk
+from ._types import UnsupportedDocTypeError as UnsupportedDocTypeError
 
 # Section-detection internals re-exported for scripts that validate the
-# regex against external sources (`scripts/validate_10k_items.py` pulls
-# the Item whitelist + header classifiers; `scripts/build_chunking_
-# fixture.py` calls `_detect_sections` to summarize trim results).
+# regex against external sources: `scripts/validate_10k_items.py`
+# pulls the Item whitelist + header classifiers; `scripts/build_
+# chunking_fixture.py` calls `_detect_sections` to summarize trim
+# results.
 from .detect._common import _ITEM_HEADER as _ITEM_HEADER
 from .detect._common import _is_real_section_header as _is_real_section_header
 from .detect._common import _looks_like_block_header as _looks_like_block_header
@@ -115,6 +129,7 @@ __all__ = [
     "ChunkSet",
     "ChunkValidationError",
     "ParentChunk",
+    "UnsupportedDocTypeError",
     "count_tokens",
     "parse_filing",
     "quarantine_chunkset",

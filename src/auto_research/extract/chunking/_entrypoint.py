@@ -30,6 +30,7 @@ from ._types import (
     ChunkSet,
     ChunkValidationError,
     ParentChunk,
+    UnsupportedDocTypeError,
     _DetectedSection,
 )
 from .detect import get_detector
@@ -40,7 +41,14 @@ from .detect import get_detector
 # and reports the chunker's own outcome enum: dashboards can filter
 # "chunking failures" separately from "extraction failures" without
 # walking the full trace tree.
-_tracer = trace.get_tracer(__name__)
+#
+# Tracer scope is pinned to the package name (not `__name__`) so the
+# refactor from monolithic chunking.py to chunking/_entrypoint.py does
+# not silently shift OTel `instrumentation_scope.name` from
+# `auto_research.extract.chunking` to `auto_research.extract.chunking
+# ._entrypoint`. Dashboards / Langfuse queries that key on scope name
+# continue to match pre-refactor traces.
+_tracer = trace.get_tracer("auto_research.extract.chunking")
 
 
 def parse_filing(*, html: str, metadata: ChunkMetadata) -> ChunkSet:
@@ -54,9 +62,10 @@ def parse_filing(*, html: str, metadata: ChunkMetadata) -> ChunkSet:
 
     Implementation: section boundaries come from a doc-type-specific
     detector resolved via `chunking.detect.get_detector(metadata
-    .doc_type)`. Unknown / unregistered `doc_type` raises `ValueError`
-    with a remediation message — silently emitting one Body chunk
-    would corrupt downstream LanceDB section filters.
+    .doc_type)`. Unknown / unregistered `doc_type` raises
+    `UnsupportedDocTypeError` (a `ValueError` subclass) with a
+    remediation message — silently emitting one Body chunk would
+    corrupt downstream LanceDB section filters.
 
     Tables (`<table>...</table>` spans) emit as standalone ParentChunks
     with `table_html` populated. Narrative between tables packs into
@@ -67,8 +76,9 @@ def parse_filing(*, html: str, metadata: ChunkMetadata) -> ChunkSet:
     Emits a manual OTel span `chunk.parse_filing` with attributes:
     `chunk.doc_id`, `chunk.doc_type`, `chunk.ticker`, `chunk.n_sections`,
     `chunk.n_parents`, `chunk.n_children`, `chunk.n_table_parents`,
-    `chunk.outcome` (`ok` / `no_sections_detected` / `validation_failed` /
-    `subdivision_failed`). See `docs/ARCHITECTURE.md` §5.3.
+    `chunk.outcome` (`ok` / `no_sections_detected` /
+    `unsupported_doc_type` / `validation_failed` / `subdivision_failed`
+    / `error`). See `docs/ARCHITECTURE.md` §5.3.
     """
     with _tracer.start_as_current_span("chunk.parse_filing") as span:
         span.set_attribute("chunk.doc_id", metadata.doc_id)
@@ -77,7 +87,16 @@ def parse_filing(*, html: str, metadata: ChunkMetadata) -> ChunkSet:
         try:
             _ensure_nlp_warmup()
 
-            detector = get_detector(metadata.doc_type)
+            try:
+                detector = get_detector(metadata.doc_type)
+            except UnsupportedDocTypeError as exc:
+                # Contract failure (caller passed an unregistered doc_type)
+                # — distinct from INV-2 / infra failures so dashboards can
+                # route foreign-filer / unsupported-form ingest separately
+                # from spaCy-missing or programmer-error pages.
+                span.set_attribute("chunk.outcome", "unsupported_doc_type")
+                span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+                raise
             sections = detector(html)
             if not sections:
                 # Whole document as one synthetic "Body" section.
@@ -128,7 +147,7 @@ def parse_filing(*, html: str, metadata: ChunkMetadata) -> ChunkSet:
                 parents=tuple(parents_list),
                 children=tuple(children_list),
             )
-        except ChunkValidationError:
+        except (ChunkValidationError, UnsupportedDocTypeError):
             # Outcome + status already set on the typed-error branches above.
             raise
         except Exception as exc:

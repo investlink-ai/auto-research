@@ -36,7 +36,12 @@ class FixtureMetadata(BaseModel):
     fiscal_period: str
     doc_type: Literal["10-K"]
     doc_id: str
-    expected_sections: list[str]
+    # `tuple[str, ...]` rather than `list[str]` — `frozen=True` blocks
+    # `__setattr__` only; list contents stay mutable, which combined
+    # with the module-scope `_FIXTURE_CACHE` in `test_chunking.py` is
+    # a footgun (an `.append` on a cached fixture's expected_sections
+    # would silently corrupt every subsequent parametrized case).
+    expected_sections: tuple[str, ...]
     source_url: str
     filename_convention: str
     note: str

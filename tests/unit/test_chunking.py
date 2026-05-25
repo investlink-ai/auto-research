@@ -1139,10 +1139,41 @@ def test_parse_filing_raises_clear_error_for_unregistered_doc_type(
     see `docs/decisions/2026-05-25-foreign-filers-deferred.md`. A
     silent fallback would corrupt downstream LanceDB section filters
     (every chunk gets `section_name='Body'`).
+
+    The typed `UnsupportedDocTypeError(ValueError)` lets dashboards
+    split contract-routing failures from infra failures; the test
+    asserts on the base type so it doesn't lock callers into the
+    typed subclass.
     """
+    from auto_research.extract.chunking import UnsupportedDocTypeError
+
     bad_meta = dataclasses.replace(edge_metadata, doc_type="20-F")
     with pytest.raises(ValueError, match="No chunker detector"):
         parse_filing(html="<html><body>filler</body></html>", metadata=bad_meta)
+    # Typed contract: subclass of ValueError so generic callers match,
+    # specific subclass so the entrypoint can tag a distinct outcome.
+    with pytest.raises(UnsupportedDocTypeError):
+        parse_filing(html="<html><body>filler</body></html>", metadata=bad_meta)
+
+
+def test_parse_filing_span_tags_unsupported_doc_type_outcome(
+    edge_metadata: ChunkMetadata,
+    span_recorder: SpanRecorder,
+) -> None:
+    """The unregistered-doc-type path tags `chunk.outcome=
+    unsupported_doc_type` (NOT the catch-all `error` bucket).
+    Dashboards keyed on outcome can route foreign-filer / unsupported-
+    form ingest to a config-issue queue rather than paging on-call
+    for what is structurally an infra alert.
+    """
+    bad_meta = dataclasses.replace(edge_metadata, doc_type="20-F")
+    with pytest.raises(ValueError):
+        parse_filing(html="<html><body>filler</body></html>", metadata=bad_meta)
+
+    attrs = span_recorder.attrs("chunk.parse_filing")
+    assert attrs["chunk.outcome"] == "unsupported_doc_type"
+    span = span_recorder.one("chunk.parse_filing")
+    assert span.status.status_code.name == "ERROR"
 
 
 def test_get_detector_returns_callable_for_registered_form() -> None:

@@ -49,8 +49,9 @@ def _pack_narrative_html(
 
     Comment-internal break tags (`<!-- example: </p> -->`) are NOT
     treated as boundaries — `_pack_narrative_html` reads its boundary
-    scan from `_mask_comments(html)` so it agrees with `_detect_sections`
-    about what counts as document structure.
+    scan from `_mask_comments(html)` so it agrees with the section
+    detector (`detect_sections_periodic`) about what counts as
+    document structure.
 
     If no break boundary exists between two consecutive flushes (a single
     "atom" of HTML exceeds MAX_PARENT_TOKENS), we emit the atom anyway

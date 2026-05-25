@@ -1,11 +1,16 @@
 """Batch-build a chunking test fixture for every ticker in the universe.
 
-Reads `config/universe/universe_v1.json`, resolves each ticker's CIK
-via SEC's `company_tickers.json`, finds the most recent 10-K filing
-via the submissions API, and runs the build_chunking_fixture pipeline
-against it. Failures (no 10-K filed, foreign filer using 20-F, chunker
-fails to detect Items in the trim) are logged and skipped — they do
-not abort the batch.
+Loads the universe via `auto_research.universe.load_universe(
+feature_source_only=True)` (which reads `config/universe/
+universe_v1.json` through the package's `_default_path()` discovery),
+resolves each ticker's CIK via SEC's `company_tickers.json`, finds
+the most recent 10-K filing via the submissions API, and runs the
+build_chunking_fixture pipeline against it. Failures (no 10-K filed,
+chunker fails to detect Items in the trim) are logged and skipped —
+they do not abort the batch. Foreign filers (ASML, TSM, ARM, NVMI,
+SIMO, GFS, CCJ) are pre-filtered by the `feature_source_only` flag;
+pass `--include-non-feature-source` to include them for filing-form
+verification runs.
 
 Usage:
     uv run python scripts/build_universe_fixtures.py
