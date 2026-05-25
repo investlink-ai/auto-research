@@ -79,6 +79,58 @@ def test_load_universe_tradeable_only_filters_narrative_sources() -> None:
         assert ticker not in tradeable_tickers, ticker
 
 
+# ---------- Foreign-filer annotation (20-F / 40-F) ---------------------------
+
+
+def test_foreign_filers_marked_non_feature_source() -> None:
+    """The 7 foreign filers (Form 20-F / 40-F) are kept in the universe
+    so entity resolution can map mentions of them in other companies'
+    filings to a ticker, but the chunker/extractor pipeline skips them
+    via `feature_source=False`. See
+    `docs/decisions/2026-05-25-foreign-filers-deferred.md`.
+    """
+    by_ticker = {e.ticker: e for e in load_universe()}
+    # 20-F filers (non-Canadian foreign private issuers)
+    for ticker in ("ASML", "TSM", "ARM", "NVMI", "SIMO", "GFS"):
+        e = by_ticker[ticker]
+        assert e.filing_form == "20-F", f"{ticker} expected 20-F got {e.filing_form}"
+        assert e.feature_source is False, ticker
+    # 40-F filer (Canadian)
+    ccj = by_ticker["CCJ"]
+    assert ccj.filing_form == "40-F"
+    assert ccj.feature_source is False
+
+
+def test_domestic_filers_default_to_10k_and_feature_source() -> None:
+    """U.S. domestic 10-K filers default to filing_form=10-K and
+    feature_source=True. Spot-check a few headline names that have
+    no explicit field in the JSON (they should pick up the schema
+    defaults)."""
+    by_ticker = {e.ticker: e for e in load_universe()}
+    for ticker in ("NVDA", "AMD", "AAPL", "MSFT", "TSLA", "AVGO"):
+        e = by_ticker[ticker]
+        assert e.filing_form == "10-K", f"{ticker} expected 10-K got {e.filing_form}"
+        assert e.feature_source is True, ticker
+
+
+def test_load_universe_feature_source_only_excludes_foreign_filers() -> None:
+    full = load_universe()
+    pipeline = load_universe(feature_source_only=True)
+    assert len(pipeline) < len(full)
+    assert all(e.feature_source for e in pipeline)
+    pipeline_tickers = {e.ticker for e in pipeline}
+    for ticker in ("ASML", "TSM", "ARM", "NVMI", "SIMO", "GFS", "CCJ"):
+        assert ticker not in pipeline_tickers, ticker
+
+
+def test_filters_compose() -> None:
+    """tradeable_only AND feature_source_only together give the pilot's
+    extraction-and-trading set."""
+    pilot = load_universe(tradeable_only=True, feature_source_only=True)
+    assert pilot
+    assert all(e.tradeable and e.feature_source for e in pilot)
+
+
 # ---------- Negative cases (fixture files in tmp_path) ----------
 
 
