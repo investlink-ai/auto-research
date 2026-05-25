@@ -98,3 +98,62 @@ def test_embed_bge_writes_both_stores_atomically(
     hits_corpus = adapter.query("export controls", k=3, store="corpus_narrative")
     assert len(hits_doc) == 3
     assert len(hits_corpus) == 3
+
+
+def test_embed_query_is_deterministic_top_k(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    adapter = EmbeddingAdapter(rag_root=tmp_path)
+    chunks = [
+        _wrap(_make_child("supply chain disruption in Taiwan", doc_id="doc-D")),
+        _wrap(_make_child("export controls on advanced GPUs", doc_id="doc-D")),
+        _wrap(_make_child("share buyback authorization", doc_id="doc-D")),
+        _wrap(_make_child("revenue grew 14% year over year", doc_id="doc-D")),
+        _wrap(_make_child("data center demand strong", doc_id="doc-D")),
+    ]
+    adapter.embed(chunks)
+    a = adapter.query("China chip export", k=3, store="per_doc", doc_id="doc-D")
+    b = adapter.query("China chip export", k=3, store="per_doc", doc_id="doc-D")
+    assert [h.parent_id for h in a] == [h.parent_id for h in b]
+    assert [h.text for h in a] == [h.text for h in b]
+
+
+def test_query_filter_ticker_and_filing_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    adapter = EmbeddingAdapter(rag_root=tmp_path)
+    adapter.embed([
+        _wrap(_make_child(
+            "AMD's MI300 ramps in data center",
+            ticker="AMD",
+            doc_id="doc-AMD",
+            filing_date=date(2024, 6, 1),
+        )),
+    ])
+    adapter.embed([
+        _wrap(_make_child(
+            "NVDA H100 supply tight through Q2",
+            ticker="NVDA",
+            doc_id="doc-NVDA-2024",
+            filing_date=date(2024, 12, 1),
+        )),
+    ])
+    adapter.embed([
+        _wrap(_make_child(
+            "NVDA Blackwell architecture launches",
+            ticker="NVDA",
+            doc_id="doc-NVDA-2025",
+            filing_date=date(2025, 3, 15),
+        )),
+    ])
+    hits = adapter.query(
+        "GPU demand",
+        k=5,
+        store="corpus_narrative",
+        where="ticker = 'NVDA' AND filing_date >= '2025-01-01'",
+    )
+    assert {h.doc_id for h in hits} == {"doc-NVDA-2025"}
+    assert all(h.ticker == "NVDA" for h in hits)
+    assert all(h.filing_date >= date(2025, 1, 1) for h in hits)
