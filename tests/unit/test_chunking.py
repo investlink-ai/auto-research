@@ -17,7 +17,7 @@ import io
 import json
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 import pytest
@@ -40,6 +40,9 @@ from auto_research.extract.chunking import (
     validate_char_spans,
     validate_or_quarantine_chunkset,
 )
+
+if TYPE_CHECKING:
+    from tests._otel_helpers import SpanRecorder
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "chunking"
 
@@ -1101,6 +1104,79 @@ def test_parse_filing_makes_no_network_calls(
 
     result = parse_filing(html=edge_cases_html, metadata=edge_metadata)
     assert result.parents
+
+
+# ---------- OTel instrumentation --------------------------------------------
+
+
+def test_parse_filing_emits_span_on_ok_path(
+    edge_cases_html: str,
+    edge_metadata: ChunkMetadata,
+    span_recorder: SpanRecorder,
+) -> None:
+    """`parse_filing` emits one `chunk.parse_filing` span carrying
+    doc_id / doc_type / ticker / section + chunk counts / outcome=ok."""
+    result = parse_filing(html=edge_cases_html, metadata=edge_metadata)
+
+    attrs = span_recorder.attrs("chunk.parse_filing")
+    assert attrs["chunk.doc_id"] == edge_metadata.doc_id
+    assert attrs["chunk.doc_type"] == "10-K"
+    assert attrs["chunk.ticker"] == "TEST"
+    assert attrs["chunk.outcome"] == "ok"
+    # AttributeValue is a broad union; narrow to int for arithmetic.
+    n_sections = attrs["chunk.n_sections"]
+    n_parents = attrs["chunk.n_parents"]
+    n_children = attrs["chunk.n_children"]
+    n_table = attrs["chunk.n_table_parents"]
+    assert isinstance(n_sections, int) and n_sections >= 1
+    assert isinstance(n_parents, int) and n_parents == len(result.parents)
+    assert isinstance(n_children, int) and n_children == len(result.children)
+    assert isinstance(n_table, int) and n_table == sum(
+        1 for p in result.parents if p.table_html is not None
+    )
+
+
+def test_parse_filing_span_marks_no_sections_detected(
+    edge_metadata: ChunkMetadata,
+    span_recorder: SpanRecorder,
+) -> None:
+    """Doc with no Item-prefix or bare-title headers falls back to a
+    single 'Body' section; the span outcome reflects that."""
+    html = "<html><body>" + ("<p>filler " + ("x " * 30) + "</p>") * 5 + "</body></html>"
+    parse_filing(html=html, metadata=edge_metadata)
+
+    attrs = span_recorder.attrs("chunk.parse_filing")
+    assert attrs["chunk.outcome"] == "no_sections_detected"
+    assert attrs["chunk.n_sections"] == 1
+
+
+def test_parse_filing_span_records_validation_failure(
+    edge_metadata: ChunkMetadata,
+    span_recorder: SpanRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When `validate_char_spans` raises, the span tags
+    `chunk.outcome=validation_failed` and ERROR status before the
+    exception propagates. Mirrors the s_filings-worker error-path
+    pattern."""
+
+    def _broken_validator(*args: Any, **kwargs: Any) -> None:
+        raise ChunkValidationError("synthetic mismatch")
+
+    monkeypatch.setattr(chunking_mod, "validate_char_spans", _broken_validator)
+
+    html = (
+        "<html><body><h1>Item 1A. Risk Factors</h1>"
+        + ("<p>Risk content " + ("word " * 80) + ".</p>") * 4
+        + "</body></html>"
+    )
+    with pytest.raises(ChunkValidationError):
+        parse_filing(html=html, metadata=edge_metadata)
+
+    attrs = span_recorder.attrs("chunk.parse_filing")
+    assert attrs["chunk.outcome"] == "validation_failed"
+    span = span_recorder.one("chunk.parse_filing")
+    assert span.status.status_code.name == "ERROR"
 
 
 # ---------- Meta-test: no disabling flags on chunking public API ------------

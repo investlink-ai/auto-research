@@ -370,6 +370,7 @@ matters operationally:
 | `transcript.fetch` | `ingest/transcripts/__init__.py` | `transcript.ticker`, `.year`, `.quarter`, `.source_name`, `.outcome` |
 | `transcript.find_audio_url` | `ingest/transcripts/sources/youtube.py` | `transcript.query`, `transcript.result_count`, `transcript.matched` |
 | `transcript.download` | `youtube.py` + `direct_mp3.py` | `transcript.source_name`, `transcript.bytes`, `transcript.duration_ms` |
+| `chunk.parse_filing` | `extract/chunking.py` | `chunk.doc_id`, `.doc_type`, `.ticker`, `.n_sections`, `.n_parents`, `.n_children`, `.n_table_parents`, `.outcome` (ok / no_sections_detected / validation_failed / subdivision_failed / error) |
 | `extract.s_filings` | `extract/workers/s_filings.py` | `extract.worker`, `extract.doc_id`, `extract.outcome` (cache_hit / persisted / quarantined) |
 
 LLM cost (`llm.cost.est_usd`) is set on the active span by

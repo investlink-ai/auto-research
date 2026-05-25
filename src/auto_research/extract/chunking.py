@@ -46,8 +46,19 @@ from pathlib import Path
 from typing import Final
 
 import tiktoken
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 
 from auto_research._io import atomic_write_text
+from auto_research.telemetry import truncate_status_description as _truncate
+
+# Manual span at the chunking orchestration boundary. Auto-instrumentation
+# covers SDK calls; chunking is a sub-step inside extraction workers, so
+# this span nests under the worker's outer span (e.g. `extract.s_filings`)
+# and reports the chunker's own outcome enum: dashboards can filter
+# "chunking failures" separately from "extraction failures" without
+# walking the full trace tree.
+_tracer = trace.get_tracer(__name__)
 
 # Module-level cache: once a successful warmup completes, subsequent
 # `_ensure_nlp_warmup()` calls are no-ops. The flag is process-local so
@@ -1248,24 +1259,77 @@ def parse_filing(*, html: str, metadata: ChunkMetadata) -> ChunkSet:
     chunks ≤ MAX_PARENT_TOKENS along HTML boundary tags. Children
     subdivide each parent into 200-800-token retrieval units; table
     parents emit a single child equal to the parent (ADR D5).
+
+    Emits a manual OTel span `chunk.parse_filing` with attributes:
+    `chunk.doc_id`, `chunk.doc_type`, `chunk.ticker`, `chunk.n_sections`,
+    `chunk.n_parents`, `chunk.n_children`, `chunk.n_table_parents`,
+    `chunk.outcome` (`ok` / `no_sections_detected` / `validation_failed` /
+    `subdivision_failed`). See `docs/ARCHITECTURE.md` §5.3.
     """
-    _ensure_nlp_warmup()
+    with _tracer.start_as_current_span("chunk.parse_filing") as span:
+        span.set_attribute("chunk.doc_id", metadata.doc_id)
+        span.set_attribute("chunk.doc_type", metadata.doc_type)
+        span.set_attribute("chunk.ticker", metadata.ticker)
+        try:
+            _ensure_nlp_warmup()
 
-    sections = _detect_sections(html)
-    if not sections:
-        # Whole document as one synthetic "Body" section.
-        sections = [_DetectedSection(name="Body", char_span=(0, len(html)))]
+            sections = _detect_sections(html)
+            if not sections:
+                # Whole document as one synthetic "Body" section.
+                sections = [_DetectedSection(name="Body", char_span=(0, len(html)))]
+                outcome = "no_sections_detected"
+            else:
+                outcome = "ok"
+            span.set_attribute("chunk.n_sections", len(sections))
 
-    parents_list: list[ParentChunk] = []
-    for s in sections:
-        parents_list.extend(_emit_section_chunks(html, s, metadata))
+            parents_list: list[ParentChunk] = []
+            for s in sections:
+                parents_list.extend(_emit_section_chunks(html, s, metadata))
 
-    children_list: list[ChildChunk] = []
-    for p in parents_list:
-        children_list.extend(subdivide_to_children(p))
+            children_list: list[ChildChunk] = []
+            try:
+                for p in parents_list:
+                    children_list.extend(subdivide_to_children(p))
+            except ChunkValidationError as exc:
+                # `subdivide_to_children` raises only for pathological
+                # spans (>MAX_UNBREAKABLE_CHILD_TOKENS with no boundary)
+                # — distinct from the char_span check below. Tag the
+                # outcome before letting the caller route to quarantine.
+                span.set_attribute("chunk.outcome", "subdivision_failed")
+                span.set_attribute("chunk.n_parents", len(parents_list))
+                span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+                raise
 
-    validate_char_spans(html, parents_list, children_list)
-    return ChunkSet(parents=tuple(parents_list), children=tuple(children_list))
+            try:
+                validate_char_spans(html, parents_list, children_list)
+            except ChunkValidationError as exc:
+                span.set_attribute("chunk.outcome", "validation_failed")
+                span.set_attribute("chunk.n_parents", len(parents_list))
+                span.set_attribute("chunk.n_children", len(children_list))
+                span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+                raise
+
+            span.set_attribute("chunk.n_parents", len(parents_list))
+            span.set_attribute("chunk.n_children", len(children_list))
+            span.set_attribute(
+                "chunk.n_table_parents",
+                sum(1 for p in parents_list if p.table_html is not None),
+            )
+            span.set_attribute("chunk.outcome", outcome)
+            return ChunkSet(
+                parents=tuple(parents_list),
+                children=tuple(children_list),
+            )
+        except ChunkValidationError:
+            # Outcome + status already set on the typed-error branches above.
+            raise
+        except Exception as exc:
+            # Anything else (NLP-warmup failure, programmer error) is an
+            # infra failure — tag distinctly so dashboards don't count it
+            # as a chunker contract violation.
+            span.set_attribute("chunk.outcome", "error")
+            span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+            raise
 
 
 __all__ = [
