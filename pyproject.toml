@@ -152,6 +152,14 @@ ignore_missing_imports = true
 module = "exchange_calendars.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "lancedb.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "sentence_transformers.*"
+ignore_missing_imports = true
+
 [dependency-groups]
 dev = [
     "hypothesis>=6.152.9",
