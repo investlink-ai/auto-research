@@ -883,6 +883,9 @@ def test_fetch_transcript_empty_body_sets_error_status(
     from opentelemetry.trace import StatusCode
 
     source = _FakeSource(audio_url="https://example.com/a.mp3", payload=b"")
+    # Inject a fake engine — orchestrator constructs the real WhisperEngine
+    # before the empty-body branch fires, and CI has no OPENAI_API_KEY.
+    engine = _FakeEngine(_canned_transcript())
     fetch_transcript(
         "ACME",
         2024,
@@ -890,6 +893,7 @@ def test_fetch_transcript_empty_body_sets_error_status(
         raw_root=tmp_path / "raw",
         manifest_path=tmp_path / "manifest.parquet",
         source=source,
+        engine=engine,
         event_datetime=datetime(2024, 5, 22, 20, 30, tzinfo=UTC),
     )
     span = span_recorder.one("transcript.fetch")
