@@ -69,8 +69,8 @@ _ROUTING: Final[dict[tuple[str, str], str]] = {
     ("s_filings", "dilution_event"): _HAIKU,
     ("s_filings", "capital_raise_language"): _HAIKU,
     ("s_filings", "use_of_proceeds"): _HAIKU,
-    # Contextual chunking (Issue #14): one-line "this chunk is from X" rewrite
-    # per ChildChunk for Anthropic's contextual-retrieval pattern. High-volume
+    # Contextual chunking: one-line "this chunk is from X" rewrite per
+    # ChildChunk for Anthropic's contextual-retrieval pattern. High-volume
     # templated rewrite ⇒ Haiku per §7.3.
     ("extract", "contextual_chunk"): _HAIKU,
     # Agents don't have output schemas; use logical task names instead of fields.

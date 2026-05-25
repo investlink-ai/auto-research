@@ -36,9 +36,9 @@ def test_prompt_has_no_source_text_placeholder() -> None:
 
 
 def test_contextual_chunk_prompt_exports_required_constants() -> None:
-    """Contextual-chunking prompt (Issue #14) must follow the same vN
-    convention and forbid commentary in the response (the response text
-    IS the context line, so any preamble would land in the embedding)."""
+    """Contextual-chunking prompt must follow the same vN convention and
+    forbid commentary in the response (the response text IS the context
+    line, so any preamble would land in the embedding)."""
     assert re.fullmatch(r"v\d+", CONTEXTUAL_CHUNK_PROMPT_VERSION)
     assert isinstance(CONTEXTUAL_CHUNK_PROMPT, str) and CONTEXTUAL_CHUNK_PROMPT.strip()
     # The prompt must instruct the model to stay ≤100 tokens (AC bullet).

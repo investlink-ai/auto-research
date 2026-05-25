@@ -1,4 +1,4 @@
-"""Unit tests for `auto_research.extract.chunking_contextual` (Issue #14).
+"""Unit tests for `auto_research.extract.chunking_contextual`.
 
 Hermetic: the Anthropic SDK is mocked. Each test exercises one AC bullet
 or one behavior (cache hit, prompt-version invalidation, ≤100-token cap,

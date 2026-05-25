@@ -1,4 +1,4 @@
-"""VCR-recorded integration test for contextual chunking (Issue #14 AC).
+"""VCR-recorded integration test for contextual chunking.
 
 Acceptance criterion: "Context generation calls use prompt caching
 (verified via VCR)."

@@ -2,7 +2,7 @@
 
 Generates a one-line situating context for a `ChildChunk` — e.g.,
 *"This chunk is from NVDA Q3-2026 10-Q MD&A discussing China export controls"* —
-that is later prepended to the chunk text before embedding (Issue #15).
+that is later prepended to the chunk text before embedding.
 ~50% retrieval lift in Anthropic's published numbers; the lift is meaningless
 if the context is verbose, so the prompt caps it at one sentence ≤100 tokens.
 

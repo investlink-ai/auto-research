@@ -3,7 +3,7 @@
 For each `ChildChunk` produced by `extract.chunking`, generate a one-line
 context (≤100 tokens) that situates the chunk within its source filing,
 and pair it with the original chunk in a `ContextualChildChunk`. Downstream
-embedding (Issue #15) prepends `context` to `child.text` before sending
+embedding prepends `context` to `child.text` before sending
 the result through Voyage / BGE — Anthropic reports ~50% retrieval lift
 from this transformation.
 
