@@ -7,6 +7,7 @@ VOYAGE_API_KEY set (vcrpy record_mode="once" records on absence).
 
 from __future__ import annotations
 
+import os
 from datetime import date
 from pathlib import Path
 
@@ -35,8 +36,13 @@ def _build_vcr() -> vcr.VCR:
 
 @pytest.fixture
 def voyage_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VOYAGE_API_KEY", "vk-test-not-a-real-key")
     monkeypatch.delenv("VOYAGE_MODEL", raising=False)
+    # On replay (cassette exists), supply a dummy key so the adapter picks
+    # the voyage backend; the live header is redacted by `filter_headers`
+    # in the cassette anyway. On record, leave the shell-provided key
+    # alone — overriding it would 401 against the live endpoint.
+    if CASSETTE_PATH.exists() and not os.environ.get("VOYAGE_API_KEY"):
+        monkeypatch.setenv("VOYAGE_API_KEY", "vk-test-not-a-real-key")
 
 
 def _chunk(text: str) -> ContextualChildChunk:
@@ -62,9 +68,9 @@ def _chunk(text: str) -> ContextualChildChunk:
 def test_voyage_embed_round_trip_against_recorded_response(
     tmp_path: Path, voyage_env: None
 ) -> None:
-    if not CASSETTE_PATH.exists():
+    if not CASSETTE_PATH.exists() and not os.environ.get("VOYAGE_API_KEY"):
         pytest.skip(
-            f"VCR cassette missing at {CASSETTE_PATH}. "
+            f"VCR cassette missing at {CASSETTE_PATH} and no VOYAGE_API_KEY set. "
             "Record with VOYAGE_API_KEY set: "
             "`pytest tests/integration/test_embeddings_vcr.py`."
         )
