@@ -77,13 +77,15 @@ def _find_primary_10k_url(cik: int, accession: str) -> str:
     body = _http_get(index_url).decode("utf-8", errors="replace")
 
     # Collect both direct and iXBRL-wrapped links to .htm files in this
-    # submission's folder; unwrap `/ix?doc=` so the resolver sees a
-    # canonical path either way.
+    # submission. Some filings (CEG and other parent/subsidiary joint
+    # filings) reference docs under a DIFFERENT CIK than the filer's
+    # own — match any CIK in the path, then require the accession
+    # number to confirm the doc belongs to this submission.
     direct = re.findall(
-        rf'href="(/Archives/edgar/data/{cik}/{accession_undashed}/[^"]+\.htm)"', body
+        rf'href="(/Archives/edgar/data/\d+/{accession_undashed}/[^"]+\.htm)"', body
     )
     wrapped = re.findall(
-        rf'href="/ix\?doc=(/Archives/edgar/data/{cik}/{accession_undashed}/[^"]+\.htm)"',
+        rf'href="/ix\?doc=(/Archives/edgar/data/\d+/{accession_undashed}/[^"]+\.htm)"',
         body,
     )
     seen: set[str] = set()
@@ -94,6 +96,9 @@ def _find_primary_10k_url(cik: int, accession: str) -> str:
             paths.append(p)
 
     # Drop exhibits, certifications, subsidiary lists, consents, etc.
+    # The `ex\d` pattern catches QUBT-style filenames like
+    # `ea027844501ex21-1.htm` where `ex` is embedded mid-name without
+    # a word boundary that the other tokens would catch.
     exhibit_tokens = (
         "_ex",
         "-ex",
@@ -107,9 +112,25 @@ def _find_primary_10k_url(cik: int, accession: str) -> str:
         "descriptionof",
         "listofregistrants",
     )
-    candidates = [p for p in paths if not any(tok in p.lower() for tok in exhibit_tokens)]
+    exhibit_pattern = re.compile(r"\bex\d", re.IGNORECASE)
+    candidates = [
+        p
+        for p in paths
+        if not any(tok in p.lower() for tok in exhibit_tokens)
+        and not exhibit_pattern.search(p.rsplit("/", 1)[-1])
+    ]
     if not candidates:
         raise RuntimeError(f"could not find primary 10-K doc in {index_url}")
+
+    # Strong positive signal: filename contains "10k" or "10-k"
+    # somewhere. The primary 10-K doc almost always has this token;
+    # cover pages and other miscellaneous filings do not. If any
+    # candidate matches, restrict to those.
+    primary_token = re.compile(r"10-?k", re.IGNORECASE)
+    primary = [p for p in candidates if primary_token.search(p.rsplit("/", 1)[-1])]
+    if primary:
+        candidates = primary
+
     if len(candidates) == 1:
         return f"{SEC_BASE}{candidates[0]}"
     # Multiple candidates — pick the shortest filename (heuristic: the

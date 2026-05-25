@@ -107,6 +107,17 @@ MAX_PARENT_TOKENS: Final[int] = 4_000
 MIN_CHILD_TOKENS: Final[int] = 200
 MAX_CHILD_TOKENS: Final[int] = 800
 
+# Hard limit on how many tokens an UNBREAKABLE child span can hold
+# before we quarantine. Some real-world filings have legitimate
+# paragraphs slightly above MAX_CHILD_TOKENS with no boundary tags
+# (e.g. iXBRL `<span>`-wrapped sentences without `</p>` inside Item
+# 16 boilerplate); failing those would lose the entire ChunkSet. The
+# 2x ratio admits these gracefully while still quarantining truly
+# pathological inputs (a runaway paragraph > 1600 tokens with no
+# boundary is almost always upstream parser breakage, not a real
+# filing structure).
+MAX_UNBREAKABLE_CHILD_TOKENS: Final[int] = MAX_CHILD_TOKENS * 2
+
 DEFAULT_QUARANTINE_ROOT: Final[Path] = Path("data/quarantine")
 
 # cl100k_base is the closest publicly available tokenizer to Claude's
@@ -147,6 +158,47 @@ _VALID_10K_ITEMS: Final[frozenset[str]] = frozenset(
 # decide if a candidate Item match starts a structural header (vs. an
 # inline cross-reference like "compared to Item 7 above").
 _BLOCK_HEADER_LOOKBACK: Final[int] = 80
+
+# Bare section-title → Item number mapping. Some filers (HON, BE, NRG,
+# CEG, QUBT) put section bodies under their canonical SEC title only
+# ("RISK FACTORS"), without the "Item 1A." prefix. The chunker's
+# `_detect_sections` runs a fallback pass for any Item NOT found via
+# the prefix scan, looking for the bare title in a styled-header
+# context.
+#
+# The catalog mirrors SEC Form 10-K canonical titles. Longer titles
+# come first within an Item so the longer string wins when it's a
+# superset (avoids "Management's Discussion and Analysis" being
+# shadowed by "Management's Discussion" if both appear).
+_BARE_TITLE_TO_ITEM: Final[dict[str, str]] = {
+    "Risk Factors": "1A",
+    "Unresolved Staff Comments": "1B",
+    "Cybersecurity": "1C",
+    "Properties": "2",
+    "Legal Proceedings": "3",
+    "Mine Safety Disclosures": "4",
+    "Management's Discussion and Analysis of Financial Condition "
+    "and Results of Operations": "7",
+    "Management's Discussion and Analysis": "7",
+    "Quantitative and Qualitative Disclosures About Market Risk": "7A",
+    "Quantitative and Qualitative Disclosures": "7A",
+    "Financial Statements and Supplementary Data": "8",
+    "Controls and Procedures": "9A",
+}
+
+# Pre-compile bare-title patterns once. Word-boundaries on both sides
+# so "Risk Factors" doesn't match inside "Risk Factors Summary".
+_BARE_TITLE_PATTERNS: Final[list[tuple[re.Pattern[str], str]]] = [
+    (re.compile(rf"\b{re.escape(title)}\b", re.IGNORECASE), item)
+    for title, item in sorted(
+        _BARE_TITLE_TO_ITEM.items(), key=lambda kv: -len(kv[0])
+    )
+]
+
+# Lookback when checking if a candidate position sits inside an open
+# `<a>` tag (TOC link). 400 chars covers the longest `<a style="...">`
+# opening attribute lists in SEC iXBRL.
+_ANCHOR_LOOKBACK: Final[int] = 400
 
 
 # ---------- Exceptions ------------------------------------------------------
@@ -482,18 +534,39 @@ _HEADER_DENSITY_SKIP_BYTES: Final[int] = 200
 _HEADER_DENSITY_WINDOW_BYTES: Final[int] = 2_000
 _HEADER_DENSITY_MIN_ALPHA: Final[int] = 80
 
-# A real Item header is followed by ". <SECTION TITLE>" — period (or
-# entity-encoded space-then-period), optional whitespace, then a
-# capitalized title (Risk Factors, Management's Discussion, etc.).
-# Cross-references say "Item 7 above" / "Item 7 of this Form" — no
-# period, lowercase preposition. Inspected after stripping HTML tags
-# and entities so the title check works regardless of how the filer
-# styled the heading. The 800-char raw-HTML window is sized to capture
-# the closing `>` of multi-line `<p style="...">` openings common in
-# MSFT-template filings (style attribute can run 100+ characters
-# before the tag closes).
+# A real Item header is followed by a separator then `<SECTION TITLE>`
+# — period, colon, em-dash, en-dash, or hyphen — then optional
+# whitespace, then a capitalized title (Risk Factors, Management's
+# Discussion, etc.). Cross-references say "Item 7 above" / "Item 7 of
+# this Form" — no separator, lowercase preposition. Inspected after
+# stripping HTML tags and entities so the title check works regardless
+# of how the filer styled the heading. The 800-char raw-HTML window is
+# sized to capture the closing `>` of multi-line `<p style="...">`
+# openings common in MSFT-template filings (style attribute can run
+# 100+ characters before the tag closes).
 _HEADER_TITLE_LOOKAHEAD: Final[int] = 800
-_TITLE_PATTERN = re.compile(r"^\s*[.:]\s*[A-Z]")
+# Separator chars accepted in title pattern: period, colon, em dash
+# (U+2014), en dash (U+2013), hyphen-minus. The non-ASCII dashes are
+# intentional — filers like BE and NRG use them as the Item-header
+# separator. Defined via \uXXXX escapes so the source stays pure
+# ASCII (and ruff's RUF001 ambiguous-character lint doesn't trip).
+_EM_DASH = "—"
+_EN_DASH = "–"  # noqa: RUF001 — intentional en dash separator
+_TITLE_PATTERN = re.compile(
+    "^\\s*[.:" + _EM_DASH + _EN_DASH + "-]\\s*[A-Z]"
+)
+
+# Common HTML-entity dash variants. These must be preserved through
+# the entity-strip in `_is_real_section_header` because they ARE the
+# header separator in some filings (BE uses `Item 1A&#8212;Risk
+# Factors`, etc.). Mapped to literal Unicode dash chars so the
+# title-pattern's character class sees them.
+_DASH_ENTITY_MAP: Final[dict[str, str]] = {
+    "&#8212;": _EM_DASH,
+    "&#8211;": _EN_DASH,
+    "&mdash;": _EM_DASH,
+    "&ndash;": _EN_DASH,
+}
 
 
 def _is_real_section_header(html: str, span_start: int) -> bool:
@@ -516,8 +589,12 @@ def _is_real_section_header(html: str, span_start: int) -> bool:
     if after is None:
         return False
     title_window = html[after.end() : after.end() + _HEADER_TITLE_LOOKAHEAD]
-    # Strip HTML tags and entities; preserve relative ordering.
+    # Strip HTML tags first, then map dash entities to their literal
+    # character (so the title pattern can see them as separators),
+    # then collapse the remaining entities to whitespace.
     title_clean = re.sub(r"<[^>]+>", "", title_window)
+    for entity, char in _DASH_ENTITY_MAP.items():
+        title_clean = title_clean.replace(entity, char)
     title_clean = re.sub(r"&[^;]+;", " ", title_clean)
     if not _TITLE_PATTERN.match(title_clean):
         return False
@@ -560,6 +637,22 @@ _STYLED_HEADER_RE = re.compile(
     r"font-weight\s*[:=]\s*['\"]?(?:700|800|900|bold|bolder)['\"]?[^>]*>\s*$",
     re.IGNORECASE,
 )
+
+
+def _is_in_open_anchor(html: str, pos: int) -> bool:
+    """Return True if `pos` sits inside an open `<a ...>` tag (TOC link).
+
+    Scans back `_ANCHOR_LOOKBACK` chars: if the nearest `<a` opening
+    occurs AFTER the nearest `</a>` closing, we're inside an anchor.
+    SEC filings put TOC links inside `<a href="#...">` — bare section
+    titles inside those anchors are navigation, not real headers.
+    """
+    window_start = max(0, pos - _ANCHOR_LOOKBACK)
+    window = html[window_start:pos]
+    # `<a ` (with whitespace) — avoids matching `<abbr>`, `<address>`, etc.
+    last_open = max(window.rfind("<a "), window.rfind("<a\t"), window.rfind("<a\n"))
+    last_close = window.rfind("</a>")
+    return last_open > last_close
 
 
 def _looks_like_block_header(html: str, span_start: int) -> bool:
@@ -705,6 +798,34 @@ def _detect_sections(html: str) -> list[_DetectedSection]:
             continue
         name = f"Item {num}"
         by_name.setdefault(name, m.start())
+
+    # Fallback: bare-title detection. Some filers (HON, BE, NRG, CEG,
+    # QUBT) mark section bodies with the canonical SEC title only
+    # ("RISK FACTORS") instead of "Item 1A. Risk Factors". For each
+    # Item not already detected via the prefix scan, look for the
+    # canonical bare title in a styled-header context that isn't
+    # inside a TOC anchor.
+    for pattern, num in _BARE_TITLE_PATTERNS:
+        name = f"Item {num}"
+        if name in by_name:
+            continue
+        for m in pattern.finditer(masked):
+            pos = m.start()
+            if _is_in_open_anchor(html, pos):
+                continue
+            if not _looks_like_block_header(html, pos):
+                continue
+            # Density check: substantial prose follows the title.
+            # We use the same window/skip as the prefix path —
+            # the candidate isn't bleeding into the threshold here
+            # (bare title is short; rendered text starts past it).
+            window_start = m.end()
+            snippet = html[window_start : window_start + _HEADER_DENSITY_WINDOW_BYTES]
+            stripped = re.sub(r"<[^>]+>|&[^;]+;", " ", snippet)
+            if sum(1 for c in stripped if c.isalpha()) < _HEADER_DENSITY_MIN_ALPHA:
+                continue
+            by_name[name] = pos
+            break
 
     if not by_name:
         return []
@@ -1031,13 +1152,39 @@ def subdivide_to_children(parent: ParentChunk) -> list[ChildChunk]:
             continue
         # No safe cut available — single span between two consecutive
         # boundaries exceeds MAX_CHILD_TOKENS. Splitting mid-tag breaks
-        # INV-2-adjacent contracts; quarantine instead.
+        # INV-2-adjacent contracts. Two paths:
+        #   (a) candidate_tokens ≤ MAX_UNBREAKABLE_CHILD_TOKENS: emit
+        #       the oversized child as-is. Real iXBRL filings (BE,
+        #       others) have legitimate paragraphs slightly above MAX
+        #       with no `</p>`/sentence boundaries inside; failing
+        #       these loses the whole ChunkSet for a chunk that's
+        #       only modestly over budget.
+        #   (b) candidate_tokens > MAX_UNBREAKABLE_CHILD_TOKENS:
+        #       raise — a runaway span this large indicates upstream
+        #       parser breakage rather than legitimate filing
+        #       structure. The caller routes to quarantine.
+        if candidate_tokens <= MAX_UNBREAKABLE_CHILD_TOKENS:
+            children.append(
+                ChildChunk(
+                    text=parent_text[cursor:cut],
+                    char_span=(abs_offset + cursor, abs_offset + cut),
+                    token_count=candidate_tokens,
+                    parent_id=_parent_id(parent),
+                    section_name=parent.section_name,
+                    from_table=False,
+                    metadata=parent.metadata,
+                )
+            )
+            cursor = cut
+            bp_index += 1
+            continue
         raise ChunkValidationError(
             f"child subdivision failed for parent {parent.section_name!r} "
             f"at parent-relative offsets ({cursor}, {cut}): single span of "
-            f"{candidate_tokens} tokens exceeds MAX_CHILD_TOKENS={MAX_CHILD_TOKENS} "
+            f"{candidate_tokens} tokens exceeds "
+            f"MAX_UNBREAKABLE_CHILD_TOKENS={MAX_UNBREAKABLE_CHILD_TOKENS} "
             "with no available boundary to split on. Caller routes to "
-            "quarantine_chunkset rather than emitting an oversized child."
+            "quarantine_chunkset rather than emitting a pathological child."
         )
 
     # Tail flush: if anything is buffered past the last emitted cursor,

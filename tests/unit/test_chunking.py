@@ -453,14 +453,26 @@ def test_real_10k_children_are_subset_of_parent_spans(filing: _LoadedFixture) ->
 
 
 def test_real_10k_child_token_band_narrative_only(filing: _LoadedFixture) -> None:
-    """Narrative children stay within MAX_CHILD_TOKENS. Table children
-    can exceed it (they equal their parent per ADR D5; that's the
-    documented degenerate case)."""
+    """Narrative children stay within MAX_UNBREAKABLE_CHILD_TOKENS.
+
+    The strict cap is MAX_CHILD_TOKENS=800, but real iXBRL filings
+    sometimes have paragraphs slightly above that with no `</p>` /
+    sentence boundary the chunker can split on (BE's Item 16 hits
+    this). Rather than failing the whole ChunkSet, the chunker emits
+    the oversized child as-is when ≤ MAX_UNBREAKABLE_CHILD_TOKENS
+    (= 2x MAX_CHILD_TOKENS). Pathological spans (>2x) still raise.
+
+    Table children may exceed any cap (they equal their parent per
+    ADR D5; that's the documented degenerate case).
+    """
+    from auto_research.extract.chunking import MAX_UNBREAKABLE_CHILD_TOKENS
+
     for c in filing.parsed.children:
         if c.from_table:
             continue
-        assert c.token_count <= MAX_CHILD_TOKENS, (
-            f"[{filing.stem}] narrative child exceeds MAX_CHILD_TOKENS: {c.token_count}"
+        assert c.token_count <= MAX_UNBREAKABLE_CHILD_TOKENS, (
+            f"[{filing.stem}] narrative child exceeds "
+            f"MAX_UNBREAKABLE_CHILD_TOKENS: {c.token_count}"
         )
 
 
@@ -599,6 +611,192 @@ def test_at_least_one_table_html_is_pandas_readable(filing: _LoadedFixture) -> N
     )
 
 
+def test_cross_section_table_is_not_emitted_as_table_chunk(
+    edge_metadata: ChunkMetadata,
+) -> None:
+    """ADR D5: a `<table>` that opens inside one section but `</table>`
+    closes after the next section header is NOT emitted as a table
+    chunk. Clamping its span to the section end would yield malformed
+    `table_html` (open `<table>` without close), violating D5's well-
+    formed-HTML invariant for downstream `pandas.read_html` consumers.
+
+    Instead the open `<table>` falls into the originating section's
+    narrative span and the close lands in the next section's
+    narrative. INV-2 still holds (chunk.text == html[span]); the
+    table-policy contract simply doesn't apply to this table.
+    """
+    cross_table = (
+        "<table id='cross'>"
+        "<tr><td>row before next section header</td></tr>"
+        # The next-section header appears INSIDE this table.
+        "<tr><td>"
+        "<div><span style=\"font-weight:700\">Item 7. Management's Discussion and Analysis</span></div>"
+        "</td></tr>"
+        "<tr><td>row after next section header</td></tr>"
+        "</table>"
+    )
+    html = (
+        "<html><body><h1>Item 1A. Risk Factors</h1>"
+        + ("<p>Risk factor paragraph " + ("word " * 80) + ".</p>") * 4
+        + cross_table
+        + ("<p>MD&amp;A paragraph " + ("word " * 80) + ".</p>") * 4
+        + "</body></html>"
+    )
+    result = parse_filing(html=html, metadata=edge_metadata)
+
+    # Both sections detected.
+    sections = {p.section_name for p in result.parents}
+    assert "Item 1A" in sections, f"got: {sorted(sections)}"
+    assert "Item 7" in sections, f"got: {sorted(sections)}"
+
+    # No parent chunk should claim this cross-section <table> as
+    # `table_html` — the chunker recognized it as cross-boundary and
+    # skipped it.
+    table_chunks = [p for p in result.parents if p.table_html is not None]
+    for p in table_chunks:
+        assert p.table_html is not None  # narrow type for mypy
+        assert "row after next section header" not in p.table_html, (
+            "cross-section table was emitted as a table chunk; ADR D5 violated"
+        )
+
+    # INV-2 must still hold across all chunks.
+    for p in result.parents:
+        assert html[p.char_span[0] : p.char_span[1]] == p.text
+
+
+def test_layout_table_is_emitted_with_well_formed_table_html(
+    edge_metadata: ChunkMetadata,
+) -> None:
+    """Some filers (MSFT, RDW) use HTML `<table>` for visual layout —
+    bulleted lists, side-by-side text columns — rather than for
+    tabular data. The chunker can't (and shouldn't) distinguish
+    layout-tables from data-tables structurally; it emits ALL
+    `<table>` regions as table chunks with `table_html` populated.
+
+    Downstream consumers discriminate: `pandas.read_html` either
+    parses the table as data or rejects it. The chunker's contract
+    here is narrow: `table_html`, when present, starts with `<table`
+    and ends with `</table>` so downstream HTML-aware code receives
+    well-formed markup.
+    """
+    layout_table = (
+        "<table>"
+        "<tr>"
+        "<td style='width:5%'>&#8226;</td>"  # bullet glyph
+        "<td>This is a bulleted risk-factor item formatted as a "
+        "layout table. The cell on the left is the bullet glyph; "
+        "this cell holds the risk-factor prose itself.</td>"
+        "</tr>"
+        "<tr>"
+        "<td>&#8226;</td>"
+        "<td>A second bulleted item, also using the layout-table "
+        "convention rather than a real `<ul>` list.</td>"
+        "</tr>"
+        "</table>"
+    )
+    html = (
+        "<html><body><h1>Item 1A. Risk Factors</h1>"
+        + ("<p>Risk factor prose " + ("word " * 80) + ".</p>")
+        + layout_table
+        + ("<p>More risk factor prose " + ("word " * 80) + ".</p>")
+        + "</body></html>"
+    )
+    result = parse_filing(html=html, metadata=edge_metadata)
+    table_chunks = [p for p in result.parents if p.table_html is not None]
+    assert table_chunks, "layout table not emitted as a table chunk"
+    for p in table_chunks:
+        # Well-formed-HTML contract (ADR D5).
+        assert p.table_html
+        assert p.table_html.lstrip().lower().startswith("<table")
+        assert p.table_html.rstrip().lower().endswith("</table>")
+    # INV-2 holds.
+    for p in result.parents:
+        assert html[p.char_span[0] : p.char_span[1]] == p.text
+
+
+def test_bare_section_title_detected_when_item_prefix_missing(
+    edge_metadata: ChunkMetadata,
+) -> None:
+    """Some filers (HON, NRG, others) mark section bodies with bare
+    canonical SEC titles ('Risk Factors', 'Management's Discussion and
+    Analysis') without the 'Item N.' prefix. The chunker's bare-name
+    fallback maps these back to Item numbers."""
+    html = (
+        "<html><body>"
+        # Cover page — no "Item N." prefix anywhere in body.
+        "<div style='font-weight:700'>ANNUAL REPORT ON FORM 10-K</div>"
+        + ("<p>Cover-page boilerplate " + ("word " * 30) + ".</p>")
+        # Bare title for Item 1A — large styled heading.
+        + "<div><span style='font-size:18pt;font-weight:700'>Risk Factors</span></div>"
+        + ("<p>Our business involves significant risk. " + ("risk " * 100) + ".</p>") * 4
+        # Bare title for Item 7.
+        + "<div><span style='font-size:18pt;font-weight:700'>"
+        "Management's Discussion and Analysis</span></div>"
+        + ("<p>The following discussion " + ("word " * 100) + ".</p>") * 4
+        # Bare title for Item 8.
+        + "<div><span style='font-size:18pt;font-weight:700'>"
+        "Financial Statements and Supplementary Data</span></div>"
+        + ("<p>The financial statements " + ("word " * 100) + ".</p>") * 4
+        + "</body></html>"
+    )
+    result = parse_filing(html=html, metadata=edge_metadata)
+    section_names = {p.section_name for p in result.parents}
+    assert "Item 1A" in section_names, f"got: {sorted(section_names)}"
+    assert "Item 7" in section_names, f"got: {sorted(section_names)}"
+    assert "Item 8" in section_names, f"got: {sorted(section_names)}"
+
+
+def test_bare_section_title_in_toc_anchor_does_not_false_positive(
+    edge_metadata: ChunkMetadata,
+) -> None:
+    """The string 'Risk Factors' inside a `<a href="#...">` TOC link
+    is navigation, not a real section header. The bare-name fallback
+    must skip anchor-wrapped titles."""
+    html = (
+        "<html><body>"
+        # TOC with a bunch of anchor links — bare titles inside <a>.
+        "<div>Table of Contents</div>"
+        "<div><a href='#item1a'>Risk Factors</a></div>"
+        "<div><a href='#item7'>Management's Discussion and Analysis</a></div>"
+        + ("<p>cover boilerplate " + ("word " * 30) + ".</p>")
+        # Real bare-title heading much later in doc order, also for 1A.
+        + "<div><span style='font-size:18pt;font-weight:700'>Risk Factors</span></div>"
+        + ("<p>Our business involves significant risk. " + ("risk " * 100) + ".</p>") * 4
+        + "</body></html>"
+    )
+    result = parse_filing(html=html, metadata=edge_metadata)
+    item_1a_parents = [p for p in result.parents if p.section_name == "Item 1A"]
+    assert item_1a_parents, "Item 1A should be detected via the real bare header"
+    # The detected Item 1A should be the real one (the LATER position),
+    # not the TOC anchor.
+    first_1a_start = item_1a_parents[0].char_span[0]
+    toc_anchor_pos = html.find("<a href='#item1a'>")
+    assert first_1a_start > toc_anchor_pos, (
+        "Item 1A detected at the TOC anchor position instead of the real header"
+    )
+
+
+def test_em_dash_separator_in_item_header_is_recognized(
+    edge_metadata: ChunkMetadata,
+) -> None:
+    """Some filers (BE, NRG) write `Item 1A&#8212;Risk Factors`
+    (em-dash separator) rather than the canonical `Item 1A. Risk
+    Factors`. The chunker's title-pattern accepts em-dash, en-dash,
+    hyphen, period, and colon as separators."""
+    html = (
+        "<html><body>"
+        + "<div><span style='font-weight:700'>Item 1A&#8212;Risk Factors</span></div>"
+        + ("<p>Risk factor content " + ("word " * 100) + ".</p>") * 4
+        + "<div><span style='font-weight:700'>Item 7 &#8211; Management's Discussion</span></div>"
+        + ("<p>MD&amp;A content " + ("word " * 100) + ".</p>") * 4
+        + "</body></html>"
+    )
+    result = parse_filing(html=html, metadata=edge_metadata)
+    section_names = {p.section_name for p in result.parents}
+    assert "Item 1A" in section_names
+    assert "Item 7" in section_names
+
+
 def test_nested_table_html_covers_outer_table(edge_metadata: ChunkMetadata) -> None:
     """`table_html` must cover the full OUTER table even when inner
     tables are nested inside — common in SEC iXBRL layouts. Without
@@ -680,20 +878,28 @@ def test_narrative_children_have_from_table_false(filing: _LoadedFixture) -> Non
 def test_subdivide_raises_when_no_safe_split_exists(
     edge_metadata: ChunkMetadata,
 ) -> None:
-    """P1-7: a narrative parent containing a single span whose tokens
-    exceed MAX_CHILD_TOKENS with no internal break boundary must raise
-    ChunkValidationError (caller routes to quarantine), not silently
-    emit an oversized child."""
-    # Build a parent whose text has no `. ` / `</p>` boundaries and
-    # exceeds MAX_CHILD_TOKENS in a single span. Use a diverse char
-    # mix so tiktoken cannot compress repeated patterns into a small
-    # token count.
-    import string
+    """A narrative parent containing a single span pathologically larger
+    than MAX_UNBREAKABLE_CHILD_TOKENS with no internal break boundary
+    must raise ChunkValidationError (caller routes to quarantine).
+    Modest oversize (between MAX_CHILD_TOKENS and 2x MAX) is allowed
+    — see test_subdivide_tolerates_modest_unbreakable_oversize."""
+    import random
 
-    rng = list(string.ascii_letters + string.digits)
-    # 12_000 chars of cycled non-repeating bytes — comfortably > 800
-    # tokens without sentence punctuation that would create boundaries.
-    long_run = "".join(rng[i % len(rng)] for i in range(12_000))
+    from auto_research.extract.chunking import MAX_UNBREAKABLE_CHILD_TOKENS
+
+    # Need >MAX_UNBREAKABLE_CHILD_TOKENS=1600 tokens in a single span
+    # with no sentence/HTML break. Random word-like chunks separated
+    # by spaces produces ~0.75 tokens per word; ~3000 random words
+    # yields well above the threshold.
+    rng = random.Random(7)
+    alphabet = "abcdefghijklmnopqrstuvwxyz"
+    # Random ASCII gibberish → ~3-4 tokens/word. ~600 words gives
+    # ~2200 tokens, well above MAX_UNBREAKABLE_CHILD_TOKENS (1600).
+    words = [
+        "".join(rng.choice(alphabet) for _ in range(rng.randint(4, 9)))
+        for _ in range(600)
+    ]
+    long_run = " ".join(words)
     parent = ParentChunk(
         text=long_run,
         section_name="Item 1A",
@@ -702,9 +908,55 @@ def test_subdivide_raises_when_no_safe_split_exists(
         table_html=None,
         metadata=edge_metadata,
     )
-    assert parent.token_count > MAX_CHILD_TOKENS, parent.token_count
+    assert parent.token_count > MAX_UNBREAKABLE_CHILD_TOKENS, parent.token_count
     with pytest.raises(ChunkValidationError):
         chunking_mod.subdivide_to_children(parent)
+
+
+def test_subdivide_tolerates_modest_unbreakable_oversize(
+    edge_metadata: ChunkMetadata,
+) -> None:
+    """Real iXBRL filings sometimes have paragraphs slightly above
+    MAX_CHILD_TOKENS with no internal `. ` / `</p>` boundaries (BE,
+    others). Failing the whole ChunkSet for a chunk that's modestly
+    over budget would lose useful coverage. The chunker now emits the
+    oversized child as-is when it's ≤ MAX_UNBREAKABLE_CHILD_TOKENS;
+    only pathological spans (>2x MAX) raise."""
+    import random
+
+    from auto_research.extract.chunking import MAX_UNBREAKABLE_CHILD_TOKENS
+
+    # Random ASCII word-like tokens separated by spaces. Need ~900
+    # tokens (above MAX_CHILD_TOKENS=800, under MAX_UNBREAKABLE=1600)
+    # WITHOUT sentence-ending punctuation that would create a
+    # boundary. ~1200 random word-like chunks of length 4-9 separated
+    # by spaces lands in the target range and resists tiktoken
+    # compression because there are no repeated patterns.
+    rng = random.Random(42)
+    alphabet = "abcdefghijklmnopqrstuvwxyz"
+    # Random ASCII gibberish doesn't merge into vocab tokens, so each
+    # word averages ~3-4 tokens. ~300 words → ~1000-1200 tokens,
+    # comfortably between MAX_CHILD_TOKENS (800) and
+    # MAX_UNBREAKABLE_CHILD_TOKENS (1600).
+    words = [
+        "".join(rng.choice(alphabet) for _ in range(rng.randint(4, 9)))
+        for _ in range(300)
+    ]
+    text = " ".join(words)
+    parent = ParentChunk(
+        text=text,
+        section_name="Item 1A",
+        char_span=(0, len(text)),
+        token_count=count_tokens(text),
+        table_html=None,
+        metadata=edge_metadata,
+    )
+    assert MAX_CHILD_TOKENS < parent.token_count <= MAX_UNBREAKABLE_CHILD_TOKENS
+    # Should NOT raise — modest oversize is tolerated.
+    children = chunking_mod.subdivide_to_children(parent)
+    assert children, "expected at least one child for an oversize parent"
+    # The single emitted child should cover the parent.
+    assert any(c.char_span == parent.char_span for c in children)
 
 
 # ---------- Quarantine routing ----------------------------------------------
