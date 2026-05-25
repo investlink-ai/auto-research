@@ -181,11 +181,17 @@ ordering and document coverage) but don't pollute the dense index.
 
 **D6. Contextual-chunking cache key includes prompt version (Issue
 #14).** The cache key for the contextual-chunking generation
-(`extract/chunking_contextual.py`'s LLM call introduced by #14) is
-`(parent_chunk_text, doc_metadata, contextual_prompt_version,
-model_id)` — never just the chunk text. The `bump-prompt-version` skill
-enforces the prompt-version side at edit time; the cache key enforces
-the runtime side. INV-6 applies.
+(`extract/chunking_contextual.py`'s LLM call introduced by #14) is the
+full completion config: `sha256(child_text + parent_text + doc_metadata
++ contextual_prompt_version + schema_version + model_id +
+decoding_params)`. The original "never just the chunk text" framing
+specified the *minimum* set of inputs the key must depend on;
+implementation correctly covers a strict superset including
+`child_text` (so children of the same parent generate distinct entries)
+and `model_id` + `decoding_params` (so a tiered-routing swap or
+sampling-config change invalidates the cache). The `bump-prompt-version`
+skill enforces the prompt-version side at edit time; the cache key
+enforces the runtime side. INV-6 applies.
 
 **D8. RRF weight tuning hook (Issue #16).** `extract/rag_retrieval.py`
 exposes `bm25_weight: float = 1.0, dense_weight: float = 1.0` parameters
