@@ -99,6 +99,15 @@ and are encoded here so those issues inherit the right starting state.
 `extract/rag_retrieval.py`, `extract/entity_resolution.py`,
 `agents/memo_retrieval.py`.
 
+> *Considered but deferred (2026-05-26):* Voyage's `voyage-4` /
+> `voyage-4-large` (released 2026-01) and earlier `voyage-3-large`
+> reportedly beat `voyage-finance-2` on FinMTEB in third-party reports,
+> but no public head-to-head exists on SEC-filing retrieval. Adapter
+> exposes the model name as a config knob (`VOYAGE_MODEL`, default
+> `voyage-finance-2`) so the choice can be flipped without code change.
+> The bake-off itself is tracked separately and gates any default change
+> on Issue #20/#21 eval numbers, not vendor copy.
+
 **D2. Reranker → `bge-reranker-v2-m3`.** Replace `bge-reranker-base` in
 `design.md:212` and `ARCHITECTURE.md:101`. Used by
 `extract/rag_retrieval.py` and `agents/memo_retrieval.py`.
