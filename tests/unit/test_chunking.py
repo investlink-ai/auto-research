@@ -40,6 +40,7 @@ from auto_research.extract.chunking import (
     validate_char_spans,
     validate_or_quarantine_chunkset,
 )
+from tests.unit._fixture_meta import FixtureMetadata, load_fixture_meta
 
 if TYPE_CHECKING:
     from tests._otel_helpers import SpanRecorder
@@ -54,11 +55,10 @@ def _discover_10k_fixtures() -> list[tuple[str, str]]:
     """Return `[(stem, tier), …]` for every checked-in `sample_10k*.htm`.
 
     `tier` is read from the matching `.meta.json` (`"core"` or
-    `"broad"`); fixtures missing a tier annotation default to
-    `"broad"` so they don't accidentally land in default-CI without
-    intent. Adding a new ticker via `scripts/build_chunking_fixture.py`
-    automatically extends test coverage at whichever tier the build
-    script tags it with.
+    `"broad"`) via the `FixtureMetadata` Pydantic model. Adding a new
+    ticker via `scripts/build_chunking_fixture.py` automatically
+    extends test coverage at whichever tier the build script tags it
+    with.
 
     Tier semantics:
       - `core`: covered by default `make test`. A small, intentional
@@ -67,10 +67,6 @@ def _discover_10k_fixtures() -> list[tuple[str, str]]:
       - `broad`: covered by `make test-broad` (nightly / on-demand).
         Wider industry/year/template coverage; useful for catching
         filer-template variance the core set misses.
-
-    The default-tier-when-missing is `broad` (not `core`) — adding a
-    new fixture should require explicit intent to expand the CI
-    surface, not just dropping a file in the directory.
     """
     out: list[tuple[str, str]] = []
     for htm in sorted(FIXTURE_DIR.glob("sample_10k*.htm")):
@@ -78,9 +74,8 @@ def _discover_10k_fixtures() -> list[tuple[str, str]]:
         meta_path = FIXTURE_DIR / f"{stem}.meta.json"
         if not meta_path.exists():
             continue
-        meta = json.loads(meta_path.read_text())
-        tier = meta.get("tier", "broad")
-        out.append((stem, tier))
+        meta = load_fixture_meta(meta_path)
+        out.append((stem, meta.tier))
     return out
 
 
@@ -88,20 +83,20 @@ def _discover_10k_fixtures() -> list[tuple[str, str]]:
 class _LoadedFixture:
     stem: str
     html: str
-    meta: dict[str, Any]
+    meta: FixtureMetadata
     metadata: ChunkMetadata
     parsed: ChunkSet
 
 
 def _load_fixture(stem: str) -> _LoadedFixture:
     html = (FIXTURE_DIR / f"{stem}.htm").read_text(encoding="utf-8", errors="replace")
-    meta: dict[str, Any] = json.loads((FIXTURE_DIR / f"{stem}.meta.json").read_text())
+    meta = load_fixture_meta(FIXTURE_DIR / f"{stem}.meta.json")
     metadata = ChunkMetadata(
-        ticker=meta["ticker"],
-        filing_date=date.fromisoformat(meta["filing_date"]),
-        fiscal_period=meta["fiscal_period"],
-        doc_type=meta["doc_type"],
-        doc_id=meta["doc_id"],
+        ticker=meta.ticker,
+        filing_date=meta.filing_date,
+        fiscal_period=meta.fiscal_period,
+        doc_type=meta.doc_type,
+        doc_id=meta.doc_id,
     )
     return _LoadedFixture(
         stem=stem,
@@ -410,7 +405,7 @@ def test_inline_span_item_reference_does_not_false_positive(
 
 def test_real_10k_parses_into_expected_sections(filing: _LoadedFixture) -> None:
     section_names = [p.section_name for p in filing.parsed.parents]
-    for required in filing.meta["expected_sections"]:
+    for required in filing.meta.expected_sections:
         assert required in section_names, (
             f"[{filing.stem}] missing {required!r}: got {sorted(set(section_names))}"
         )
@@ -506,8 +501,8 @@ def test_real_10k_char_span_fidelity_holds(filing: _LoadedFixture) -> None:
 
 
 def test_real_10k_metadata_is_populated(filing: _LoadedFixture) -> None:
-    expected_ticker = filing.meta["ticker"]
-    expected_doc_id = filing.meta["doc_id"]
+    expected_ticker = filing.meta.ticker
+    expected_doc_id = filing.meta.doc_id
     for p in filing.parsed.parents:
         assert p.metadata.ticker == expected_ticker
         assert p.metadata.doc_type == "10-K"
@@ -1079,6 +1074,116 @@ def test_validate_or_quarantine_returns_none_and_writes_record_on_failure(
     assert dest.exists()
     data = json.loads(dest.read_text())
     assert "Item 1A" in data["reason"]
+
+
+# ---------- Fixture metadata schema ----------------------------------------
+
+
+def test_all_chunking_fixtures_validate_against_fixture_metadata_model(
+    tmp_path: Path,
+) -> None:
+    """Every checked-in `*.meta.json` parses cleanly through
+    `FixtureMetadata`. A typo'd key (`extra="forbid"`) or a missing
+    required field fails this test rather than surfacing later as a
+    KeyError inside a parametrized test, which would only run when the
+    specific fixture happened to be selected.
+    """
+    fixtures = sorted(FIXTURE_DIR.glob("sample_10k*.meta.json"))
+    assert len(fixtures) >= 70, "fixture set unexpectedly small"
+    for meta_path in fixtures:
+        meta = load_fixture_meta(meta_path)
+        # Sanity: typed access works downstream without `# type: ignore`.
+        assert meta.ticker
+        assert meta.doc_type == "10-K"
+        assert meta.tier in {"core", "broad"}
+
+
+def test_fixture_metadata_loader_cites_offending_stem_on_malformed_json(
+    tmp_path: Path,
+) -> None:
+    """A typo'd key fails fast with the fixture filename in the error.
+    Catches the sentinel case from issue #57 Item 3: extending the
+    schema must not silently degrade older fixtures into KeyErrors.
+    """
+    bogus = tmp_path / "sample_10k_bogus.meta.json"
+    bogus.write_text(
+        json.dumps(
+            {
+                "ticker": "BOGUS",
+                "filing_date": "2026-01-01",
+                "fiscal_period": "FY2025",
+                "doc_type": "10-K",
+                "doc_id": "x",
+                "expected_sections": [],
+                "source_url": "http://example.com",
+                "filename_convention": "n/a",
+                "note": "n/a",
+                "tier": "core",
+                "tier_rationalle": "typo'd key — extra='forbid' should catch this",
+            }
+        )
+    )
+    with pytest.raises(ValueError, match=r"sample_10k_bogus\.meta\.json"):
+        load_fixture_meta(bogus)
+
+
+# ---------- Doc-type dispatcher --------------------------------------------
+
+
+def test_parse_filing_raises_clear_error_for_unregistered_doc_type(
+    edge_metadata: ChunkMetadata,
+) -> None:
+    """`parse_filing` must reject unregistered doc types with a clear
+    remediation message rather than silently emitting a one-Body
+    ChunkSet. Foreign filers (20-F / 40-F) are the canonical case —
+    see `docs/decisions/2026-05-25-foreign-filers-deferred.md`. A
+    silent fallback would corrupt downstream LanceDB section filters
+    (every chunk gets `section_name='Body'`).
+
+    The typed `UnsupportedDocTypeError(ValueError)` lets dashboards
+    split contract-routing failures from infra failures; the test
+    asserts on the base type so it doesn't lock callers into the
+    typed subclass.
+    """
+    from auto_research.extract.chunking import UnsupportedDocTypeError
+
+    bad_meta = dataclasses.replace(edge_metadata, doc_type="20-F")
+    with pytest.raises(ValueError, match="No chunker detector"):
+        parse_filing(html="<html><body>filler</body></html>", metadata=bad_meta)
+    # Typed contract: subclass of ValueError so generic callers match,
+    # specific subclass so the entrypoint can tag a distinct outcome.
+    with pytest.raises(UnsupportedDocTypeError):
+        parse_filing(html="<html><body>filler</body></html>", metadata=bad_meta)
+
+
+def test_parse_filing_span_tags_unsupported_doc_type_outcome(
+    edge_metadata: ChunkMetadata,
+    span_recorder: SpanRecorder,
+) -> None:
+    """The unregistered-doc-type path tags `chunk.outcome=
+    unsupported_doc_type` (NOT the catch-all `error` bucket).
+    Dashboards keyed on outcome can route foreign-filer / unsupported-
+    form ingest to a config-issue queue rather than paging on-call
+    for what is structurally an infra alert.
+    """
+    bad_meta = dataclasses.replace(edge_metadata, doc_type="20-F")
+    with pytest.raises(ValueError):
+        parse_filing(html="<html><body>filler</body></html>", metadata=bad_meta)
+
+    attrs = span_recorder.attrs("chunk.parse_filing")
+    assert attrs["chunk.outcome"] == "unsupported_doc_type"
+    span = span_recorder.one("chunk.parse_filing")
+    assert span.status.status_code.name == "ERROR"
+
+
+def test_get_detector_returns_callable_for_registered_form() -> None:
+    """The registry is the only path parse_filing uses; sanity-check
+    that 10-K resolves to something callable rather than asserting on
+    an internal function name."""
+    from auto_research.extract.chunking.detect import get_detector
+
+    detector = get_detector("10-K")
+    assert callable(detector)
 
 
 # ---------- No-network guarantee --------------------------------------------
