@@ -41,6 +41,7 @@ delete the cassette, set `ANTHROPIC_API_KEY`, and re-run; vcrpy's
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -67,7 +68,9 @@ CASSETTE_PATH = (
 
 
 @pytest.fixture(autouse=True)
-def _reset_client_singleton() -> None:
+def _reset_client_singleton() -> Iterator[None]:
+    chunking_contextual._CLIENT = None
+    yield
     chunking_contextual._CLIENT = None
 
 
