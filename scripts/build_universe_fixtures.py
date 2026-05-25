@@ -34,8 +34,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# `src/` is on the path because the project is editable-installed via uv.
+from auto_research.universe import load_universe
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-UNIVERSE_PATH = REPO_ROOT / "config" / "universe" / "universe_v1.json"
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "chunking"
 BUILD_SCRIPT = Path(__file__).parent / "build_chunking_fixture.py"
 
@@ -74,9 +76,18 @@ def _load_ticker_to_cik_map() -> dict[str, int]:
     return out
 
 
-def _load_universe() -> list[str]:
-    data = json.loads(UNIVERSE_PATH.read_text())
-    return [entry["ticker"].upper() for entry in data]
+def _load_universe(*, include_non_feature_source: bool = False) -> list[str]:
+    """Return the universe tickers the chunker fixture pipeline should attempt.
+
+    Defaults to `feature_source=True` names only — foreign filers
+    (20-F / 40-F) are pre-filtered so the batch run does not log noisy
+    `no_10k` failures for ASML/TSM/ARM/NVMI/SIMO/GFS/CCJ. Pass
+    `include_non_feature_source=True` to verify the foreign filers'
+    filing-form classifications still hold against SEC's submissions
+    API.
+    """
+    entries = load_universe(feature_source_only=not include_non_feature_source)
+    return [entry.ticker.upper() for entry in entries]
 
 
 def _find_most_recent_10k(cik: int) -> tuple[str, str, str] | None:
@@ -167,12 +178,24 @@ def main() -> int:
         action="store_true",
         help="Rebuild fixtures even if they already exist",
     )
+    parser.add_argument(
+        "--include-non-feature-source",
+        action="store_true",
+        help=(
+            "Include foreign filers (feature_source=False) — useful "
+            "for verifying their filing-form classifications still hold. "
+            "Default skips them so the batch run reports zero no_10k "
+            "failures for ASML / TSM / ARM / NVMI / SIMO / GFS / CCJ."
+        ),
+    )
     args = parser.parse_args()
 
     if args.tickers:
         tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
     else:
-        tickers = _load_universe()
+        tickers = _load_universe(
+            include_non_feature_source=args.include_non_feature_source
+        )
     if args.limit:
         tickers = tickers[: args.limit]
 

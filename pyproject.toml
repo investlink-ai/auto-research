@@ -112,12 +112,14 @@ mypy_path = "."
 # pytest discovers conftest.py specially regardless of packaging, so
 # the simplest fix is to exclude them all from strict mypy — they hold
 # only session-fixture setup, not contract code. `_otel_helpers.py`
-# is a shared test helper that has the same dual-name issue.
+# and `_fixture_meta.py` are shared test helpers with the same dual-name
+# issue (tests/unit/ has no __init__.py for the same reason).
 exclude = [
     "tests/feast/_pit_invariants\\.py$",
     "tests/conftest\\.py$",
     "tests/_otel_helpers\\.py$",
     "tests/unit/conftest\\.py$",
+    "tests/unit/_fixture_meta\\.py$",
     "tests/integration/conftest\\.py$",
 ]
 
