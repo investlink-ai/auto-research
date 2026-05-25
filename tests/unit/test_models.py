@@ -33,6 +33,9 @@ def test_route_model_returns_haiku_for_pattern_recognition() -> None:
 def test_route_model_returns_haiku_for_routine_extraction() -> None:
     # Spec §7.3: templated extraction ⇒ Haiku 4.5.
     assert route_model("ten_k", "guidance_tone") == "claude-haiku-4-5"
+    # Contextual chunking (Issue #14): per-chunk one-line context is a
+    # templated, high-volume rewrite — routes to Haiku 4.5.
+    assert route_model("extract", "contextual_chunk") == "claude-haiku-4-5"
 
 
 def test_route_model_returns_opus_for_hard_critique() -> None:
