@@ -72,6 +72,28 @@ def test_try_init_telemetry_returns_true_when_already_initialized(
     assert t.try_init_telemetry() is True
 
 
+def test_try_init_telemetry_swallows_non_config_exceptions(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A Traceloop init failure (ImportError, DNS, malformed URL, version
+    drift) must not crash the CLI — the wrapper exists precisely to
+    keep ingest/extract running when telemetry config is wrong."""
+    from auto_research import telemetry as t
+
+    monkeypatch.setattr(t, "_INITIALIZED", False)
+    monkeypatch.setattr(t, "_TRY_INIT_WARNED", False)
+
+    def fake_init(*, service_name: str = "auto-research") -> None:
+        raise RuntimeError("traceloop sdk import broke")
+
+    monkeypatch.setattr(t, "init_telemetry", fake_init)
+
+    assert t.try_init_telemetry() is False
+    captured = capsys.readouterr()
+    assert "telemetry init failed" in captured.err
+    assert "RuntimeError" in captured.err
+
+
 def test_span_recorder_fixture_captures_spans(span_recorder: SpanRecorder) -> None:
     """The shared in-memory tracer fixture captures finished spans."""
     from opentelemetry import trace

@@ -40,6 +40,7 @@ from typing import Any
 
 import anthropic
 from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 from pydantic import ValidationError
 
 from auto_research._io import atomic_write_text
@@ -56,6 +57,7 @@ from auto_research.extract.prompts.s_filings_dilution import (
     S_FILINGS_DILUTION_PROMPT_VERSION,
 )
 from auto_research.extract.schemas import SFilingOutput
+from auto_research.telemetry import truncate_status_description as _truncate
 
 _WORKER = "s_filings"
 _TASK = "dilution_event"  # matches SFilingOutput.dilution_event field name
@@ -228,12 +230,21 @@ def extract_s_filing(
             return SFilingOutput.model_validate(cached)
 
         client = _get_client(anthropic_client)
-        response = client(
-            task=_TASK,
-            system_prompt=S_FILINGS_DILUTION_PROMPT,
-            user_content=raw_doc,
-            max_tokens=_MAX_TOKENS,
-        )
+        try:
+            response = client(
+                task=_TASK,
+                system_prompt=S_FILINGS_DILUTION_PROMPT,
+                user_content=raw_doc,
+                max_tokens=_MAX_TOKENS,
+            )
+        except Exception as exc:
+            # SDK / rate-limit / circuit-breaker / cost-cap raised. The
+            # documented `extract.outcome` enum is {cache_hit, persisted,
+            # quarantined}; emit a fourth value here so dashboards
+            # filtering on outcome aren't missing the infra-failure rate.
+            span.set_attribute("extract.outcome", "error")
+            span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+            raise
 
         # Extract the text content. An empty content list or a non-text-block
         # response (e.g. refusal, max_tokens before any text) leaves `text` as
@@ -245,12 +256,15 @@ def extract_s_filing(
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError as exc:
-            span.set_attribute("extract.outcome", "quarantined")
             _write_quarantine(
                 quarantine_root=effective_quarantine_root,
                 doc_id=doc_id,
                 parsed={"raw_text": text},
                 error=f"json decode failed: {exc}",
+            )
+            span.set_attribute("extract.outcome", "quarantined")
+            span.set_status(
+                Status(StatusCode.ERROR, _truncate(f"json decode failed: {exc}"))
             )
             return None
 
@@ -260,24 +274,30 @@ def extract_s_filing(
 
         resolved, problem_quotes = _resolve_spans(parsed, raw_doc)
         if problem_quotes:
-            span.set_attribute("extract.outcome", "quarantined")
             _write_quarantine(
                 quarantine_root=effective_quarantine_root,
                 doc_id=doc_id,
                 parsed=parsed_snapshot,
                 error=f"source_quote(s) unresolvable in raw_doc: {problem_quotes!r}",
             )
+            span.set_attribute("extract.outcome", "quarantined")
+            span.set_status(
+                Status(StatusCode.ERROR, "source_quote(s) unresolvable")
+            )
             return None
 
         try:
             output = SFilingOutput.model_validate(resolved)
         except ValidationError as exc:
-            span.set_attribute("extract.outcome", "quarantined")
             _write_quarantine(
                 quarantine_root=effective_quarantine_root,
                 doc_id=doc_id,
                 parsed=parsed_snapshot,
                 error=f"schema validation failed: {exc}",
+            )
+            span.set_attribute("extract.outcome", "quarantined")
+            span.set_status(
+                Status(StatusCode.ERROR, _truncate(f"schema validation failed: {exc}"))
             )
             return None
 
@@ -295,6 +315,9 @@ def extract_s_filing(
         )
         if validated is None:
             span.set_attribute("extract.outcome", "quarantined")
+            span.set_status(
+                Status(StatusCode.ERROR, "post-validation guardrail failed")
+            )
             return None
 
         content_cache.write(

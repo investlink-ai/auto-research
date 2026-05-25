@@ -259,6 +259,7 @@ def feast_group() -> None: ...
 
 @feast_group.command("apply", help="Run `feast apply` in feast_repo/.")
 def feast_apply() -> None:
+    try_init_telemetry()
     proc = subprocess.run(["feast", "apply"], cwd=_feast_repo_or_exit(), check=False)
     raise SystemExit(proc.returncode)
 
@@ -278,6 +279,7 @@ def feast_apply() -> None:
     help="Inclusive ISO 8601 datetime (e.g., 2024-01-31T00:00:00).",
 )
 def feast_materialize(start: str, end: str) -> None:
+    try_init_telemetry()
     proc = subprocess.run(
         ["feast", "materialize", start, end],
         cwd=_feast_repo_or_exit(),

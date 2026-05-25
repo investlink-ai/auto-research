@@ -52,6 +52,7 @@ from auto_research.ingest.transcripts._base import (
     TranscriptConfigError,
 )
 from auto_research.ingest.transcripts._whisper import WhisperEngine
+from auto_research.telemetry import truncate_status_description as _truncate
 
 SOURCE: Final = "transcripts"
 
@@ -275,13 +276,17 @@ def fetch_transcript(
         source_name = registry.lookup(ticker_upper)
         if source_name is None:
             span.set_attribute("transcript.source_name", _UNREGISTERED_SUFFIX)
-            span.set_attribute("transcript.outcome", "unregistered")
             _logger.info("no transcript source registered for %s", ticker_upper)
             manifest.append(
                 manifest_path,
                 [_error_row(ticker_upper, year, quarter, source_name=_UNREGISTERED_SUFFIX)],
                 unique_keys=_ERROR_DEDUP_KEYS,
             )
+            # outcome set AFTER manifest.append so a manifest write
+            # failure surfaces as a status=ERROR span with the manifest
+            # exception (via OTel auto-recording), not as a misleading
+            # outcome=unregistered + ERROR mix.
+            span.set_attribute("transcript.outcome", "unregistered")
             return None
 
         span.set_attribute("transcript.source_name", source_name)
@@ -300,8 +305,6 @@ def fetch_transcript(
             try:
                 audio_url = source.find_audio_url(ticker_upper, year, quarter)
             except Exception as exc:
-                span.set_attribute("transcript.outcome", "error")
-                span.set_status(Status(StatusCode.ERROR, str(exc)))
                 _logger.warning(
                     "source %s raised during find_audio_url for %s %sQ%s — recording error",
                     source_name,
@@ -314,10 +317,11 @@ def fetch_transcript(
                     [_error_row(ticker_upper, year, quarter, source_name=source_name)],
                     unique_keys=_ERROR_DEDUP_KEYS,
                 )
+                span.set_attribute("transcript.outcome", "error")
+                span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
                 raise
 
             if audio_url is None:
-                span.set_attribute("transcript.outcome", "no_coverage")
                 _logger.info(
                     "source %s reports no coverage for %s %sQ%s",
                     source_name,
@@ -329,6 +333,7 @@ def fetch_transcript(
                     manifest_path,
                     [_no_coverage_row(ticker_upper, year, quarter, source_name=source_name)],
                 )
+                span.set_attribute("transcript.outcome", "no_coverage")
                 return None
 
             # Engine constructed here — AFTER find_audio_url so a coverage-
@@ -347,8 +352,6 @@ def fetch_transcript(
                     # as find_audio_url: record a retryable error row
                     # rather than letting the exception propagate
                     # without manifest evidence.
-                    span.set_attribute("transcript.outcome", "error")
-                    span.set_status(Status(StatusCode.ERROR, str(exc)))
                     _logger.warning(
                         "source %s raised during download for %s %sQ%s — recording error",
                         source_name,
@@ -361,13 +364,14 @@ def fetch_transcript(
                         [_error_row(ticker_upper, year, quarter, source_name=source_name)],
                         unique_keys=_ERROR_DEDUP_KEYS,
                     )
+                    span.set_attribute("transcript.outcome", "error")
+                    span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
                     raise
 
                 if not content:
                     # Empty body slipped past the source's own retries.
                     # Retryable: don't poison the cache with a permanent
                     # no_coverage on a transient host hiccup.
-                    span.set_attribute("transcript.outcome", "error")
                     _logger.warning(
                         "source %s returned empty body for %s %sQ%s; recording error",
                         source_name,
@@ -379,6 +383,13 @@ def fetch_transcript(
                         manifest_path,
                         [_error_row(ticker_upper, year, quarter, source_name=source_name)],
                         unique_keys=_ERROR_DEDUP_KEYS,
+                    )
+                    span.set_attribute("transcript.outcome", "error")
+                    # Match the exception branches' status discipline so
+                    # dashboards filtering by OTel status surface empty-body
+                    # failures alongside SDK / network raises.
+                    span.set_status(
+                        Status(StatusCode.ERROR, "source returned empty body")
                     )
                     return None
 
@@ -399,8 +410,6 @@ def fetch_transcript(
                     # has a tracked failure (otherwise the file looks
                     # untracked); the row is NOT cached so the next run
                     # retries and overwrites.
-                    span.set_attribute("transcript.outcome", "error")
-                    span.set_status(Status(StatusCode.ERROR, str(exc)))
                     _logger.warning(
                         "Whisper transcribe failed for %s %sQ%s — audio at %s, "
                         "recording error row",
@@ -414,18 +423,41 @@ def fetch_transcript(
                         [_error_row(ticker_upper, year, quarter, source_name=source_name)],
                         unique_keys=_ERROR_DEDUP_KEYS,
                     )
+                    span.set_attribute("transcript.outcome", "error")
+                    span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
                     raise
                 manifest.append(manifest_path, [_ok_row(transcript, source_name, dest, sha)])
                 span.set_attribute("transcript.outcome", "ok")
                 return transcript
             finally:
                 if owns_engine:
-                    engine.close()
+                    # Swallow close-time exceptions so a cleanup failure
+                    # doesn't crash a successful transcription AND doesn't
+                    # produce a contradictory outcome=ok + status=ERROR
+                    # span. close() failures are a separate concern from
+                    # transcription success; surface them via the logger.
+                    try:
+                        engine.close()
+                    except Exception:
+                        _logger.exception(
+                            "engine.close() raised for %s %sQ%s; ignoring",
+                            ticker_upper,
+                            year,
+                            quarter,
+                        )
         finally:
             if owns_source:
                 close_fn = getattr(source, "close", None)
                 if callable(close_fn):
-                    close_fn()
+                    try:
+                        close_fn()
+                    except Exception:
+                        _logger.exception(
+                            "source.close() raised for %s %sQ%s; ignoring",
+                            ticker_upper,
+                            year,
+                            quarter,
+                        )
 
 
 __all__ = [

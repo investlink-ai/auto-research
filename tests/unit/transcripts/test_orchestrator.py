@@ -870,3 +870,58 @@ def test_fetch_transcript_span_outcome_ok(
     assert attrs["transcript.year"] == 2024
     assert attrs["transcript.quarter"] == 2
     assert attrs["transcript.source_name"] == "direct_mp3"
+
+
+def test_fetch_transcript_empty_body_sets_error_status(
+    registered_acme: None,
+    span_recorder: SpanRecorder,
+    tmp_path: Path,
+) -> None:
+    """Empty source body sets outcome=error AND span.status=ERROR so
+    dashboards filtering by OTel status surface this failure mode
+    consistently with the exception branches. Refs #52 review."""
+    from opentelemetry.trace import StatusCode
+
+    source = _FakeSource(audio_url="https://example.com/a.mp3", payload=b"")
+    fetch_transcript(
+        "ACME",
+        2024,
+        2,
+        raw_root=tmp_path / "raw",
+        manifest_path=tmp_path / "manifest.parquet",
+        source=source,
+        event_datetime=datetime(2024, 5, 22, 20, 30, tzinfo=UTC),
+    )
+    span = span_recorder.one("transcript.fetch")
+    assert span.attributes is not None
+    assert span.attributes["transcript.outcome"] == "error"
+    assert span.status.status_code == StatusCode.ERROR
+
+
+def test_fetch_transcript_swallows_engine_close_exception(
+    registered_acme: None,
+    span_recorder: SpanRecorder,
+    tmp_path: Path,
+) -> None:
+    """A successful transcription with a close()-time failure must
+    still record outcome=ok and must not raise. Refs #52 review."""
+
+    class _ClosingFailingEngine(_FakeEngine):
+        def close(self) -> None:
+            raise RuntimeError("ffmpeg subprocess cleanup failed")
+
+    source = _FakeSource(audio_url="https://example.com/a.mp3")
+    engine = _ClosingFailingEngine(_canned_transcript())
+    transcript = fetch_transcript(
+        "ACME",
+        2024,
+        2,
+        raw_root=tmp_path / "raw",
+        manifest_path=tmp_path / "manifest.parquet",
+        source=source,
+        engine=engine,
+        event_datetime=datetime(2024, 5, 22, 20, 30, tzinfo=UTC),
+    )
+    assert transcript is not None
+    attrs = span_recorder.attrs("transcript.fetch")
+    assert attrs["transcript.outcome"] == "ok"

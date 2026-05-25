@@ -668,6 +668,52 @@ def test_ingest_edgar_initializes_telemetry(runner: CliRunner) -> None:
     mock_init.assert_called_once()
 
 
+def test_feast_apply_initializes_telemetry(runner: CliRunner, tmp_path: Path) -> None:
+    """feast apply does I/O (subprocess + registry writes) and must
+    initialize telemetry per docs/ARCHITECTURE.md §7."""
+    feast_repo = tmp_path / "feast_repo"
+    feast_repo.mkdir()
+    with (
+        runner.isolated_filesystem(temp_dir=tmp_path) as cwd,
+        patch("auto_research.cli.try_init_telemetry", autospec=True) as mock_init,
+        patch("auto_research.cli.subprocess.run") as mock_run,
+    ):
+        Path(cwd, "feast_repo").mkdir()
+        mock_init.return_value = True
+        mock_run.return_value.returncode = 0
+        result = runner.invoke(cli, ["feast", "apply"])
+    assert result.exit_code == 0
+    mock_init.assert_called_once()
+
+
+def test_feast_materialize_initializes_telemetry(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """feast materialize runs minutes of online-store writes; must
+    initialize telemetry."""
+    with (
+        runner.isolated_filesystem(temp_dir=tmp_path) as cwd,
+        patch("auto_research.cli.try_init_telemetry", autospec=True) as mock_init,
+        patch("auto_research.cli.subprocess.run") as mock_run,
+    ):
+        Path(cwd, "feast_repo").mkdir()
+        mock_init.return_value = True
+        mock_run.return_value.returncode = 0
+        result = runner.invoke(
+            cli,
+            [
+                "feast",
+                "materialize",
+                "--start",
+                "2024-01-01T00:00:00",
+                "--end",
+                "2024-01-31T00:00:00",
+            ],
+        )
+    assert result.exit_code == 0
+    mock_init.assert_called_once()
+
+
 def test_extract_s_filings_initializes_telemetry(
     runner: CliRunner, tmp_path: Path
 ) -> None:

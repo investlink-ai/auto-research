@@ -211,6 +211,8 @@ exactly once per process; spans become no-ops).
 |---|---|
 | `auto-research ingest edgar` | `src/auto_research/cli.py:ingest_edgar` |
 | `auto-research extract s-filings` | `src/auto_research/cli.py:extract_s_filings` |
+| `auto-research feast apply` | `src/auto_research/cli.py:feast_apply` |
+| `auto-research feast materialize` | `src/auto_research/cli.py:feast_materialize` |
 | Integration tests under `tests/integration/` | `init_telemetry()` (strict) |
 | Future: nightly batch worker (#19), live critic | call `try_init_telemetry()` at process start |
 

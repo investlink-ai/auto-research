@@ -380,10 +380,14 @@ class YouTubeSource:
         `AudioSource` Protocol, these are infrastructure failures —
         the orchestrator routes them to a retryable error row.
         """
-        self.rate_limiter.wait()
         with _tracer.start_as_current_span("transcript.download") as span:
             span.set_attribute("transcript.source_name", SOURCE_NAME)
             start_ns = time.perf_counter_ns()
+            # rate_limiter.wait() lives INSIDE the span so duration_ms
+            # reflects total wall-clock from the caller's perspective,
+            # matching direct_mp3.download. Excluding it would hide
+            # rate-limit pressure as a diagnostic signal.
+            self.rate_limiter.wait()
             with tempfile.TemporaryDirectory(prefix="yt-") as tmpdir:
                 outtmpl = str(Path(tmpdir) / "audio.%(ext)s")
                 opts = {

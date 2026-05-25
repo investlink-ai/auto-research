@@ -373,3 +373,35 @@ def test_extract_s_filing_emits_span_quarantined_on_bad_json(
     assert out is None
     attrs = span_recorder.attrs("extract.s_filings")
     assert attrs["extract.outcome"] == "quarantined"
+    # Every quarantine branch must also set span.status=ERROR so
+    # alerting wired against OTel status surfaces guardrail failures
+    # (INV-2). Refs #52 review.
+    from opentelemetry.trace import StatusCode
+
+    span = span_recorder.one("extract.s_filings")
+    assert span.status.status_code == StatusCode.ERROR
+
+
+def test_extract_s_filing_emits_span_error_on_client_raise(
+    span_recorder: SpanRecorder, tmp_path: Path
+) -> None:
+    """When the Anthropic client raises (network / 429 / cost cap),
+    the span must record outcome='error' AND status=ERROR so the
+    documented enum stays complete on infra-failure paths."""
+    from opentelemetry.trace import StatusCode
+
+    fake = MagicMock()
+    fake.messages.create.side_effect = RuntimeError("simulated 503")
+    client = cast(anthropic.Anthropic, fake)
+    with pytest.raises(RuntimeError):
+        extract_s_filing(
+            raw_doc=_SAMPLE_S3,
+            doc_id="doc-client-raise",
+            cache_root=tmp_path,
+            quarantine_root=tmp_path / "quar",
+            anthropic_client=client,
+        )
+    attrs = span_recorder.attrs("extract.s_filings")
+    assert attrs["extract.outcome"] == "error"
+    span = span_recorder.one("extract.s_filings")
+    assert span.status.status_code == StatusCode.ERROR
