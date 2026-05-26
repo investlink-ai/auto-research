@@ -30,6 +30,17 @@ import pyarrow.parquet as pq
 
 from auto_research._io import atomic_write_text
 from auto_research.extract.embeddings import _PER_CORPUS_STORE
+from auto_research.extract.materialization import (
+    ActiveMaterialization,
+    append_promotion_history,
+    list_materializations,
+    now_utc_iso,
+    read_active_materialization,
+    read_promotion_history,
+    split_versioned_table_name,
+    versioned_table_name,
+    write_active_materialization,
+)
 from auto_research.extract.workers.s_filings import extract_s_filing
 from auto_research.ingest.edgar import EdgarConfigError, fetch_filings_for_cik
 from auto_research.telemetry import try_init_telemetry
@@ -301,21 +312,40 @@ def _resolve_reembed_targets(
         return ([doc_id], False)
     if corpus:
         return ([], True)
-    # --all: enumerate per-doc tables on disk, treating _corpus_narrative as
-    # the shared store. LanceDB writes each table as a `<name>.lance/` dir
-    # under `rag_root` (see `extract.embeddings.embed()`). The corpus flag
-    # is set False: per-doc reembed propagates fresh vectors to the
-    # narrative store via vector-copy, so re-encoding the corpus
-    # separately would (a) double-spend on Voyage and (b) risk batch-
-    # boundary nondeterminism between per-doc and corpus vectors for the
-    # same chunk (review findings #2 and #4).
+    # --all: enumerate per-doc tables present at the ACTIVE materialization
+    # version. Tables on disk live in `{base}__{materialization_version}.lance/`
+    # directories under `rag_root`. The corpus base is filtered out — it
+    # gets propagated by vector-copy during per-doc reembed and so is not
+    # listed as an --all target (re-encoding it separately would double-
+    # spend on Voyage and risk batch-boundary nondeterminism between
+    # per-doc and corpus vectors).
+    #
+    # Without an active pointer (fresh install or pre-migration legacy
+    # layout) the CLI has nothing to enumerate; raise a UsageError so the
+    # operator hits a one-line remediation pointing at the migration
+    # script or `embed` to build the initial materialization.
+    if not rag_root.exists():
+        return ([], False)
+    active = read_active_materialization(rag_root)
+    if active is None:
+        raise click.UsageError(
+            f"no active materialization under {rag_root}; --all has nothing "
+            "to enumerate. Build an initial materialization via the embed "
+            "path, then promote it before re-running --all."
+        )
     per_doc: list[str] = []
-    if rag_root.exists():
-        for entry in sorted(rag_root.iterdir()):
-            if entry.is_dir() and entry.suffix == ".lance":
-                name = entry.stem
-                if name != _PER_CORPUS_STORE:
-                    per_doc.append(name)
+    for entry in sorted(rag_root.iterdir()):
+        if not (entry.is_dir() and entry.suffix == ".lance"):
+            continue
+        split = split_versioned_table_name(entry.stem)
+        if split is None:
+            continue
+        base, version = split
+        if version != active.version:
+            continue
+        if base == _PER_CORPUS_STORE:
+            continue
+        per_doc.append(base)
     return (per_doc, False)
 
 
@@ -437,14 +467,28 @@ def extract_reembed(
 
         from auto_research.extract.chunking import count_tokens
 
+        # The dry-run reads source rows from the ACTIVE materialization —
+        # that's what reembed_doc/reembed_corpus would re-encode. Without
+        # an active pointer the operation is impossible; surface a one-
+        # line remediation rather than silently reporting 0 tokens.
+        active = read_active_materialization(rag_root)
+        if active is None:
+            raise click.UsageError(
+                f"no active materialization under {rag_root}; reembed is "
+                "impossible without a source. Build the initial "
+                "materialization (via embed) or migrate a legacy layout, "
+                "then promote it before dry-running reembed."
+            )
+
         db = lancedb.connect(rag_root)
         tables_seen = 0
         total_rows = 0
         total_tokens = 0
-        target_table_names = list(per_doc_targets)
+        target_bases = list(per_doc_targets)
         if include_corpus:
-            target_table_names.append(_PER_CORPUS_STORE)
-        for name in target_table_names:
+            target_bases.append(_PER_CORPUS_STORE)
+        for base in target_bases:
+            name = versioned_table_name(base, active.version)
             if name not in db.table_names():
                 click.echo(f"warn: table {name!r} not found under {rag_root}", err=True)
                 continue
@@ -517,6 +561,376 @@ def extract_reembed(
         f"corpus_rows={corpus_rows if corpus_rows is not None else 'skipped'}"
     )
     if per_doc_failed or (include_corpus and corpus_rows is None):
+        raise SystemExit(1)
+
+
+@extract.command(
+    "list-materializations",
+    help=(
+        "List materialization versions present under --rag-root, with table "
+        "counts and an active flag. Materialization versions are the "
+        "8-hex-char hash of (chunker, contextual-prompt, embed-model) "
+        "versions the rows were produced under."
+    ),
+)
+@click.option(
+    "--rag-root",
+    type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
+    default=_DEFAULT_RAG_ROOT,
+    show_default=True,
+    help="LanceDB root directory containing per-doc and corpus tables.",
+)
+def extract_list_materializations(rag_root: Path) -> None:
+    try_init_telemetry()
+    materializations = list_materializations(rag_root)
+    if not materializations:
+        click.echo(f"no materializations found under {rag_root}")
+        return
+    for m in materializations:
+        active_marker = " (active)" if m.is_active else ""
+        click.echo(
+            f"{m.version}{active_marker} tables={m.table_count}"
+        )
+
+
+_NARRATIVE_DOC_TYPES: frozenset[str] = frozenset({"10-K", "10-Q", "transcript"})
+
+
+def _expected_doc_ids_from_manifest(manifest_path: Path) -> set[str]:
+    """All `status='ok'` doc_ids from the manifest, regardless of source.
+
+    `manifest_mod.existing_doc_ids` requires an explicit `source` kwarg
+    and is designed for fetch-loop dedup. Promotion validation needs the
+    union across every source the project ingests — today just `edgar`,
+    but `fmp` and future sources land in the same manifest under
+    different `source` values and MUST be covered by the completeness
+    check or partial namespaces could be promoted as the source set
+    grows.
+    """
+    import pyarrow.parquet as pq
+
+    if not manifest_path.exists():
+        return set()
+    table = pq.read_table(manifest_path, columns=["doc_id", "status"])
+    return {
+        d
+        for d, st in zip(
+            table.column("doc_id").to_pylist(),
+            table.column("status").to_pylist(),
+            strict=True,
+        )
+        if st == "ok"
+    }
+
+
+def _validate_promotion_candidate(
+    rag_root: Path,
+    *,
+    version: str,
+    manifest_path: Path,
+) -> tuple[ActiveMaterialization, int]:
+    """Validate that `version` is fully populated under `rag_root` and the
+    vector dims are consistent. Returns the `ActiveMaterialization` record
+    that should land in the pointer and the manifest doc count.
+
+    Validation gates:
+
+    1. **Namespace completeness.** Every `status='ok'` doc_id in the
+       manifest (across all sources) must have a
+       `{doc_id}__{version}.lance` table. Partial namespaces are refused
+       with the list of missing doc_ids — promoting a partial namespace
+       would silently regress corpus coverage at query time.
+    2. **Corpus narrative presence.** If any of the per-doc tables has
+       a narrative `doc_type` (10-K, 10-Q, transcript), the per-corpus
+       narrative table at this version MUST exist; otherwise Signal
+       A1's `store='corpus_narrative'` queries fail at runtime with
+       `FileNotFoundError` against a freshly-promoted namespace.
+    3. **Dim consistency.** Every table under this version must declare
+       the same vector dim. Promoting a mixed-dim namespace would
+       produce silent query failures at the boundary between docs.
+    4. **embed_model_version row stamp consistency.** Every row in every
+       table under this version must carry the same
+       `embed_model_version` stamp; this is the value that lands in the
+       active pointer for the read-path mismatch guard. Heterogeneity
+       here is a bug in the build path; refusing here surfaces it
+       early.
+    5. **Non-empty namespace.** At least one row must exist somewhere
+       in the namespace — otherwise the embed_model_version stamp is
+       unrecoverable and the pointer would land with a placeholder no
+       adapter could ever match.
+    """
+    import lancedb
+
+    if not rag_root.exists():
+        raise click.UsageError(f"--rag-root {rag_root} does not exist")
+    if not manifest_path.exists():
+        raise click.UsageError(f"--manifest-path {manifest_path} does not exist")
+
+    db = lancedb.connect(rag_root)
+    table_names = set(db.table_names())
+
+    expected_doc_ids = _expected_doc_ids_from_manifest(manifest_path)
+    missing: list[str] = []
+    for doc_id in sorted(expected_doc_ids):
+        if versioned_table_name(doc_id, version) not in table_names:
+            missing.append(doc_id)
+    if missing:
+        preview = ", ".join(missing[:5])
+        more = "" if len(missing) <= 5 else f" (+{len(missing) - 5} more)"
+        raise click.UsageError(
+            f"materialization {version!r} is incomplete relative to "
+            f"{manifest_path}: {len(missing)}/{len(expected_doc_ids)} "
+            f"doc_id(s) lack a versioned table. Missing: [{preview}{more}]. "
+            "Run the embed/reembed sweep to fill the gap before promoting."
+        )
+
+    # Dim + embed_model_version_stamp consistency across every table at
+    # this version (including the optional corpus narrative table). The
+    # corpus is appended LAST so any narrative-bearing per-doc table is
+    # observed first and establishes the reference dim / embed_model
+    # value before the corpus is compared against it.
+    candidate_bases = sorted(expected_doc_ids)
+    candidate_bases.append(_PER_CORPUS_STORE)
+    dim_seen: int | None = None
+    embed_model_version_seen: str | None = None
+    narrative_doc_present = False
+    for base in candidate_bases:
+        name = versioned_table_name(base, version)
+        if name not in table_names:
+            continue  # corpus presence handled separately below
+        tbl = db.open_table(name)
+        field_type = tbl.schema.field("vector").type
+        dim = int(field_type.list_size)
+        if dim_seen is None:
+            dim_seen = dim
+        elif dim != dim_seen:
+            raise click.UsageError(
+                f"dim mismatch in materialization {version!r}: "
+                f"{name!r} is {dim}-dim but earlier tables were "
+                f"{dim_seen}-dim. Refusing to promote a mixed-vector-space "
+                "namespace."
+            )
+        # Load just the two columns we validate against — full table
+        # to_pandas would be wasteful at backfill scope. The stamp check
+        # is intentionally row-level (Codex review, PR #73): head(1)
+        # would let a single table with internally-mixed
+        # `embed_model_version` stamps (a build-path bug or manual
+        # LanceDB ops) pass validation, and the resulting active pointer
+        # would advertise one vector space while queries silently read
+        # from two.
+        df = tbl.to_pandas()
+        if len(df) == 0:
+            continue
+        emv_unique = set(df["embed_model_version"].unique())
+        if len(emv_unique) > 1:
+            raise click.UsageError(
+                f"embed_model_version stamp NOT uniform within {name!r}: "
+                f"{sorted(emv_unique)!r}. A single table must contain rows "
+                "from exactly one vector space — refusing to promote a "
+                "namespace where any table is internally mixed."
+            )
+        emv = next(iter(emv_unique))
+        if embed_model_version_seen is None:
+            embed_model_version_seen = emv
+        elif emv != embed_model_version_seen:
+            raise click.UsageError(
+                f"embed_model_version stamp mismatch in materialization "
+                f"{version!r}: {name!r} carries {emv!r} but earlier tables "
+                f"carry {embed_model_version_seen!r}. Refusing to promote."
+            )
+        if (
+            base != _PER_CORPUS_STORE
+            and str(df["doc_type"].iloc[0]) in _NARRATIVE_DOC_TYPES
+        ):
+            narrative_doc_present = True
+
+    if embed_model_version_seen is None:
+        # No table had any rows. Refuse: the pointer's embed_model_version
+        # stamp is unrecoverable, and an "unknown:unknown:unknown"
+        # placeholder would make every subsequent query fail the
+        # read-path mismatch guard. The operator likely embedded a
+        # manifest whose docs all quarantined; surface that.
+        raise click.UsageError(
+            f"materialization {version!r} contains no rows in any table "
+            f"under {rag_root}. Refusing to promote a fully-empty "
+            "namespace — the active pointer's embed_model_version stamp "
+            "is unrecoverable and the read-path mismatch guard would "
+            "reject every subsequent query. Verify the embed sweep "
+            "actually populated rows."
+        )
+
+    corpus_name = versioned_table_name(_PER_CORPUS_STORE, version)
+    if narrative_doc_present and corpus_name not in table_names:
+        raise click.UsageError(
+            f"materialization {version!r} contains narrative documents "
+            f"(10-K / 10-Q / transcript) but no {corpus_name!r} table. "
+            "Signal A1's cross-doc retrieval queries the corpus store "
+            "and would fail with FileNotFoundError against this "
+            "namespace. Re-run the embed sweep to lazily-create the "
+            "corpus, or delete the narrative per-doc tables if cross-doc "
+            "retrieval is not required."
+        )
+
+    active = ActiveMaterialization(
+        version=version,
+        embed_model_version=embed_model_version_seen,
+        promoted_at=now_utc_iso(),
+        manifest_count=len(expected_doc_ids),
+    )
+    return active, len(expected_doc_ids)
+
+
+@extract.command(
+    "promote-materialization",
+    help=(
+        "Atomically promote a materialization version to be the active "
+        "read namespace. Validates namespace completeness against the "
+        "ingest manifest AND vector-dim consistency before flipping. The "
+        "flip writes data/rag/active_materialization.json via tmp + "
+        "rename so a crash mid-flip preserves the previous pointer."
+    ),
+)
+@click.option("--version", "version", required=True, help="Materialization version slug to promote.")
+@click.option(
+    "--rag-root",
+    type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
+    default=_DEFAULT_RAG_ROOT,
+    show_default=True,
+    help="LanceDB root directory.",
+)
+@click.option(
+    "--manifest-path",
+    type=click.Path(dir_okay=False, exists=True, path_type=Path, resolve_path=True),
+    default=_DEFAULT_MANIFEST,
+    show_default=True,
+    help="Ingest manifest Parquet file, source of truth for expected doc_id set.",
+)
+def extract_promote_materialization(
+    version: str, rag_root: Path, manifest_path: Path
+) -> None:
+    try_init_telemetry()
+    active, n_docs = _validate_promotion_candidate(
+        rag_root, version=version, manifest_path=manifest_path
+    )
+    write_active_materialization(rag_root, active)
+    append_promotion_history(rag_root, active)
+    click.echo(
+        f"promoted: version={active.version} "
+        f"embed_model_version={active.embed_model_version} "
+        f"manifest_count={n_docs}"
+    )
+
+
+@extract.command(
+    "gc-materialization",
+    help=(
+        "Drop on-disk tables for old non-active materialization versions. "
+        "Keeps the currently-active version unconditionally plus the "
+        "(--keep-last N - 1) most recent previously-promoted versions "
+        "from the promotion history. Default --keep-last 2 = active + 1 "
+        "previous, enough for an instant rollback."
+    ),
+)
+@click.option(
+    "--keep-last",
+    type=int,
+    default=2,
+    show_default=True,
+    help="Number of versions to keep (current active counts as one).",
+)
+@click.option(
+    "--rag-root",
+    type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
+    default=_DEFAULT_RAG_ROOT,
+    show_default=True,
+    help="LanceDB root directory.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Report which tables would be removed without touching the disk.",
+)
+def extract_gc_materialization(
+    keep_last: int, rag_root: Path, dry_run: bool
+) -> None:
+    try_init_telemetry()
+    import shutil
+
+    if keep_last < 1:
+        raise click.UsageError("--keep-last must be >= 1")
+    if not rag_root.exists():
+        raise click.UsageError(f"--rag-root {rag_root} does not exist")
+
+    active = read_active_materialization(rag_root)
+    history = read_promotion_history(rag_root)
+    # Refuse to GC when no active pointer exists: otherwise the keep
+    # list could be empty (fresh install + built materialization but
+    # not yet promoted) and the removal pass would wipe every table on
+    # disk. The fix is operator-explicit: promote first, then GC.
+    # Codex review (PR #73): "destructive default for a common setup".
+    if active is None:
+        raise click.UsageError(
+            f"no active materialization under {rag_root}; refusing to "
+            "GC without an anchor — a fresh-install or not-yet-promoted "
+            "namespace would lose every table. Promote a version first, "
+            "then re-run gc-materialization."
+        )
+    # Walk history newest-to-oldest, dedup repeated versions (an operator
+    # may promote-then-demote-then-repromote), keep up to N distinct.
+    keep: list[str] = [active.version]
+    for record in reversed(history):
+        if record.version in keep:
+            continue
+        if len(keep) >= keep_last:
+            break
+        keep.append(record.version)
+    keep_set = set(keep)
+
+    materializations = list_materializations(rag_root)
+    to_remove: list[tuple[str, str]] = []  # (version, table_name)
+    for m in materializations:
+        if m.version in keep_set:
+            continue
+        for base in m.bases:
+            to_remove.append((m.version, versioned_table_name(base, m.version)))
+
+    if dry_run:
+        click.echo(
+            f"gc dry-run: keep={sorted(keep_set)} "
+            f"would_remove_tables={len(to_remove)}"
+        )
+        for version, name in to_remove:
+            click.echo(f"  would rm: {name} (version={version})")
+        return
+
+    removed = 0
+    failed: list[tuple[str, str]] = []
+    for _, name in to_remove:
+        path = rag_root / f"{name}.lance"
+        if not path.exists():
+            continue
+        # Wrap each rmtree so a single locked / read-only / EIO table
+        # doesn't abort the whole sweep. The CLI reports both removed and
+        # failed counts so operators can re-run safely after fixing the
+        # underlying cause (closing a stale LanceDB process, fixing
+        # permissions). Exit nonzero if any failed so make-target wiring
+        # surfaces the partial-failure.
+        try:
+            shutil.rmtree(path)
+            removed += 1
+        except OSError as exc:
+            click.echo(
+                f"warn: rmtree({path}) failed: "
+                f"{exc.__class__.__name__}: {exc}",
+                err=True,
+            )
+            failed.append((name, str(exc)))
+    click.echo(
+        f"gc-materialization: kept={sorted(keep_set)} "
+        f"removed_tables={removed} failed_tables={len(failed)}"
+    )
+    if failed:
         raise SystemExit(1)
 
 

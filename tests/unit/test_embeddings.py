@@ -1,5 +1,6 @@
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -144,6 +145,74 @@ def _wrap(child: ChildChunk, context: str = "") -> ContextualChildChunk:
     return ContextualChildChunk(child=child, context=context)
 
 
+def _versioned_lance_path(rag_root: Path, base: str, version: str) -> Path:
+    """Path to the on-disk LanceDB table for `(base, materialization version)`.
+
+    The `{base}__{version}.lance` shape comes from
+    `auto_research.extract.materialization.versioned_table_name`; helper
+    here keeps tests readable when they assert directly against the
+    filesystem.
+    """
+    from auto_research.extract.materialization import versioned_table_name
+
+    return rag_root / f"{versioned_table_name(base, version)}.lance"
+
+
+def _open_adapter_table(adapter: EmbeddingAdapter, base: str) -> Any:
+    """Open the LanceDB table that `adapter.embed()` writes for `base` and
+    return a pandas DataFrame. Tests use this when they need to inspect
+    actual column values written under the adapter's own materialization
+    version."""
+    import lancedb
+
+    from auto_research.extract.materialization import versioned_table_name
+
+    name = versioned_table_name(base, adapter.materialization_version)
+    return lancedb.connect(adapter._rag_root).open_table(name).to_pandas()
+
+
+def _promote_and_bump(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    chunks: list[ContextualChildChunk],
+    *,
+    backend: str = "bge",
+    new_tag: str = "v-new",
+) -> tuple["EmbeddingAdapter", "EmbeddingAdapter"]:
+    """Embed `chunks` under the current `EMBED_MODEL_VERSION_TAG`, promote
+    that materialization, then monkeypatch the tag and return a freshly-
+    constructed adapter at the new namespace.
+
+    The returned `(old, new)` pair lets reembed-flow tests act as the
+    operator does: build the initial materialization, promote it, then
+    construct a new adapter (here simulated by a tag bump rather than an
+    actual model swap) whose `materialization_version` differs and whose
+    `reembed_doc()` reads the just-promoted active source.
+    """
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        now_utc_iso,
+        write_active_materialization,
+    )
+
+    old = EmbeddingAdapter(backend=backend, rag_root=tmp_path)  # type: ignore[arg-type]
+    old.embed(chunks)
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version=old.materialization_version,
+            embed_model_version=old.embed_model_version,
+            promoted_at=now_utc_iso(),
+            manifest_count=len({c.child.metadata.doc_id for c in chunks}),
+        ),
+    )
+    monkeypatch.setattr(
+        "auto_research.extract.embeddings.EMBED_MODEL_VERSION_TAG", new_tag
+    )
+    new = EmbeddingAdapter(backend=backend, rag_root=tmp_path)  # type: ignore[arg-type]
+    return old, new
+
+
 # ---- BGE-backed end-to-end -----------------------------------------------
 
 
@@ -155,8 +224,10 @@ def test_embed_bge_writes_both_stores_atomically(tmp_path: Path) -> None:
     ]
     adapter.embed(chunks)
 
-    per_doc = tmp_path / "doc-A.lance"
-    corpus = tmp_path / "_corpus_narrative.lance"
+    per_doc = _versioned_lance_path(tmp_path, "doc-A", adapter.materialization_version)
+    corpus = _versioned_lance_path(
+        tmp_path, "_corpus_narrative", adapter.materialization_version
+    )
     assert per_doc.exists(), "per-doc store missing after embed()"
     assert corpus.exists(), "per-corpus narrative store missing after embed()"
 
@@ -172,7 +243,6 @@ def test_embed_stamps_version_columns_in_rows(tmp_path: Path) -> None:
     embed_model_version). Write-only audit metadata at present; backs
     the materialization-versioned-tables follow-up.
     """
-    import lancedb
 
     from auto_research.extract.chunking import CHUNKER_VERSION
     from auto_research.extract.prompts.contextual_chunk import (
@@ -182,14 +252,14 @@ def test_embed_stamps_version_columns_in_rows(tmp_path: Path) -> None:
     adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
     adapter.embed([_wrap(_make_child("stamped row passage", doc_id="doc-STAMP"))])
 
-    df = lancedb.connect(tmp_path).open_table("doc-STAMP").to_pandas()
+    df = _open_adapter_table(adapter, "doc-STAMP")
     assert len(df) == 1
     assert df["chunker_version"].iloc[0] == CHUNKER_VERSION
     assert df["contextual_prompt_version"].iloc[0] == CONTEXTUAL_CHUNK_PROMPT_VERSION
     assert df["embed_model_version"].iloc[0] == f"bge:{BGE_MODEL_ID}:{EMBED_MODEL_VERSION_TAG}"
 
     # And the per-corpus narrative store carries the same stamps.
-    corpus_df = lancedb.connect(tmp_path).open_table("_corpus_narrative").to_pandas()
+    corpus_df = _open_adapter_table(adapter, "_corpus_narrative")
     assert corpus_df["chunker_version"].iloc[0] == CHUNKER_VERSION
 
 
@@ -826,11 +896,7 @@ def test_qwen3_mlx_embed_writes_rows_with_correct_vector_dim(
     ]
     adapter.embed(chunks)
 
-    import lancedb
-
-    db = lancedb.connect(tmp_path)
-    tbl = db.open_table("doc-QDIM")
-    df = tbl.to_pandas()
+    df = _open_adapter_table(adapter, "doc-QDIM")
     assert len(df) == 3
     # LanceDB stores the fixed-size vector column as an object dtype of
     # numpy arrays. Length per row should equal the native model dim.
@@ -862,9 +928,7 @@ def test_qwen3_mlx_4b_uses_2560_dim(
     )
     adapter.embed([_wrap(_make_child("four-billion passage", doc_id="doc-Q4B"))])
 
-    import lancedb
-
-    df = lancedb.connect(tmp_path).open_table("doc-Q4B").to_pandas()
+    df = _open_adapter_table(adapter, "doc-Q4B")
     assert len(df) == 1
     assert len(df["vector"].iloc[0]) == 2560
 
@@ -903,9 +967,7 @@ def test_qwen3_mlx_0_6b_real_inference_end_to_end(tmp_path: Path) -> None:
     ]
     adapter.embed(chunks)
 
-    import lancedb
-
-    df = lancedb.connect(tmp_path).open_table("doc-QE2E").to_pandas()
+    df = _open_adapter_table(adapter, "doc-QE2E")
     assert len(df) == 3
     assert all(len(v) == 1024 for v in df["vector"])
 
@@ -919,32 +981,32 @@ def test_qwen3_mlx_0_6b_real_inference_end_to_end(tmp_path: Path) -> None:
 # ---- reembed_doc / reembed_corpus (encoder-only re-encode) ----------------
 
 
-def test_reembed_doc_preserves_metadata_byte_for_byte(tmp_path: Path) -> None:
+def test_reembed_doc_preserves_metadata_byte_for_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Encoder-only: every metadata column survives reembed unchanged.
 
-    The vector column is re-encoded (and may differ depending on
-    encoder determinism), but `text` + `ticker` + `filing_date` + ... +
-    `chunker_version` + `contextual_prompt_version` MUST round-trip
-    byte-for-byte. Only `embed_model_version` re-stamps to the current
-    adapter's identity — but in this test we reembed against the same
-    backend/model so that string is unchanged too.
+    `text` + `ticker` + `filing_date` + ... + `chunker_version` +
+    `contextual_prompt_version` round-trip byte-for-byte from the source
+    materialization's rows. `embed_model_version` is the one column the
+    reembed path re-stamps to the new adapter's identity — by design,
+    since the new namespace's whole point is to record that it WAS
+    re-encoded by a new model — so it's excluded from the round-trip
+    list.
     """
-    import lancedb
-
-    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
     chunks = [
         _wrap(_make_child(f"reembed passage {i}", doc_id="doc-REE"))
         for i in range(3)
     ]
-    adapter.embed(chunks)
+    old, new = _promote_and_bump(tmp_path, monkeypatch, chunks)
 
-    before = lancedb.connect(tmp_path).open_table("doc-REE").to_pandas()
+    before = _open_adapter_table(old, "doc-REE")
     before_sorted = before.sort_values("parent_id").reset_index(drop=True)
 
-    n = adapter.reembed_doc("doc-REE")
+    n = new.reembed_doc("doc-REE")
     assert n == 3
 
-    after = lancedb.connect(tmp_path).open_table("doc-REE").to_pandas()
+    after = _open_adapter_table(new, "doc-REE")
     after_sorted = after.sort_values("parent_id").reset_index(drop=True)
 
     for col in (
@@ -958,28 +1020,39 @@ def test_reembed_doc_preserves_metadata_byte_for_byte(tmp_path: Path) -> None:
         "section_name",
         "chunker_version",
         "contextual_prompt_version",
-        "embed_model_version",
     ):
         assert list(before_sorted[col]) == list(after_sorted[col]), (
             f"reembed clobbered column {col!r}"
         )
+    # `embed_model_version` re-stamps to the new adapter's tag — that's the
+    # whole point of the cross-namespace reembed.
+    assert (
+        after_sorted["embed_model_version"].iloc[0]
+        == new.embed_model_version
+    )
 
 
 def test_reembed_doc_preserves_upstream_version_stamps_when_module_constants_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If the module-level `CHUNKER_VERSION` or `CONTEXTUAL_CHUNK_PROMPT_VERSION`
-    advances between original embed and reembed (e.g., another PR bumped them
-    but the chunker output for this doc has NOT been regenerated), the reembed
-    must NOT silently re-stamp rows to the new versions — that would lie about
-    which chunker / prompt contract actually produced the underlying text.
-    Encoder-only path preserves the original stamps verbatim.
+    """If `CHUNKER_VERSION` / `CONTEXTUAL_CHUNK_PROMPT_VERSION` advance
+    between original embed and reembed (e.g., another PR bumped them but
+    the chunker output for this doc has NOT been regenerated), the
+    reembed must NOT silently re-stamp rows to the new versions — that
+    would lie about which chunker / prompt contract actually produced
+    the underlying text. Encoder-only path preserves the original stamps
+    verbatim.
+
+    Uses `_promote_and_bump` to land the source rows in the active
+    namespace; the post-promotion module-constant bump happens
+    independently of the materialization_version flip done by the helper.
     """
-    import lancedb
+    chunks = [_wrap(_make_child("first-version passage", doc_id="doc-STAMPED"))]
+    _, new = _promote_and_bump(tmp_path, monkeypatch, chunks)
 
-    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
-    adapter.embed([_wrap(_make_child("first-version passage", doc_id="doc-STAMPED"))])
-
+    # Bump the upstream module constants AFTER the helper's tag bump. The
+    # source rows on disk still carry the original stamps; reembed must
+    # preserve them rather than re-stamp from the live module values.
     monkeypatch.setattr(
         "auto_research.extract.embeddings.CHUNKER_VERSION", "v999",
     )
@@ -987,8 +1060,8 @@ def test_reembed_doc_preserves_upstream_version_stamps_when_module_constants_cha
         "auto_research.extract.embeddings.CONTEXTUAL_CHUNK_PROMPT_VERSION", "v999",
     )
 
-    adapter.reembed_doc("doc-STAMPED")
-    df = lancedb.connect(tmp_path).open_table("doc-STAMPED").to_pandas()
+    new.reembed_doc("doc-STAMPED")
+    df = _open_adapter_table(new, "doc-STAMPED")
     assert df["chunker_version"].iloc[0] == "v1"
     assert df["contextual_prompt_version"].iloc[0] == "v1"
 
@@ -1002,6 +1075,9 @@ def test_reembed_doc_makes_no_anthropic_calls(
     """
     import auto_research.extract.chunking_contextual as cc
 
+    chunks = [_wrap(_make_child("no anthropic here", doc_id="doc-NOAN"))]
+    _, new = _promote_and_bump(tmp_path, monkeypatch, chunks)
+
     def _exploding(**kwargs: object) -> object:
         raise AssertionError(
             "reembed must not invoke contextualize_chunks (Anthropic call)"
@@ -1009,10 +1085,8 @@ def test_reembed_doc_makes_no_anthropic_calls(
 
     monkeypatch.setattr(cc, "contextualize_chunks", _exploding)
 
-    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
-    adapter.embed([_wrap(_make_child("no anthropic here", doc_id="doc-NOAN"))])
     # If reembed touched contextualize_chunks at all, this would AssertionError.
-    n = adapter.reembed_doc("doc-NOAN")
+    n = new.reembed_doc("doc-NOAN")
     assert n == 1
 
 
@@ -1023,9 +1097,24 @@ def test_reembed_doc_dim_mismatch_raises(
     vector space — refuse loudly. The error message must name both dims so
     the operator can diagnose without reading the adapter source.
     """
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        now_utc_iso,
+        write_active_materialization,
+    )
+
     _install_fake_mlx(monkeypatch, dim=1024)
     write_adapter = EmbeddingAdapter(backend="qwen3-mlx", rag_root=tmp_path)
     write_adapter.embed([_wrap(_make_child("dim-mismatch source", doc_id="doc-DIM"))])
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version=write_adapter.materialization_version,
+            embed_model_version=write_adapter.embed_model_version,
+            promoted_at=now_utc_iso(),
+            manifest_count=1,
+        ),
+    )
 
     _install_fake_mlx(monkeypatch, dim=2560)
     swap_adapter = EmbeddingAdapter(
@@ -1039,49 +1128,88 @@ def test_reembed_doc_dim_mismatch_raises(
     assert "1024" in msg and "2560" in msg
 
 
-def test_reembed_doc_rebuilds_fts_index(tmp_path: Path) -> None:
-    """The reembed path overwrites the per-doc table, which drops any
-    existing FTS index. The implementation MUST rebuild it with the same
-    `_FTS_INDEX_KWARGS` so BM25 query parity is preserved end-to-end.
+def test_reembed_doc_rebuilds_fts_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reembed path writes a fresh per-doc table at the destination
+    materialization, which has no FTS index until the implementation
+    rebuilds it. Rebuilding with the same `_FTS_INDEX_KWARGS` is what
+    keeps BM25 query parity across a reembed.
+
+    Promotes BOTH materializations in sequence so the BM25 query at the
+    end reads from the destination namespace via the active pointer.
     """
-    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
-    adapter.embed([
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        now_utc_iso,
+        write_active_materialization,
+    )
+
+    chunks = [
         _wrap(_make_child("export controls passage", doc_id="doc-FTSRE")),
         _wrap(_make_child("dividend declaration", doc_id="doc-FTSRE")),
-    ])
-    adapter.reembed_doc("doc-FTSRE")
+    ]
+    _, new = _promote_and_bump(tmp_path, monkeypatch, chunks)
+    new.reembed_doc("doc-FTSRE")
 
-    hits = adapter.bm25_query(
+    # Promote the destination materialization so `bm25_query` reads from it.
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version=new.materialization_version,
+            embed_model_version=new.embed_model_version,
+            promoted_at=now_utc_iso(),
+            manifest_count=1,
+        ),
+    )
+
+    hits = new.bm25_query(
         "export controls", k=2, store="per_doc", doc_id="doc-FTSRE"
     )
     assert hits, "BM25 query returned no hits — FTS index was not rebuilt"
     assert hits[0].text.startswith("export controls")
 
 
-def test_reembed_corpus_processes_corpus_table(tmp_path: Path) -> None:
-    """`reembed_corpus()` re-encodes the `_corpus_narrative` table in place;
-    row count preserved, embed_model_version preserved when reembedding
-    against the same backend/model.
+def test_reembed_corpus_processes_corpus_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`reembed_corpus()` reads the source corpus rows from the active
+    materialization, re-encodes against the adapter's backend/model, and
+    writes them into the adapter's own namespace; row count preserved,
+    doc_id set preserved.
     """
-    import lancedb
-
-    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
-    adapter.embed([
-        _wrap(_make_child("nvda passage", doc_id="doc-CR1", doc_type="10-K"))
-    ])
-    adapter.embed([
-        _wrap(_make_child("amd passage", doc_id="doc-CR2", doc_type="10-K"))
-    ])
-
-    before_n = len(
-        lancedb.connect(tmp_path).open_table("_corpus_narrative").to_pandas()
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        now_utc_iso,
+        write_active_materialization,
     )
-    assert before_n == 2
 
-    n = adapter.reembed_corpus()
+    # Two narrative docs embedded under v1; embed() requires one doc per
+    # call so we land them as two separate calls into the same adapter.
+    old = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    old.embed([_wrap(_make_child("nvda passage", doc_id="doc-CR1", doc_type="10-K"))])
+    old.embed([_wrap(_make_child("amd passage", doc_id="doc-CR2", doc_type="10-K"))])
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version=old.materialization_version,
+            embed_model_version=old.embed_model_version,
+            promoted_at=now_utc_iso(),
+            manifest_count=2,
+        ),
+    )
+
+    before = _open_adapter_table(old, "_corpus_narrative")
+    assert len(before) == 2
+
+    monkeypatch.setattr(
+        "auto_research.extract.embeddings.EMBED_MODEL_VERSION_TAG", "v-reembed-corpus"
+    )
+    new = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    n = new.reembed_corpus()
     assert n == 2
 
-    after = lancedb.connect(tmp_path).open_table("_corpus_narrative").to_pandas()
+    after = _open_adapter_table(new, "_corpus_narrative")
     assert len(after) == 2
     assert set(after["doc_id"]) == {"doc-CR1", "doc-CR2"}
 
@@ -1089,110 +1217,137 @@ def test_reembed_corpus_processes_corpus_table(tmp_path: Path) -> None:
 def test_reembed_doc_empty_table_short_circuits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An empty per-doc table must not invoke the encoder (`self._encode`
-    against zero texts is wasted work and a few backends crash on empty
-    batch). Returns 0 instead.
+    """An empty per-doc table at the active namespace must not invoke the
+    encoder (`self._encode` against zero texts is wasted work and a few
+    backends crash on empty batch). Returns 0 instead.
+
+    We write an empty source table directly under the versioned namespace
+    of the (pre-bump) adapter, promote it, then bump the tag so reembed's
+    source/dest namespaces differ and the active-pointer guard is
+    satisfied.
     """
     import lancedb
     import pyarrow as pa
 
     from auto_research.extract.embeddings import _schema
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        now_utc_iso,
+        versioned_table_name,
+        write_active_materialization,
+    )
 
     db = lancedb.connect(tmp_path)
     schema = _schema(384)
-    db.create_table("doc-EMPTY", data=pa.Table.from_pylist([], schema=schema))
-
-    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    # Construct an adapter for its materialization_version, then write the
+    # empty source table at that namespace so the reembed source resolves.
+    old = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    source_name = versioned_table_name("doc-EMPTY", old.materialization_version)
+    db.create_table(source_name, data=pa.Table.from_pylist([], schema=schema))
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version=old.materialization_version,
+            embed_model_version=old.embed_model_version,
+            promoted_at=now_utc_iso(),
+            manifest_count=1,
+        ),
+    )
+    monkeypatch.setattr(
+        "auto_research.extract.embeddings.EMBED_MODEL_VERSION_TAG", "v-empty-bump"
+    )
+    new = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
 
     encode_calls: list[object] = []
-    original_encode = adapter._encode
+    original_encode = new._encode
 
     def _track(texts: list[str], *, input_type: str = "document") -> object:
         encode_calls.append(texts)
         return original_encode(texts, input_type=input_type)
 
-    monkeypatch.setattr(adapter, "_encode", _track)
+    monkeypatch.setattr(new, "_encode", _track)
 
-    n = adapter.reembed_doc("doc-EMPTY")
+    n = new.reembed_doc("doc-EMPTY")
     assert n == 0
     assert encode_calls == [], "encoder must not be called for an empty table"
 
 
 def test_reembed_doc_propagates_new_vectors_into_corpus_narrative(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review finding #1: after reembed_doc(X), the per-corpus narrative
-    rows for doc X must carry the new encoder's vectors and stamp, not the
-    pre-reembed ones. Without this propagation, store='corpus_narrative'
-    silently returns stale vectors for the same parent_ids whose per-doc
-    table was just refreshed — the mixed-vector-space failure mode the
+    """After reembed_doc(X), the destination materialization's per-corpus
+    narrative rows for doc X must carry the new encoder's vectors and
+    stamp. Without this propagation, store='corpus_narrative' queries
+    against the new materialization would silently return only rows from
+    the original embed sweep — the mixed-vector-space failure mode the
     module preamble warns against.
-    """
-    import lancedb
 
-    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
-    adapter.embed([
+    For this propagation to apply, the destination corpus table must
+    already exist (the embed → reembed sequence in this test creates it
+    when the first per-doc reembed for the new materialization writes;
+    here we exercise that via two narrative docs and assert both flow
+    into the destination corpus table).
+    """
+    chunks = [
         _wrap(_make_child("narrative passage one", doc_id="doc-PROP")),
         _wrap(_make_child("narrative passage two", doc_id="doc-PROP")),
-    ])
+    ]
+    old, new = _promote_and_bump(
+        tmp_path, monkeypatch, chunks, new_tag="v999"
+    )
 
-    db = lancedb.connect(tmp_path)
-    before_corpus = db.open_table("_corpus_narrative").to_pandas()
+    before_corpus = _open_adapter_table(old, "_corpus_narrative")
     assert len(before_corpus) == 2
 
-    # Bump the embed-model-version tag so the new corpus rows are
-    # distinguishable from the original embed-time write.
-    import auto_research.extract.embeddings as emb
+    new.reembed_doc("doc-PROP")
 
-    original_tag = emb.EMBED_MODEL_VERSION_TAG
-    try:
-        emb.EMBED_MODEL_VERSION_TAG = "v999"
-        adapter.reembed_doc("doc-PROP")
-    finally:
-        emb.EMBED_MODEL_VERSION_TAG = original_tag
-
-    after_corpus = db.open_table("_corpus_narrative").to_pandas()
+    # Per-doc table at the new materialization carries the new stamp.
+    after_doc = _open_adapter_table(new, "doc-PROP")
+    for stamp in after_doc["embed_model_version"]:
+        assert stamp.endswith(":v999")
+    # Corpus narrative at the destination materialization was created by
+    # the propagation path during reembed_doc and carries the new stamp
+    # too — proving the vector-copy fired and the dest corpus actually
+    # holds the new vectors, not stale ones.
+    after_corpus = _open_adapter_table(new, "_corpus_narrative")
     assert len(after_corpus) == 2
-    # The corpus rows for doc-PROP must reflect the new embed-model-version
-    # stamp — proving the vector-copy fired, not just the per-doc rewrite.
     for stamp in after_corpus["embed_model_version"]:
         assert stamp.endswith(":v999"), (
             f"corpus row stamp {stamp!r} was not updated by reembed_doc; "
             "vector-copy into _corpus_narrative did not fire"
         )
-    # Per-doc table got the same new stamp.
-    after_doc = db.open_table("doc-PROP").to_pandas()
-    for stamp in after_doc["embed_model_version"]:
-        assert stamp.endswith(":v999")
-
-    # Re-affirm that EMBED_MODEL_VERSION_TAG is restored — defends the
-    # finally-clause against accidental leakage into later tests.
-    assert original_tag == emb.EMBED_MODEL_VERSION_TAG
 
 
 def test_reembed_doc_non_narrative_doc_does_not_touch_corpus(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Non-narrative doc_types (S-1, S-3, 8-K, DEF 14A) are never written
-    to _corpus_narrative by embed(). reembed_doc on such a doc must not
-    create or write to the corpus table — the vector-copy hook must
-    no-op for non-narrative-eligible rows.
+    to `_corpus_narrative__*` by embed(). reembed_doc on such a doc must
+    not create or write to a corpus table at either the source OR the
+    destination materialization — the vector-copy hook must no-op for
+    non-narrative-eligible rows.
     """
     import lancedb
 
-    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
-    adapter.embed([
-        _wrap(_make_child("s-filing passage", doc_id="doc-S1", doc_type="S-1")),
-    ])
+    from auto_research.extract.materialization import versioned_table_name
+
+    chunks = [_wrap(_make_child("s-filing passage", doc_id="doc-S1", doc_type="S-1"))]
+    old, new = _promote_and_bump(tmp_path, monkeypatch, chunks)
 
     db = lancedb.connect(tmp_path)
+    source_corpus = versioned_table_name(
+        "_corpus_narrative", old.materialization_version
+    )
+    dest_corpus = versioned_table_name(
+        "_corpus_narrative", new.materialization_version
+    )
     # embed() did not create the corpus table for a non-narrative doc.
-    assert "_corpus_narrative" not in db.table_names()
+    assert source_corpus not in db.table_names()
 
-    adapter.reembed_doc("doc-S1")
+    new.reembed_doc("doc-S1")
 
-    # reembed_doc did not create one either.
-    assert "_corpus_narrative" not in db.table_names()
+    # reembed_doc did not create one at the destination either.
+    assert dest_corpus not in db.table_names()
 
 
 def test_reembed_doc_does_not_re_encode_for_corpus_propagation(
@@ -1203,23 +1358,23 @@ def test_reembed_doc_does_not_re_encode_for_corpus_propagation(
     Otherwise --all reverts to the 2x-cost regime review finding #2
     flagged.
     """
-    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
-    adapter.embed([
+    chunks = [
         _wrap(_make_child(f"prop-cost passage {i}", doc_id="doc-COST"))
         for i in range(3)
-    ])
+    ]
+    _, new = _promote_and_bump(tmp_path, monkeypatch, chunks)
 
     encode_call_count = 0
-    original_encode = adapter._encode
+    original_encode = new._encode
 
     def _count(texts: list[str], *, input_type: str = "document") -> object:
         nonlocal encode_call_count
         encode_call_count += 1
         return original_encode(texts, input_type=input_type)
 
-    monkeypatch.setattr(adapter, "_encode", _count)
+    monkeypatch.setattr(new, "_encode", _count)
 
-    adapter.reembed_doc("doc-COST")
+    new.reembed_doc("doc-COST")
 
     assert encode_call_count == 1, (
         f"reembed_doc invoked the encoder {encode_call_count} times; expected "
@@ -1227,51 +1382,83 @@ def test_reembed_doc_does_not_re_encode_for_corpus_propagation(
     )
 
 
-def test_reembed_corpus_missing_table_returns_zero(tmp_path: Path) -> None:
-    """Review finding #3: a rag_root populated solely from non-narrative
-    doc_types never produces a `_corpus_narrative` table. reembed_corpus
-    must return 0 silently rather than raise FileNotFoundError, so
-    `extract reembed --all` over a non-narrative corpus succeeds.
+def test_reembed_corpus_missing_table_returns_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rag_root whose active materialization is populated solely from
+    non-narrative doc_types never produces a `_corpus_narrative__*` table.
+    reembed_corpus must return 0 silently rather than raise
+    FileNotFoundError, so `extract reembed --all` over a non-narrative
+    corpus succeeds.
     """
-    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
-    adapter.embed([
+    chunks = [
         _wrap(_make_child("s-filing only", doc_id="doc-NONARR", doc_type="S-1")),
-    ])
+    ]
+    _, new = _promote_and_bump(tmp_path, monkeypatch, chunks)
 
-    n = adapter.reembed_corpus()
+    n = new.reembed_corpus()
     assert n == 0
 
 
 def test_reembed_doc_dim_check_runs_only_for_non_empty_tables(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review finding #10: the empty-table short-circuit must precede the
-    dim-mismatch check. An empty placeholder table with a 384-dim schema
-    reembedded by a 1024-dim adapter has zero rows to corrupt — the
-    operation should no-op, not raise.
+    """The empty-table short-circuit must precede the dim-mismatch check.
+    An empty placeholder table with a 384-dim schema reembedded by a
+    1024-dim adapter has zero rows to corrupt — the operation should
+    no-op, not raise.
+
+    Constructs the empty 384-dim placeholder directly under a "BGE-shaped"
+    materialization namespace, promotes that namespace as active, then
+    flips to a qwen3-mlx adapter producing 1024-dim vectors. reembed_doc
+    against the empty source must short-circuit to 0 BEFORE the
+    cross-dim guard fires.
     """
     import lancedb
     import pyarrow as pa
 
     from auto_research.extract.embeddings import _schema
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        now_utc_iso,
+        versioned_table_name,
+        write_active_materialization,
+    )
 
-    # Write an empty 384-dim table directly.
+    # Construct a BGE adapter, write an empty 384-dim table under its
+    # own materialization namespace, and promote that namespace.
+    bge = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
     db = lancedb.connect(tmp_path)
     schema_384 = _schema(384)
-    db.create_table("doc-EMPTY-DIM", data=pa.Table.from_pylist([], schema=schema_384))
+    empty_name = versioned_table_name(
+        "doc-EMPTY-DIM", bge.materialization_version
+    )
+    db.create_table(empty_name, data=pa.Table.from_pylist([], schema=schema_384))
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version=bge.materialization_version,
+            embed_model_version=bge.embed_model_version,
+            promoted_at=now_utc_iso(),
+            manifest_count=1,
+        ),
+    )
 
-    # Construct an adapter that produces 1024-dim vectors (qwen3-mlx).
+    # Now construct a qwen3-mlx adapter producing 1024-dim vectors.
     _install_fake_mlx(monkeypatch, dim=1024)
     adapter = EmbeddingAdapter(backend="qwen3-mlx", rag_root=tmp_path)
     n = adapter.reembed_doc("doc-EMPTY-DIM")
     assert n == 0
 
 
-def test_reembed_doc_emits_otel_narrative_count_attribute(tmp_path: Path) -> None:
-    """Review finding #14: the OTel `extract.reembed` span must carry the
-    `embedding.narrative_count` attribute that the original embed span
-    emits, so dashboards joining the two span sources see consistent
-    schema and can track the narrative-eligible fraction of reembed work.
+def test_reembed_doc_emits_otel_narrative_count_attribute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The OTel `extract.reembed` span carries `embedding.narrative_count`
+    so dashboards joining the embed and reembed span sources see
+    consistent schema and can track the narrative-eligible fraction of
+    reembed work. The materialization_version attribute is also asserted
+    so cross-issue dashboards can route by version cleanly.
     """
     from opentelemetry import trace
     from opentelemetry.sdk.trace import TracerProvider
@@ -1290,12 +1477,10 @@ def test_reembed_doc_emits_otel_narrative_count_attribute(tmp_path: Path) -> Non
     original_tracer = emb._tracer
     emb._tracer = trace.get_tracer(__name__, tracer_provider=provider)
     try:
-        adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
-        adapter.embed([
-            _wrap(_make_child("narrative one", doc_id="doc-OTEL")),
-        ])
+        chunks = [_wrap(_make_child("narrative one", doc_id="doc-OTEL"))]
+        _, new = _promote_and_bump(tmp_path, monkeypatch, chunks)
         exporter.clear()
-        adapter.reembed_doc("doc-OTEL")
+        new.reembed_doc("doc-OTEL")
     finally:
         emb._tracer = original_tracer
 
@@ -1305,3 +1490,280 @@ def test_reembed_doc_emits_otel_narrative_count_attribute(tmp_path: Path) -> Non
     attrs = reembed_spans[0].attributes or {}
     assert "embedding.narrative_count" in attrs
     assert attrs["embedding.narrative_count"] == 1
+    assert (
+        attrs["embedding.materialization_version"] == new.materialization_version
+    )
+
+
+# ---- materialization-versioned read path ---------------------------------
+
+
+def test_embed_to_inactive_namespace_does_not_perturb_active_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC criterion: building a new materialization (embed to a different
+    namespace than the active one) must NOT change what `query()` returns
+    from the active namespace. The two materializations are isolated on
+    disk; promotion is the only way to flip which the read path uses.
+    """
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        now_utc_iso,
+        write_active_materialization,
+    )
+
+    v1_text = "ACTIVE-V1: original passage that must remain queryable"
+    v2_text = "INACTIVE-V2: silent shadow embed that must not surface"
+
+    adapter_v1 = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter_v1.embed([_wrap(_make_child(v1_text, doc_id="doc-INACT"))])
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version=adapter_v1.materialization_version,
+            embed_model_version=adapter_v1.embed_model_version,
+            promoted_at=now_utc_iso(),
+            manifest_count=1,
+        ),
+    )
+
+    monkeypatch.setattr(
+        "auto_research.extract.embeddings.EMBED_MODEL_VERSION_TAG", "v-inact-unit"
+    )
+    adapter_v2 = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter_v2.embed([_wrap(_make_child(v2_text, doc_id="doc-INACT"))])
+
+    hits = adapter_v1.query(
+        "original passage", k=1, store="per_doc", doc_id="doc-INACT"
+    )
+    assert len(hits) == 1
+    assert hits[0].text == v1_text
+
+
+def test_query_raises_on_active_pointer_embed_model_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An adapter constructed with a different `embed_model_version` than
+    the active pointer's must NOT silently degrade — read-path queries
+    raise loudly. The error names both `embed_model_version` strings so
+    operators can identify the misconfiguration without source
+    spelunking.
+    """
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        now_utc_iso,
+        write_active_materialization,
+    )
+
+    adapter_v1 = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter_v1.embed([_wrap(_make_child("mismatch passage", doc_id="doc-MM"))])
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version=adapter_v1.materialization_version,
+            embed_model_version=adapter_v1.embed_model_version,
+            promoted_at=now_utc_iso(),
+            manifest_count=1,
+        ),
+    )
+
+    monkeypatch.setattr(
+        "auto_research.extract.embeddings.EMBED_MODEL_VERSION_TAG", "v-different"
+    )
+    adapter_v2 = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    with pytest.raises(RuntimeError) as excinfo:
+        adapter_v2.query("anything", k=1, store="per_doc", doc_id="doc-MM")
+    msg = str(excinfo.value)
+    assert adapter_v1.embed_model_version in msg
+    assert adapter_v2.embed_model_version in msg
+
+
+def test_query_falls_back_to_adapter_own_namespace_when_no_active_pointer(
+    tmp_path: Path,
+) -> None:
+    """Fresh installs and tests embed+query in a single adapter session
+    without an explicit promote step. The read path falls back to the
+    adapter's own materialization_version when `active_materialization.json`
+    is absent.
+    """
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter.embed([_wrap(_make_child("fallback passage", doc_id="doc-FB"))])
+    # No write_active_materialization() — pointer file is absent.
+    hits = adapter.query(
+        "fallback passage", k=1, store="per_doc", doc_id="doc-FB"
+    )
+    assert len(hits) == 1
+
+
+def test_query_span_carries_materialization_version_attribute(
+    tmp_path: Path,
+) -> None:
+    """AC: `embedding.materialization_version` on `extract.embed_query`
+    spans so dashboards can route by materialization. Sister assertion
+    to the reembed-side test; pinned here for the query surface
+    independently."""
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    import auto_research.extract.embeddings as emb
+
+    original_tracer = emb._tracer
+    emb._tracer = trace.get_tracer(__name__, tracer_provider=provider)
+    try:
+        adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+        adapter.embed([_wrap(_make_child("query span text", doc_id="doc-QS"))])
+        exporter.clear()
+        adapter.query("query span text", k=1, store="per_doc", doc_id="doc-QS")
+    finally:
+        emb._tracer = original_tracer
+
+    spans = exporter.get_finished_spans()
+    query_spans = [s for s in spans if s.name == "extract.embed_query"]
+    assert query_spans
+    attrs = query_spans[0].attributes or {}
+    assert (
+        attrs["embedding.materialization_version"]
+        == adapter.materialization_version
+    )
+
+
+def test_reembed_doc_raises_when_no_active_materialization(
+    tmp_path: Path,
+) -> None:
+    """Without an active pointer there is no source to re-encode from;
+    reembed_doc must raise with a remediation pointing at the embed /
+    migration path."""
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    with pytest.raises(RuntimeError, match="no active materialization"):
+        adapter.reembed_doc("doc-NO-ACTIVE")
+
+
+def test_reembed_doc_raises_when_active_matches_own_version(
+    tmp_path: Path,
+) -> None:
+    """If the active pointer already names this adapter's materialization,
+    reembed would re-write into the same namespace — a no-op masquerading
+    as an operation. Raise so the operator bumps a version constant first.
+    """
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        now_utc_iso,
+        write_active_materialization,
+    )
+
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter.embed([_wrap(_make_child("self-reembed test", doc_id="doc-SR"))])
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version=adapter.materialization_version,
+            embed_model_version=adapter.embed_model_version,
+            promoted_at=now_utc_iso(),
+            manifest_count=1,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="already matches"):
+        adapter.reembed_doc("doc-SR")
+
+
+# ---- OTel coverage for error paths --------------------------------------
+
+
+def _make_exporter() -> tuple[Any, Any]:
+    """Build an in-memory OTel span exporter and a TracerProvider wired to
+    it; return both so callers can install the provider via emb._tracer
+    rebinding and read finished spans after the test action."""
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return exporter, trace.get_tracer(__name__, tracer_provider=provider)
+
+
+def test_query_span_carries_materialization_version_even_on_mismatch_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When `_resolve_read_active` raises due to embed_model_version
+    mismatch, the OTel `extract.embed_query` span must STILL carry
+    `embedding.materialization_version` so dashboards bucketing error
+    rates by version don't lose the routing key."""
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        now_utc_iso,
+        write_active_materialization,
+    )
+
+    adapter_v1 = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter_v1.embed([_wrap(_make_child("query span mismatch", doc_id="doc-QM"))])
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version=adapter_v1.materialization_version,
+            embed_model_version=adapter_v1.embed_model_version,
+            promoted_at=now_utc_iso(),
+            manifest_count=1,
+        ),
+    )
+    monkeypatch.setattr(
+        "auto_research.extract.embeddings.EMBED_MODEL_VERSION_TAG", "v-mismatch"
+    )
+    adapter_v2 = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+
+    exporter, fake_tracer = _make_exporter()
+    import auto_research.extract.embeddings as emb
+
+    original_tracer = emb._tracer
+    emb._tracer = fake_tracer
+    try:
+        with pytest.raises(RuntimeError):
+            adapter_v2.query("anything", k=1, store="per_doc", doc_id="doc-QM")
+    finally:
+        emb._tracer = original_tracer
+
+    spans = exporter.get_finished_spans()
+    query_spans = [s for s in spans if s.name == "extract.embed_query"]
+    assert query_spans
+    attrs = query_spans[0].attributes or {}
+    assert (
+        attrs["embedding.materialization_version"]
+        == adapter_v2.materialization_version
+    )
+
+
+def test_reembed_doc_emits_precondition_error_span_when_no_active_pointer(
+    tmp_path: Path,
+) -> None:
+    """`_resolve_reembed_source_version` raises BEFORE `_reembed_table`
+    creates its OTel span; the wrapper code must emit a one-shot
+    `extract.reembed` error span so traces still bucket the failure."""
+    exporter, fake_tracer = _make_exporter()
+    import auto_research.extract.embeddings as emb
+
+    original_tracer = emb._tracer
+    emb._tracer = fake_tracer
+    try:
+        adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+        with pytest.raises(RuntimeError, match="no active materialization"):
+            adapter.reembed_doc("doc-NOPE")
+    finally:
+        emb._tracer = original_tracer
+
+    spans = exporter.get_finished_spans()
+    reembed_spans = [s for s in spans if s.name == "extract.reembed"]
+    assert reembed_spans, "precondition-error reembed span missing"
+    attrs = reembed_spans[0].attributes or {}
+    assert attrs["extract.outcome"] == "error"
+    assert "embedding.materialization_version" in attrs

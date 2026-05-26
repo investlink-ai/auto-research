@@ -338,6 +338,59 @@ The per-corpus index is **write-only-on-extract**; no separate ingest
 path. Issue #15's adapter writes both stores from the same
 `embed(chunks)` call.
 
+**D11 amendment (2026-05-27, post-#67/#68/#69): materialization-versioned
+tables + active-pointer config.** Write-in-place under the bare
+`{doc_id}` / `_corpus_narrative` names is fine at the 90-name × 2-year
+v1 backfill scope (a re-embed completes in minutes; the
+"corpus-inconsistent for a few minutes" window is operationally
+invisible). At the 1000-name × 10-year scope the same re-embed against
+Voyage's constrained tier takes **~9 hours of wall-clock**, during
+which the corpus contains mixed-vector-space rows — the exact failure
+mode `[[feedback-embedding-vector-space-consistency]]` warns against
+and the only correct way to mitigate is an atomic active-pointer flip.
+
+The new layout:
+
+- **Versioned table names.** Per-doc tables live at
+  `{doc_id}__{materialization_version}.lance`; the per-corpus narrative
+  table lives at `_corpus_narrative__{materialization_version}.lance`.
+  `materialization_version` is the 8-hex-char SHA-256 of
+  `(CHUNKER_VERSION, CONTEXTUAL_CHUNK_PROMPT_VERSION,
+  embed_model_version(backend, model))` — the same orthogonal-cache-key
+  contract triple introduced by #67.
+- **Active pointer.** `data/rag/active_materialization.json` names the
+  version queries read from. Build path (`embed()` / `reembed_*()`)
+  writes to its own materialization namespace regardless of which
+  version is currently active; building a new materialization never
+  perturbs live queries.
+- **Read-path mismatch guard.** When the active pointer's
+  `embed_model_version` differs from the adapter's, queries raise
+  loudly rather than silently degrade onto vectors from another
+  vector space.
+- **Re-embed source/dest split.** `reembed_doc()` and
+  `reembed_corpus()` read source rows from the active namespace and
+  write the re-encoded rows to the adapter's own namespace —
+  cross-vector-space migration is one atomic flip from the new
+  namespace to active, not an in-place row rewrite.
+- **CLI surface.** `auto-research extract list-materializations`,
+  `promote-materialization --version <slug> --manifest-path …` (validates
+  completeness + dim + embed-model stamp consistency before flipping),
+  `gc-materialization --keep-last N` (drops old non-active versions
+  ordered by promotion history; default `--keep-last 2` keeps current
+  + 1 previous for rollback).
+- **Migration.** None required: the project is in pre-data development
+  scope, so any legacy `{name}.lance` tables are simply rebuilt under
+  the versioned layout by re-running the embed sweep. The active
+  pointer is seeded by the first promotion after rebuild.
+- **OTel.** `embedding.materialization_version` is attached to
+  `extract.embed`, `extract.reembed`, `extract.embed_query`, and
+  `extract.bm25_query` spans so dashboards can route by version.
+
+**Out of scope for the amendment** (deferred follow-ups): dual-write
+canary at query time (read old + new, merge ranks); hot/cold
+recency-partitioned materializations; cross-cloud replication.
+Schema-shape of `text` / `vector` / metadata columns is unchanged.
+
 ## Architecture
 
 ### `extract/chunking.py` (Issue #13 surface)
@@ -515,6 +568,7 @@ code does not entangle them.
 | D9 (char_span tests) | **Do not roll back** — Tier 2 evidence for INV-2. |
 | D10 (cutoff constant) | Inline `100_000` at use sites. |
 | D11 (corpus index) | Stop writing the per-corpus store; remove the directory. |
+| D11 amendment (versioned layout) | Revert `extract.embeddings` to write bare `{doc_id}.lance` and `_corpus_narrative.lance`; delete `extract.materialization`; drop the three `extract` CLI subcommands. Existing versioned tables can be renamed back manually (`{base}__{version}.lance` → `{base}.lance` for the active version; drop the others). The active-pointer JSON is operationally redundant after the revert. |
 
 ## References
 

@@ -56,6 +56,12 @@ from tenacity import (
 
 from auto_research.extract.chunking import CHUNKER_VERSION
 from auto_research.extract.chunking_contextual import ContextualChildChunk
+from auto_research.extract.materialization import (
+    ActiveMaterialization,
+    compute_materialization_version,
+    read_active_materialization,
+    versioned_table_name,
+)
 from auto_research.extract.prompts.contextual_chunk import (
     CONTEXTUAL_CHUNK_PROMPT_VERSION,
 )
@@ -506,9 +512,82 @@ class EmbeddingAdapter:
     def model(self) -> str:
         return self._model
 
-    @property
+    @cached_property
     def embed_model_version(self) -> str:
+        """Frozen at construction so an adapter's identity is stable across
+        the lifetime of the process — bumping the module-level
+        `EMBED_MODEL_VERSION_TAG` after the adapter exists does NOT change
+        what this adapter's `embed_model_version` reports. Pairs naturally
+        with `materialization_version` (also cached) so reads-vs-active-
+        pointer mismatch checks are well-defined per adapter rather than
+        leaking the current module state across instances."""
         return embed_model_version(self._backend, self._model)
+
+    @cached_property
+    def materialization_version(self) -> str:
+        """The 8-hex-char hash of this adapter's `(chunker, contextual-prompt,
+        embed-model)` contract triple — the namespace this adapter's writes
+        land in and the fallback read namespace when no active pointer is
+        promoted. Always derived from the three module-level version tokens
+        so changes propagate transitively (the orthogonal-cache-keys
+        contract from #67).
+        """
+        return compute_materialization_version(
+            CHUNKER_VERSION,
+            CONTEXTUAL_CHUNK_PROMPT_VERSION,
+            self.embed_model_version,
+        )
+
+    def _resolve_read_active(self) -> ActiveMaterialization | None:
+        """Read the on-disk active pointer if present, validating that its
+        `embed_model_version` matches this adapter's.
+
+        Mismatch raises loudly per the embedding-vector-space-consistency
+        rule: querying with adapter-encoder B against rows produced by
+        encoder A silently degrades retrieval and is exactly the
+        backfill-scale failure mode this issue exists to prevent. The
+        cleanest operational answer is "construct an adapter that matches
+        the active pointer's embed model" — the error surfaces that
+        guidance immediately.
+        """
+        active = read_active_materialization(self._rag_root)
+        if active is None:
+            return None
+        if active.embed_model_version != self.embed_model_version:
+            raise RuntimeError(
+                "active materialization mismatch: pointer is "
+                f"embed_model_version={active.embed_model_version!r} but this "
+                f"adapter produces {self.embed_model_version!r}. Querying "
+                "across vector spaces silently degrades retrieval. "
+                "Construct an adapter matched to the active pointer, "
+                "or run `auto-research extract list-materializations` to "
+                "see what's available."
+            )
+        return active
+
+    def _read_table_name(self, base: str) -> str:
+        """Resolve the table name for a READ operation.
+
+        Uses the active pointer's version when promoted, else falls back to
+        this adapter's own materialization version. The fallback lets fresh
+        installs and tests embed-then-query in one session without a manual
+        promote step; production deployments always have an active pointer
+        (the migration script seeds one).
+        """
+        active = self._resolve_read_active()
+        version = active.version if active is not None else self.materialization_version
+        return versioned_table_name(base, version)
+
+    def _write_table_name(self, base: str) -> str:
+        """Resolve the table name for a WRITE operation.
+
+        Writes always land in `{base}__{self.materialization_version}` —
+        the build path is independent of the active pointer per the issue
+        spec ("Build path ignores it (writes to its own version
+        namespace)"). Building a new materialization never perturbs
+        live-query reads against the currently-active one.
+        """
+        return versioned_table_name(base, self.materialization_version)
 
     @cached_property
     def _vector_dim(self) -> int:
@@ -648,6 +727,9 @@ class EmbeddingAdapter:
             span.set_attribute("embedding.chunks_count", len(chunks))
             span.set_attribute("embedding.backend", self._backend)
             span.set_attribute("embedding.model", self._model)
+            span.set_attribute(
+                "embedding.materialization_version", self.materialization_version
+            )
             try:
                 texts = [c.embedding_text for c in chunks]
                 vectors = self._encode(texts)
@@ -658,18 +740,22 @@ class EmbeddingAdapter:
                 schema = _schema(self._vector_dim)
 
                 per_doc_tbl = db.create_table(
-                    doc_id, data=rows, schema=schema, mode="overwrite"
+                    self._write_table_name(doc_id),
+                    data=rows,
+                    schema=schema,
+                    mode="overwrite",
                 )
                 per_doc_tbl.create_fts_index("text", **_FTS_INDEX_KWARGS)
 
                 narrative_rows = [r for r in rows if r["doc_type"] in NARRATIVE_DOC_TYPES]
                 if narrative_rows:
-                    if _PER_CORPUS_STORE in db.table_names():
+                    corpus_name = self._write_table_name(_PER_CORPUS_STORE)
+                    if corpus_name in db.table_names():
                         # LanceDB updates the FTS index incrementally on `.add()`.
-                        db.open_table(_PER_CORPUS_STORE).add(narrative_rows)
+                        db.open_table(corpus_name).add(narrative_rows)
                     else:
                         corpus_tbl = db.create_table(
-                            _PER_CORPUS_STORE, data=narrative_rows, schema=schema
+                            corpus_name, data=narrative_rows, schema=schema
                         )
                         corpus_tbl.create_fts_index("text", **_FTS_INDEX_KWARGS)
                 span.set_attribute("embedding.narrative_count", len(narrative_rows))
@@ -734,25 +820,31 @@ class EmbeddingAdapter:
         return rows
 
     def _reembed_table(
-        self, table_name: str, *, span_doc_id: str | None
+        self,
+        *,
+        source_table: str,
+        dest_table: str,
+        span_doc_id: str | None,
     ) -> tuple[int, list[dict[str, object]]]:
         """Shared body for `reembed_doc` / `reembed_corpus`.
 
-        Reads the existing table's `text` column, re-encodes with the
-        adapter's current backend/model, overwrites the table in place
-        with the new vectors (preserving metadata), and rebuilds the FTS
-        index with `_FTS_INDEX_KWARGS`.
+        Reads the `text` column from `source_table`, re-encodes with the
+        adapter's current backend/model, writes to `dest_table` under
+        the schema for this adapter's vector dim, and builds the FTS
+        index with `_FTS_INDEX_KWARGS`. Source and dest may name the
+        same table (legacy in-place semantics) or different tables (the
+        materialization-versioned path, where source lives in the active
+        namespace and dest lives in this adapter's own namespace).
 
         Returns `(rows_reencoded, new_rows)` — callers (specifically
         `reembed_doc`) reuse the encoded rows to propagate vectors into
-        the per-corpus narrative store without re-encoding (issue #68
-        review finding #1).
+        the per-corpus narrative store without re-encoding.
 
-        Empty-table case short-circuits BEFORE the dim check — there is
+        Empty source short-circuits BEFORE the dim check: there is
         nothing to corrupt in a zero-row table, so refusing it on dim
-        grounds (finding #10) would surprise operators who hit an empty
-        placeholder during a re-embed sweep. Non-empty tables still
-        fail loudly on dim drift.
+        grounds would surprise operators who hit an empty placeholder
+        during a re-embed sweep. Non-empty source still fails loudly on
+        dim drift relative to the adapter's current model.
 
         `span_doc_id` is only set for per-doc reembeds — the per-corpus
         store contains rows from many docs, so the OTel `extract.doc_id`
@@ -763,12 +855,16 @@ class EmbeddingAdapter:
             span.set_attribute("extract.worker", _WORKER)
             span.set_attribute("embedding.backend", self._backend)
             span.set_attribute("embedding.model", self._model)
-            span.set_attribute("embedding.store", table_name)
+            span.set_attribute(
+                "embedding.materialization_version", self.materialization_version
+            )
+            span.set_attribute("embedding.store", dest_table)
+            span.set_attribute("embedding.source_store", source_table)
             if span_doc_id is not None:
                 span.set_attribute("extract.doc_id", span_doc_id)
             try:
                 db = lancedb.connect(self._rag_root)
-                tbl = db.open_table(table_name)
+                tbl = db.open_table(source_table)
                 df = tbl.to_pandas()
                 n = len(df)
                 if n == 0:
@@ -776,13 +872,19 @@ class EmbeddingAdapter:
                     span.set_attribute("embedding.narrative_count", 0)
                     span.set_attribute("extract.outcome", "success")
                     return (0, [])
-                self._assert_dim_compatible(tbl, table_name)
+                # Dim guard applies to the cross-namespace case too: if the
+                # source's vector column is 1024-dim and the adapter would
+                # produce 2560-dim, the destination namespace would contain
+                # rows of one dim while another doc embedded in the same
+                # namespace produces a different dim — corruption. Raise
+                # before writing anything.
+                self._assert_dim_compatible(tbl, source_table)
                 texts = df["text"].tolist()
                 vectors = self._encode(texts, input_type="document")
                 new_rows = self._rows_from_existing(df, vectors)
                 schema = _schema(self._vector_dim)
                 new_tbl = db.create_table(
-                    table_name, data=new_rows, schema=schema, mode="overwrite"
+                    dest_table, data=new_rows, schema=schema, mode="overwrite"
                 )
                 new_tbl.create_fts_index("text", **_FTS_INDEX_KWARGS)
                 narrative_count = sum(
@@ -801,25 +903,34 @@ class EmbeddingAdapter:
         self, new_rows: list[dict[str, object]]
     ) -> int:
         """Push fresh vectors for the narrative-eligible rows of one doc into
-        the per-corpus narrative store by deleting the doc's existing
-        corpus rows and re-inserting the new ones in a single LanceDB
-        transaction-equivalent pair.
+        the per-corpus narrative store FOR THIS ADAPTER'S MATERIALIZATION
+        VERSION by deleting the doc's existing corpus rows and re-
+        inserting the new ones in a single LanceDB transaction-equivalent
+        pair.
 
         Encoder-only: no `_encode` call here. Vectors are copied from
         `new_rows` (already computed by the caller's `_reembed_table`
         invocation).
+
+        Target table is `_corpus_narrative__{self.materialization_version}`
+        — the destination namespace, not the active one. The active-
+        namespace corpus is left untouched so a partial reembed can't
+        corrupt the live query surface.
 
         No-ops in three cases:
         - `new_rows` is empty (caller just reembedded an empty per-doc
           table).
         - None of `new_rows` are narrative-eligible (S-1 / S-3 / 8-K /
           DEF 14A doc types).
-        - The corpus table does not exist yet (no narrative doc has ever
-          been embedded under this rag_root). Per the original `embed()`
-          contract, the corpus is lazily created when the first
-          narrative chunk lands; we honor that — re-embedding a doc
-          that is not narrative-eligible must not create an empty
-          corpus.
+        - The destination corpus table does not exist yet (no narrative
+          doc has ever been reembedded into this materialization). Per
+          the original `embed()` contract, the corpus is lazily created
+          when the first narrative chunk lands; we honor that — re-
+          embedding a doc that is not narrative-eligible must not
+          create an empty corpus, and the first narrative reembed of a
+          materialization can't propagate yet (the build path is
+          responsible for creating the corpus on the first per-doc
+          embed; the reembed path appends).
 
         Implementation note: `merge_insert(on=...)` looked tempting but
         no LanceDB column is a unique chunk identifier — `parent_id` is
@@ -827,11 +938,10 @@ class EmbeddingAdapter:
         `(parent_id, text)` would require a composite join key that
         LanceDB's merge_insert handles awkwardly with duplicate-key
         source rows. Delete-by-doc-id + insert is the simplest
-        primitive that matches the embed-time write semantics exactly:
-        every embed() call appends one doc's narrative rows; this path
-        replaces them. Single-quoted SQL literal is safe because
-        `doc_id` is validated at chunking time (no embedded quotes in
-        the doc_id grammar) and we further reject any `'` defensively.
+        primitive that matches the embed-time write semantics exactly.
+        Single-quoted SQL literal is safe because `doc_id` is validated
+        at chunking time (no embedded quotes in the doc_id grammar) and
+        we further reject any `'` defensively.
         """
         narrative_rows = [
             r for r in new_rows if r["doc_type"] in NARRATIVE_DOC_TYPES
@@ -839,8 +949,7 @@ class EmbeddingAdapter:
         if not narrative_rows:
             return 0
         db = lancedb.connect(self._rag_root)
-        if _PER_CORPUS_STORE not in db.table_names():
-            return 0
+        corpus_name = self._write_table_name(_PER_CORPUS_STORE)
         # All narrative_rows share the same doc_id by construction
         # (caller is _reembed_table for a single per-doc table).
         doc_id = str(narrative_rows[0]["doc_id"])
@@ -849,20 +958,91 @@ class EmbeddingAdapter:
                 f"doc_id {doc_id!r} contains a single quote; refusing to "
                 "build the corpus-delete SQL predicate. Sanitize upstream."
             )
-        corpus_tbl = db.open_table(_PER_CORPUS_STORE)
-        corpus_tbl.delete(f"doc_id = '{doc_id}'")
         # Reuse the same fixed-size-list schema the original embed() path
         # writes; pa.Table.from_pylist needs the schema to lock in
         # `pa.list_(pa.float32(), dim)` instead of inferring a variable-
-        # length list from the row dicts (which would mismatch the corpus
-        # table's column type and fail the add).
+        # length list from the row dicts.
         schema = _schema(self._vector_dim)
-        new_data = pa.Table.from_pylist(narrative_rows, schema=schema)
-        corpus_tbl.add(new_data)
+        if corpus_name not in db.table_names():
+            # Destination corpus doesn't exist yet — first narrative reembed
+            # into this materialization. Create it, mirroring the embed-time
+            # lazy-create pattern. Build the FTS index here too so any
+            # subsequent BM25 query against the destination materialization's
+            # corpus has the index it needs.
+            corpus_tbl = db.create_table(
+                corpus_name, data=narrative_rows, schema=schema
+            )
+            corpus_tbl.create_fts_index("text", **_FTS_INDEX_KWARGS)
+        else:
+            corpus_tbl = db.open_table(corpus_name)
+            corpus_tbl.delete(f"doc_id = '{doc_id}'")
+            new_data = pa.Table.from_pylist(narrative_rows, schema=schema)
+            corpus_tbl.add(new_data)
         return len(narrative_rows)
 
+    def _resolve_reembed_source_version(self) -> str:
+        """Return the materialization version `reembed_*` reads source rows
+        from, raising if the operation is impossible / a no-op.
+
+        Source is the currently-active materialization: the operator wants
+        to re-encode the rows that production is serving today. Destination
+        is `self.materialization_version` (the build path's own
+        namespace). The two MUST differ — if they match, the destination
+        rows are exactly what the source rows already are, so there's
+        nothing to re-encode.
+
+        Unlike `_resolve_read_active`, this method does NOT compare
+        `embed_model_version`s: reembed is precisely the operation that
+        crosses the embed-model boundary, so a mismatch is the expected
+        case, not an error.
+        """
+        active = read_active_materialization(self._rag_root)
+        if active is None:
+            raise RuntimeError(
+                "no active materialization to re-embed from. Build the "
+                "initial materialization with `embed()` and promote it "
+                "before re-embedding."
+            )
+        if active.version == self.materialization_version:
+            raise RuntimeError(
+                "active materialization version "
+                f"{active.version!r} already matches this adapter's "
+                f"materialization_version {self.materialization_version!r}. "
+                "Re-embed produces no new namespace — the build path "
+                "already writes here. Bump one of CHUNKER_VERSION, "
+                "CONTEXTUAL_CHUNK_PROMPT_VERSION, or EMBED_MODEL_VERSION_TAG "
+                "before re-embedding."
+            )
+        return active.version
+
+    def _emit_reembed_precondition_error(
+        self, exc: RuntimeError, *, span_doc_id: str | None
+    ) -> None:
+        """Emit a one-shot `extract.reembed` error span for failures raised
+        BEFORE `_reembed_table`'s own span context begins.
+
+        Without this, the "no active materialization" / "already at this
+        materialization" guards in `_resolve_reembed_source_version`
+        surface as Python exceptions but leave no trace in OTel — error
+        dashboards bucketing reembed attempts would silently undercount
+        precondition failures. Same span name as the normal path so
+        consumers don't need a second filter.
+        """
+        with _tracer.start_as_current_span("extract.reembed") as span:
+            span.set_attribute("extract.worker", _WORKER)
+            span.set_attribute("embedding.backend", self._backend)
+            span.set_attribute("embedding.model", self._model)
+            span.set_attribute(
+                "embedding.materialization_version", self.materialization_version
+            )
+            if span_doc_id is not None:
+                span.set_attribute("extract.doc_id", span_doc_id)
+            span.set_attribute("extract.outcome", "error")
+            span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+
     def reembed_doc(self, doc_id: str) -> int:
-        """Re-encode rows of `<doc_id>` against current backend; return count.
+        """Re-encode rows of `<doc_id>` from the active materialization into
+        this adapter's own namespace; return the row count.
 
         Encoder-only path: the `text` column (already the contextual prefix
         + chunk text concatenation from the original `embed()` call) is
@@ -870,44 +1050,68 @@ class EmbeddingAdapter:
         upstream chunker output is not touched. This is the cost-saving
         primitive for embed-model swaps at backfill scope.
 
-        Also propagates the new vectors into the per-corpus narrative
-        store for this doc's narrative-eligible rows via vector-copy
-        (no second encoder pass). This keeps the two stores in the same
-        vector space after a per-doc reembed — without this propagation,
-        store='corpus_narrative' queries would silently return stale
-        vectors for rows whose per-doc table was just refreshed
-        (review finding #1).
+        Source table: `{doc_id}__{active.version}` (the currently-active
+        materialization). Destination table:
+        `{doc_id}__{self.materialization_version}` (this adapter's own
+        namespace). The destination is created if missing; existing
+        contents under the destination version are overwritten.
 
-        Raises `RuntimeError` if the existing vectors' dim does not match
-        the current adapter's `_vector_dim` — a dim change means a new
-        vector space and re-embedding in place would corrupt the table.
-        Same-dim cross-encoder swaps (e.g., voyage-finance-2 ↔ Qwen3-0.6B,
-        both 1024-dim) are NOT detected here; the caller is responsible
-        for sticking to within-backend swaps or treating cross-backend as
-        a new corpus.
+        Also propagates the new vectors into the per-corpus narrative
+        store of the destination materialization (if a corpus already
+        exists there from a prior per-doc reembed in this sweep) via
+        vector-copy — no second encoder pass.
+
+        Raises `RuntimeError` if no active materialization exists, if the
+        active version already matches this adapter's (the reembed would
+        be a no-op), or if the source vectors' dim does not match the
+        current adapter's `_vector_dim` (cross-dim swaps imply a new
+        vector space and must build a fresh corpus, not append).
         """
-        n, new_rows = self._reembed_table(doc_id, span_doc_id=doc_id)
+        try:
+            source_version = self._resolve_reembed_source_version()
+        except RuntimeError as exc:
+            self._emit_reembed_precondition_error(exc, span_doc_id=doc_id)
+            raise
+        source_table = versioned_table_name(doc_id, source_version)
+        dest_table = self._write_table_name(doc_id)
+        n, new_rows = self._reembed_table(
+            source_table=source_table,
+            dest_table=dest_table,
+            span_doc_id=doc_id,
+        )
         self._propagate_to_corpus(new_rows)
         return n
 
     def reembed_corpus(self) -> int:
-        """Re-encode the `_corpus_narrative` table in place; return count.
+        """Re-encode the per-corpus narrative table from the active
+        materialization into this adapter's own namespace; return count.
 
         Same encoder-only semantics as `reembed_doc`. The corpus narrative
         store aggregates rows from many docs; re-encoding it on its own
         is correct because every row's `text` column already contains the
         embedding-ready string written by the original `embed()` call.
 
-        Returns 0 (no-op) when the corpus table does not exist — a
-        rag_root populated solely from non-narrative doc_types (S-1,
-        S-3, 8-K, DEF 14A) has no `_corpus_narrative` table, and
-        `reembed --all` over such a corpus must succeed silently rather
-        than crash with `FileNotFoundError` (review finding #3).
+        Returns 0 (no-op) when the source corpus table does not exist —
+        an active materialization populated solely from non-narrative
+        doc_types (S-1, S-3, 8-K, DEF 14A) has no `_corpus_narrative__*`
+        table, and `reembed --all` over such a corpus must succeed
+        silently rather than crash with `FileNotFoundError`.
         """
+        try:
+            source_version = self._resolve_reembed_source_version()
+        except RuntimeError as exc:
+            self._emit_reembed_precondition_error(exc, span_doc_id=None)
+            raise
+        source_table = versioned_table_name(_PER_CORPUS_STORE, source_version)
+        dest_table = self._write_table_name(_PER_CORPUS_STORE)
         db = lancedb.connect(self._rag_root)
-        if _PER_CORPUS_STORE not in db.table_names():
+        if source_table not in db.table_names():
             return 0
-        n, _ = self._reembed_table(_PER_CORPUS_STORE, span_doc_id=None)
+        n, _ = self._reembed_table(
+            source_table=source_table,
+            dest_table=dest_table,
+            span_doc_id=None,
+        )
         return n
 
     def bm25_query(
@@ -943,11 +1147,24 @@ class EmbeddingAdapter:
             span.set_attribute("embedding.store", store)
             span.set_attribute("embedding.k", k)
             span.set_attribute("embedding.has_filter", where is not None)
+            # Stamp the adapter's materialization_version up front so the
+            # attribute is present even when `_read_table_name` raises on
+            # an active-pointer mismatch — dashboards bucketing errors by
+            # version still have a key to group on.
+            span.set_attribute(
+                "embedding.materialization_version", self.materialization_version
+            )
             if doc_id is not None:
                 span.set_attribute("extract.doc_id", doc_id)
             try:
                 db = lancedb.connect(self._rag_root)
-                table_name = doc_id if store == "per_doc" else _PER_CORPUS_STORE
+                # doc_id is non-None for per_doc (guarded above); narrow for mypy.
+                base = (
+                    doc_id
+                    if (store == "per_doc" and doc_id is not None)
+                    else _PER_CORPUS_STORE
+                )
+                table_name = self._read_table_name(base)
                 tbl = db.open_table(table_name)
                 builder = tbl.search(text, query_type="fts").limit(k)
                 if where:
@@ -992,11 +1209,23 @@ class EmbeddingAdapter:
             span.set_attribute("embedding.store", store)
             span.set_attribute("embedding.k", k)
             span.set_attribute("embedding.has_filter", where is not None)
+            # Stamp the adapter's materialization_version up front so error
+            # spans from `_read_table_name`'s mismatch guard still carry the
+            # routing key dashboards filter by.
+            span.set_attribute(
+                "embedding.materialization_version", self.materialization_version
+            )
             if doc_id is not None:
                 span.set_attribute("extract.doc_id", doc_id)
             try:
                 db = lancedb.connect(self._rag_root)
-                table_name = doc_id if store == "per_doc" else _PER_CORPUS_STORE
+                # doc_id is non-None for per_doc (guarded above); narrow for mypy.
+                base = (
+                    doc_id
+                    if (store == "per_doc" and doc_id is not None)
+                    else _PER_CORPUS_STORE
+                )
+                table_name = self._read_table_name(base)
                 tbl = db.open_table(table_name)
                 # Voyage and Qwen3-MLX both consume input_type as the
                 # asymmetric-encoder switch on the query side (Voyage

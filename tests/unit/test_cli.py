@@ -759,15 +759,22 @@ def test_extract_s_filings_initializes_telemetry(
 
 
 def _write_doc(rag_root: Path, doc_id: str, text: str, doc_type: str = "10-K") -> None:
-    """Embed one chunk under `doc_id` via BGE so `extract reembed` has a
-    real LanceDB table to operate on. Kept tiny — these tests exercise CLI
-    wiring, not adapter mechanics (those are covered in test_embeddings.py).
+    """Embed one chunk under `doc_id` via BGE and promote that
+    materialization so `extract reembed` has both a real LanceDB table
+    AND an active pointer to read the source from. Kept tiny — these
+    tests exercise CLI wiring, not adapter mechanics (those are covered
+    in test_embeddings.py).
     """
     from datetime import date
 
     from auto_research.extract.chunking import ChildChunk, ChunkMetadata
     from auto_research.extract.chunking_contextual import ContextualChildChunk
     from auto_research.extract.embeddings import EmbeddingAdapter
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        now_utc_iso,
+        write_active_materialization,
+    )
 
     md = ChunkMetadata(
         ticker="NVDA",
@@ -787,6 +794,19 @@ def _write_doc(rag_root: Path, doc_id: str, text: str, doc_type: str = "10-K") -
     )
     adapter = EmbeddingAdapter(backend="bge", rag_root=rag_root)
     adapter.embed([ContextualChildChunk(child=child, context="")])
+    # Promote the just-embedded materialization so subsequent reembed CLI
+    # paths (which require an active pointer) have a valid source. Same
+    # materialization_version each call so repeated _write_doc invocations
+    # accumulate into the same active namespace.
+    write_active_materialization(
+        rag_root,
+        ActiveMaterialization(
+            version=adapter.materialization_version,
+            embed_model_version=adapter.embed_model_version,
+            promoted_at=now_utc_iso(),
+            manifest_count=1,
+        ),
+    )
 
 
 def test_extract_reembed_help_advertises_qwen3_default(runner: CliRunner) -> None:
@@ -1101,3 +1121,549 @@ def test_extract_reembed_all_dry_run_does_not_double_count_narrative_rows(
     # excluded from --all's dry-run target list.
     assert "tables=2" in result.output
     assert "rows=2" in result.output
+
+
+# ---- extract list-materializations / promote-materialization / gc -------
+
+
+def _write_manifest(manifest_path: Path, doc_ids: list[str]) -> None:
+    """Write a minimal ingest manifest with the given doc_ids under
+    `source='edgar'`, `status='ok'` so `promote-materialization` can
+    validate namespace completeness against it. Field set matches
+    `auto_research.ingest.manifest.SCHEMA` exactly so the parquet
+    append succeeds.
+    """
+    from datetime import UTC, datetime
+
+    from auto_research.ingest import manifest as manifest_mod
+
+    ts = datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC)
+    rows = [
+        {
+            "source": "edgar",
+            "entity_id": "0001045810",
+            "doc_id": doc_id,
+            "form_type": "10-K",
+            "event_datetime": ts,
+            "fetched_at": ts,
+            "content_sha256": "x" * 64,
+            "path": f"data/raw/{doc_id}.txt",
+            "status": "ok",
+        }
+        for doc_id in doc_ids
+    ]
+    manifest_mod.append(manifest_path, rows)
+
+
+def test_list_materializations_empty_rag_root_reports_no_results(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    result = runner.invoke(
+        cli,
+        ["extract", "list-materializations", "--rag-root", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "no materializations found" in result.output
+
+
+def test_list_materializations_marks_active_version(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    _write_doc(tmp_path, "doc-L1", "list-mat passage")
+    _write_doc(tmp_path, "doc-L2", "list-mat passage two")
+    result = runner.invoke(
+        cli,
+        ["extract", "list-materializations", "--rag-root", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    # _write_doc embeds + promotes the same materialization for both docs.
+    # Expect: 1 materialization line, marked (active), tables=3 (2 per-doc + corpus).
+    assert "(active)" in result.output
+    assert "tables=3" in result.output
+
+
+def test_promote_materialization_succeeds_when_namespace_complete(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    from auto_research.extract.materialization import read_active_materialization
+
+    _write_doc(tmp_path, "doc-P1", "promote-ok one")
+    _write_doc(tmp_path, "doc-P2", "promote-ok two")
+    manifest = tmp_path / "manifest.parquet"
+    _write_manifest(manifest, ["doc-P1", "doc-P2"])
+
+    from auto_research.extract.embeddings import EmbeddingAdapter
+
+    version = EmbeddingAdapter(backend="bge", rag_root=tmp_path).materialization_version
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "promote-materialization",
+            "--version", version,
+            "--rag-root", str(tmp_path),
+            "--manifest-path", str(manifest),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "promoted" in result.output
+    active = read_active_materialization(tmp_path)
+    assert active is not None
+    assert active.version == version
+    assert active.manifest_count == 2
+
+
+def test_promote_materialization_refuses_incomplete_namespace(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Manifest with 3 doc_ids vs only 2 embedded tables — promotion
+    refused with the missing doc_id named so the operator can fix it."""
+    _write_doc(tmp_path, "doc-INC1", "incomplete one")
+    _write_doc(tmp_path, "doc-INC2", "incomplete two")
+    manifest = tmp_path / "manifest.parquet"
+    _write_manifest(manifest, ["doc-INC1", "doc-INC2", "doc-INC3-MISSING"])
+
+    from auto_research.extract.embeddings import EmbeddingAdapter
+
+    version = EmbeddingAdapter(backend="bge", rag_root=tmp_path).materialization_version
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "promote-materialization",
+            "--version", version,
+            "--rag-root", str(tmp_path),
+            "--manifest-path", str(manifest),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "incomplete" in result.output.lower()
+    assert "doc-INC3-MISSING" in result.output
+
+
+def test_gc_materialization_keeps_active_and_drops_oldest(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """GC sorts by promotion history; keeps active + (--keep-last - 1)
+    most-recent previous; removes the rest. Sanity-checks the on-disk
+    `.lance` directories actually get removed."""
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        append_promotion_history,
+        write_active_materialization,
+    )
+
+    for version in ("aaaaaaaa", "bbbbbbbb", "cccccccc"):
+        (tmp_path / f"doc-GC__{version}.lance").mkdir(parents=True)
+
+    for version in ("aaaaaaaa", "bbbbbbbb", "cccccccc"):
+        append_promotion_history(
+            tmp_path,
+            ActiveMaterialization(
+                version=version,
+                embed_model_version=f"bge:bge-small-en-v1.5:tag-{version}",
+                promoted_at=f"2026-05-{version[0]}0T12:00:00Z",
+                manifest_count=1,
+            ),
+        )
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version="cccccccc",
+            embed_model_version="bge:bge-small-en-v1.5:tag-cccccccc",
+            promoted_at="2026-05-26T12:00:00Z",
+            manifest_count=1,
+        ),
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "gc-materialization",
+            "--keep-last", "2",
+            "--rag-root", str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "doc-GC__cccccccc.lance").exists()
+    assert (tmp_path / "doc-GC__bbbbbbbb.lance").exists()
+    assert not (tmp_path / "doc-GC__aaaaaaaa.lance").exists()
+
+
+def test_gc_materialization_dry_run_makes_no_changes(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        append_promotion_history,
+        write_active_materialization,
+    )
+
+    (tmp_path / "doc-GCD__aaaaaaaa.lance").mkdir(parents=True)
+    (tmp_path / "doc-GCD__bbbbbbbb.lance").mkdir(parents=True)
+    for version in ("aaaaaaaa", "bbbbbbbb"):
+        append_promotion_history(
+            tmp_path,
+            ActiveMaterialization(
+                version=version,
+                embed_model_version="bge:bge-small-en-v1.5:tag",
+                promoted_at="2026-05-26T12:00:00Z",
+                manifest_count=1,
+            ),
+        )
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version="bbbbbbbb",
+            embed_model_version="bge:bge-small-en-v1.5:tag",
+            promoted_at="2026-05-26T12:00:00Z",
+            manifest_count=1,
+        ),
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "gc-materialization",
+            "--keep-last", "1",
+            "--rag-root", str(tmp_path),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "dry-run" in result.output
+    assert (tmp_path / "doc-GCD__aaaaaaaa.lance").exists()
+    assert (tmp_path / "doc-GCD__bbbbbbbb.lance").exists()
+
+
+# ---- code-review fixes ---------------------------------------------------
+
+
+def test_promote_materialization_refuses_fully_empty_namespace(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """A namespace where every table is empty would yield an
+    'unknown:unknown:unknown' embed_model_version pointer that no
+    adapter could match — the read-path mismatch guard would reject
+    every subsequent query. Refuse upfront and name the cause."""
+    import lancedb
+    import pyarrow as pa
+
+    from auto_research.extract.embeddings import _schema
+    from auto_research.extract.materialization import versioned_table_name
+
+    manifest = tmp_path / "manifest.parquet"
+    _write_manifest(manifest, ["doc-EMPTY-NS"])
+
+    version = "deadbeef"
+    db = lancedb.connect(tmp_path)
+    schema = _schema(384)
+    db.create_table(
+        versioned_table_name("doc-EMPTY-NS", version),
+        data=pa.Table.from_pylist([], schema=schema),
+        schema=schema,
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "promote-materialization",
+            "--version", version,
+            "--rag-root", str(tmp_path),
+            "--manifest-path", str(manifest),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "no rows" in result.output.lower() or "fully-empty" in result.output
+
+
+def test_promote_materialization_requires_corpus_when_narrative_present(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """If any per-doc table at this version carries a narrative doc_type
+    (10-K / 10-Q / transcript), the corpus_narrative table MUST exist —
+    otherwise store='corpus_narrative' queries against the promoted
+    namespace fail at runtime with FileNotFoundError."""
+    import lancedb
+    import pyarrow as pa
+
+    from auto_research.extract.embeddings import _schema
+    from auto_research.extract.materialization import versioned_table_name
+
+    manifest = tmp_path / "manifest.parquet"
+    _write_manifest(manifest, ["doc-10K"])
+
+    version = "cafebabe"
+    db = lancedb.connect(tmp_path)
+    schema = _schema(384)
+    rows = [
+        {
+            "text": "10-K narrative row",
+            "vector": [0.0] * 384,
+            "ticker": "NVDA",
+            "filing_date": "2025-03-15",
+            "fiscal_period": "FY2025",
+            "doc_type": "10-K",
+            "doc_id": "doc-10K",
+            "parent_id": "doc-10K:0:18",
+            "section_name": "Item 7",
+            "chunker_version": "v1",
+            "contextual_prompt_version": "v1",
+            "embed_model_version": "bge:bge-small-en-v1.5:v1",
+        }
+    ]
+    db.create_table(
+        versioned_table_name("doc-10K", version),
+        data=pa.Table.from_pylist(rows, schema=schema),
+        schema=schema,
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "promote-materialization",
+            "--version", version,
+            "--rag-root", str(tmp_path),
+            "--manifest-path", str(manifest),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "narrative" in result.output.lower()
+    assert "_corpus_narrative" in result.output
+
+
+def test_promote_materialization_completeness_check_includes_non_edgar_sources(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """The completeness check must cover every source in the manifest, not
+    just `edgar`. A future FMP doc with no per-doc table must cause the
+    promotion to fail; today this is exercised by injecting a manifest
+    row with a non-edgar `source`."""
+    from datetime import UTC, datetime
+
+    from auto_research.ingest import manifest as manifest_mod
+
+    _write_doc(tmp_path, "doc-EDG", "edgar doc embed", doc_type="10-K")
+
+    manifest = tmp_path / "manifest.parquet"
+    ts = datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC)
+    manifest_mod.append(
+        manifest,
+        [
+            {
+                "source": "edgar",
+                "entity_id": "0001045810",
+                "doc_id": "doc-EDG",
+                "form_type": "10-K",
+                "event_datetime": ts,
+                "fetched_at": ts,
+                "content_sha256": "x" * 64,
+                "path": "data/raw/doc-EDG.txt",
+                "status": "ok",
+            },
+            {
+                "source": "fmp",
+                "entity_id": "0001045810",
+                "doc_id": "doc-FMP-MISSING",
+                "form_type": "earnings_estimate",
+                "event_datetime": ts,
+                "fetched_at": ts,
+                "content_sha256": "y" * 64,
+                "path": "data/fmp/doc-FMP-MISSING.json",
+                "status": "ok",
+            },
+        ],
+    )
+
+    from auto_research.extract.embeddings import EmbeddingAdapter
+
+    version = EmbeddingAdapter(backend="bge", rag_root=tmp_path).materialization_version
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "promote-materialization",
+            "--version", version,
+            "--rag-root", str(tmp_path),
+            "--manifest-path", str(manifest),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "doc-FMP-MISSING" in result.output
+
+
+def test_gc_materialization_continues_after_rmtree_failure(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single rmtree failure (locked dir, EIO) must not abort the GC
+    sweep — the CLI reports the partial failure, continues deleting other
+    targets, and exits non-zero so make-target wiring surfaces it."""
+    from typing import Any
+
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        append_promotion_history,
+        write_active_materialization,
+    )
+
+    for version in ("aaaaaaaa", "bbbbbbbb", "cccccccc"):
+        (tmp_path / f"doc-RM__{version}.lance").mkdir(parents=True)
+    for version in ("aaaaaaaa", "bbbbbbbb", "cccccccc"):
+        append_promotion_history(
+            tmp_path,
+            ActiveMaterialization(
+                version=version,
+                embed_model_version="bge:bge-small-en-v1.5:tag",
+                promoted_at="2026-05-26T12:00:00Z",
+                manifest_count=1,
+            ),
+        )
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version="cccccccc",
+            embed_model_version="bge:bge-small-en-v1.5:tag",
+            promoted_at="2026-05-26T12:00:00Z",
+            manifest_count=1,
+        ),
+    )
+
+    import shutil
+
+    original_rmtree = shutil.rmtree
+    aaaaa_path = tmp_path / "doc-RM__aaaaaaaa.lance"
+
+    def _selective_rmtree(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == aaaaa_path:
+            raise OSError("simulated locked directory")
+        original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", _selective_rmtree)
+
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "gc-materialization",
+            "--keep-last", "1",
+            "--rag-root", str(tmp_path),
+        ],
+    )
+    assert result.exit_code != 0
+    # bbbbb removed despite the aaaaa failure.
+    assert not (tmp_path / "doc-RM__bbbbbbbb.lance").exists()
+    # aaaaa attempted but failed.
+    assert (tmp_path / "doc-RM__aaaaaaaa.lance").exists()
+    # cccccc (active) kept.
+    assert (tmp_path / "doc-RM__cccccccc.lance").exists()
+    assert "simulated locked directory" in result.output
+
+
+# ---- Codex P1: gc refuses without active pointer ------------------------
+
+
+def test_gc_materialization_refuses_when_no_active_pointer(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """A fresh-install or built-but-not-yet-promoted namespace has no
+    active pointer. Running gc-materialization in that state used to
+    silently wipe every materialization on disk (empty keep set + non-
+    empty to_remove set = data loss). The CLI must refuse with a
+    UsageError pointing at `promote` as the next step."""
+    # Build two materializations on disk but write NO active pointer.
+    (tmp_path / "doc-FRESH__aaaaaaaa.lance").mkdir(parents=True)
+    (tmp_path / "doc-FRESH__bbbbbbbb.lance").mkdir(parents=True)
+
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "gc-materialization",
+            "--keep-last", "1",
+            "--rag-root", str(tmp_path),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "no active materialization" in result.output
+    assert "promote" in result.output.lower()
+    # Both directories untouched.
+    assert (tmp_path / "doc-FRESH__aaaaaaaa.lance").exists()
+    assert (tmp_path / "doc-FRESH__bbbbbbbb.lance").exists()
+
+
+# ---- Codex P2: promote validates embed_model_version across all rows ----
+
+
+def test_promote_materialization_refuses_internally_mixed_embed_model_versions(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """If a single table contains rows from MULTIPLE distinct
+    embed_model_version stamps (a build-path bug or manual LanceDB
+    ops), promotion must refuse — landing one stamp in the active
+    pointer while the table actually serves two vector spaces would
+    defeat the read-path mismatch guard for half the corpus."""
+    import lancedb
+    import pyarrow as pa
+
+    from auto_research.extract.embeddings import _schema
+    from auto_research.extract.materialization import versioned_table_name
+
+    manifest = tmp_path / "manifest.parquet"
+    _write_manifest(manifest, ["doc-MIXED"])
+
+    version = "feedface"
+    schema = _schema(384)
+    # Two rows with different embed_model_version stamps in the SAME table.
+    rows = [
+        {
+            "text": "voyage-stamped row",
+            "vector": [0.0] * 384,
+            "ticker": "NVDA",
+            "filing_date": "2025-03-15",
+            "fiscal_period": "FY2025",
+            "doc_type": "10-K",
+            "doc_id": "doc-MIXED",
+            "parent_id": "doc-MIXED:0:20",
+            "section_name": "Item 7",
+            "chunker_version": "v1",
+            "contextual_prompt_version": "v1",
+            "embed_model_version": "voyage:voyage-finance-2:v1",
+        },
+        {
+            "text": "bge-stamped row in same table",
+            "vector": [1.0] * 384,
+            "ticker": "NVDA",
+            "filing_date": "2025-03-15",
+            "fiscal_period": "FY2025",
+            "doc_type": "10-K",
+            "doc_id": "doc-MIXED",
+            "parent_id": "doc-MIXED:0:29",
+            "section_name": "Item 7",
+            "chunker_version": "v1",
+            "contextual_prompt_version": "v1",
+            "embed_model_version": "bge:bge-small-en-v1.5:v1",
+        },
+    ]
+    db = lancedb.connect(tmp_path)
+    db.create_table(
+        versioned_table_name("doc-MIXED", version),
+        data=pa.Table.from_pylist(rows, schema=schema),
+        schema=schema,
+    )
+    # Also create an empty corpus table so the narrative-corpus guard
+    # doesn't trip first — the test is about INTERNAL stamp consistency.
+    db.create_table(
+        versioned_table_name("_corpus_narrative", version),
+        data=pa.Table.from_pylist(rows, schema=schema),
+        schema=schema,
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "promote-materialization",
+            "--version", version,
+            "--rag-root", str(tmp_path),
+            "--manifest-path", str(manifest),
+        ],
+    )
+    assert result.exit_code != 0
+    msg = result.output
+    assert "NOT uniform" in msg or "internally mixed" in msg.lower()
+    assert "voyage:voyage-finance-2:v1" in msg
+    assert "bge:bge-small-en-v1.5:v1" in msg
