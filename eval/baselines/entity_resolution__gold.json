@@ -1,0 +1,128 @@
+{
+  "prompt_name": "entity_resolution",
+  "thresholds": {
+    "min_f1": 0.85
+  },
+  "samples": [
+    {
+      "mention_id": "gold-001",
+      "mention_text": "NVIDIA H100 GPUs",
+      "expected_ticker": "NVDA",
+      "rationale": "explicit canonical name + product"
+    },
+    {
+      "mention_id": "gold-002",
+      "mention_text": "TSMC's 3nm process node",
+      "expected_ticker": "TSM",
+      "rationale": "explicit alias TSMC"
+    },
+    {
+      "mention_id": "gold-003",
+      "mention_text": "ASML's EUV lithography systems",
+      "expected_ticker": "ASML",
+      "rationale": "explicit name"
+    },
+    {
+      "mention_id": "gold-004",
+      "mention_text": "Broadcom's Tomahawk switch silicon",
+      "expected_ticker": "AVGO",
+      "rationale": "name with product"
+    },
+    {
+      "mention_id": "gold-005",
+      "mention_text": "Marvell custom ASIC platform",
+      "expected_ticker": "MRVL",
+      "rationale": "explicit name"
+    },
+    {
+      "mention_id": "gold-006",
+      "mention_text": "Coherent high-power laser modules",
+      "expected_ticker": "COHR",
+      "rationale": "explicit name"
+    },
+    {
+      "mention_id": "gold-007",
+      "mention_text": "our partnership with Credo for SerDes IP",
+      "expected_ticker": "CRDO",
+      "rationale": "explicit short-form alias"
+    },
+    {
+      "mention_id": "gold-008",
+      "mention_text": "Arista Networks' 800G platforms",
+      "expected_ticker": "ANET",
+      "rationale": "explicit name"
+    },
+    {
+      "mention_id": "gold-009",
+      "mention_text": "Applied Materials deposition tools",
+      "expected_ticker": "AMAT",
+      "rationale": "explicit name"
+    },
+    {
+      "mention_id": "gold-010",
+      "mention_text": "Lumentum optical transceiver components",
+      "expected_ticker": "LITE",
+      "rationale": "explicit name"
+    },
+    {
+      "mention_id": "gold-011",
+      "mention_text": "Micron's HBM3E memory stacks",
+      "expected_ticker": "MU",
+      "rationale": "explicit name"
+    },
+    {
+      "mention_id": "gold-012",
+      "mention_text": "Vertiv liquid cooling systems for AI data centers",
+      "expected_ticker": "VRT",
+      "rationale": "explicit name"
+    },
+    {
+      "mention_id": "gold-013",
+      "mention_text": "Constellation Energy's nuclear PPA",
+      "expected_ticker": "CEG",
+      "rationale": "explicit full name"
+    },
+    {
+      "mention_id": "gold-014",
+      "mention_text": "Rocket Lab's Electron launch vehicle",
+      "expected_ticker": "RKLB",
+      "rationale": "explicit name + product"
+    },
+    {
+      "mention_id": "gold-015",
+      "mention_text": "the sole supplier of EUV lithography scanners to leading-edge fabs",
+      "expected_ticker": "ASML",
+      "rationale": "descriptive; ASML is the only EUV scanner supplier — universe-unique"
+    },
+    {
+      "mention_id": "gold-016",
+      "mention_text": "a private European AI accelerator startup in which we have made strategic investments",
+      "expected_ticker": null,
+      "rationale": "unknown — private company, not in our public universe"
+    },
+    {
+      "mention_id": "gold-017",
+      "mention_text": "a leading Asian DRAM supplier outside our top three vendor list",
+      "expected_ticker": null,
+      "rationale": "unknown — Samsung / SK Hynix likely intended, neither in universe"
+    },
+    {
+      "mention_id": "gold-018",
+      "mention_text": "a major Chinese consumer-AI smartphone OEM",
+      "expected_ticker": null,
+      "rationale": "unknown — Xiaomi / Huawei / Honor, not in universe"
+    },
+    {
+      "mention_id": "gold-019",
+      "mention_text": "the largest hyperscaler that recently signed a multi-year compute commitment with us",
+      "expected_ticker": null,
+      "rationale": "unknown — could be MSFT / AMZN / GOOGL; insufficient context to disambiguate"
+    },
+    {
+      "mention_id": "gold-020",
+      "mention_text": "our Taiwan-based foundry partner that produces our advanced 5nm and 3nm parts",
+      "expected_ticker": "TSM",
+      "rationale": "descriptive but uniquely identifying — only TSM matches Taiwan + leading-edge foundry"
+    }
+  ]
+}

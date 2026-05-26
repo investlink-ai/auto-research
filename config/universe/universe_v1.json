@@ -4,91 +4,104 @@
     "sub_universe": "ai_infra",
     "sector": "consumer_electronics",
     "market_cap_tier": "mega",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["Apple", "Apple Inc"]
   },
   {
     "ticker": "MSFT",
     "sub_universe": "ai_infra",
     "sector": "software_hyperscaler",
     "market_cap_tier": "mega",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["Microsoft", "Microsoft Corporation", "Microsoft Azure", "Azure"]
   },
   {
     "ticker": "GOOGL",
     "sub_universe": "ai_infra",
     "sector": "internet_hyperscaler",
     "market_cap_tier": "mega",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["Google", "Alphabet", "Alphabet Inc", "Google Cloud", "GCP"]
   },
   {
     "ticker": "AMZN",
     "sub_universe": "ai_infra",
     "sector": "internet_hyperscaler",
     "market_cap_tier": "mega",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["Amazon", "Amazon Web Services", "AWS", "Amazon.com"]
   },
   {
     "ticker": "META",
     "sub_universe": "ai_infra",
     "sector": "internet_hyperscaler",
     "market_cap_tier": "mega",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["Meta", "Meta Platforms", "Facebook"]
   },
   {
     "ticker": "NVDA",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "mega",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["NVIDIA", "Nvidia", "NVIDIA Corporation"]
   },
   {
     "ticker": "TSLA",
     "sub_universe": "ai_infra",
     "sector": "auto_ev",
     "market_cap_tier": "mega",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["Tesla", "Tesla Inc", "Tesla Motors"]
   },
   {
     "ticker": "AVGO",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "mega",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["Broadcom", "Broadcom Inc"]
   },
   {
     "ticker": "AMD",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "large",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["AMD", "Advanced Micro Devices"]
   },
   {
     "ticker": "ORCL",
     "sub_universe": "ai_infra",
     "sector": "software_hyperscaler",
     "market_cap_tier": "large",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["Oracle", "Oracle Corporation", "Oracle Cloud", "OCI"]
   },
   {
     "ticker": "PLTR",
     "sub_universe": "ai_infra",
     "sector": "software_platform",
     "market_cap_tier": "large",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["Palantir", "Palantir Technologies"]
   },
   {
     "ticker": "CRM",
     "sub_universe": "ai_infra",
     "sector": "software_platform",
     "market_cap_tier": "large",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["Salesforce", "Salesforce.com"]
   },
   {
     "ticker": "NOW",
     "sub_universe": "ai_infra",
     "sector": "software_platform",
     "market_cap_tier": "large",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["ServiceNow"]
   },
   {
     "ticker": "ARM",
@@ -97,112 +110,128 @@
     "market_cap_tier": "large",
     "tradeable": false,
     "filing_form": "20-F",
-    "feature_source": false
+    "feature_source": false,
+    "aliases": ["Arm", "Arm Holdings", "ARM Holdings", "ARM Ltd"]
   },
   {
     "ticker": "DLR",
     "sub_universe": "ai_infra",
     "sector": "datacenter_reit",
     "market_cap_tier": "mid",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["Digital Realty", "Digital Realty Trust"]
   },
   {
     "ticker": "EQIX",
     "sub_universe": "ai_infra",
     "sector": "datacenter_reit",
     "market_cap_tier": "mid",
-    "tradeable": false
+    "tradeable": false,
+    "aliases": ["Equinix"]
   },
   {
     "ticker": "CRDO",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Credo", "Credo Technology", "Credo Semiconductor", "Credo Technology Group"]
   },
   {
     "ticker": "ALAB",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Astera Labs", "Astera"]
   },
   {
     "ticker": "COHR",
     "sub_universe": "ai_infra",
     "sector": "optical",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Coherent", "Coherent Corp", "II-VI", "II-VI Incorporated"]
   },
   {
     "ticker": "AAOI",
     "sub_universe": "ai_infra",
     "sector": "optical",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Applied Optoelectronics", "AOI"]
   },
   {
     "ticker": "LITE",
     "sub_universe": "ai_infra",
     "sector": "optical",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Lumentum", "Lumentum Holdings"]
   },
   {
     "ticker": "ANET",
     "sub_universe": "ai_infra",
     "sector": "networking_hardware",
     "market_cap_tier": "large",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Arista", "Arista Networks"]
   },
   {
     "ticker": "CIEN",
     "sub_universe": "ai_infra",
     "sector": "networking_hardware",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Ciena", "Ciena Corporation"]
   },
   {
     "ticker": "MU",
     "sub_universe": "ai_infra",
     "sector": "memory_storage",
     "market_cap_tier": "large",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Micron", "Micron Technology"]
   },
   {
     "ticker": "SNDK",
     "sub_universe": "ai_infra",
     "sector": "memory_storage",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["SanDisk", "Sandisk"]
   },
   {
     "ticker": "WDC",
     "sub_universe": "ai_infra",
     "sector": "memory_storage",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Western Digital", "WD"]
   },
   {
     "ticker": "MRVL",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Marvell", "Marvell Technology"]
   },
   {
     "ticker": "MTSI",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["MACOM", "MACOM Technology", "M/A-COM"]
   },
   {
     "ticker": "MPWR",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Monolithic Power", "Monolithic Power Systems"]
   },
   {
     "ticker": "ASML",
@@ -211,49 +240,56 @@
     "market_cap_tier": "large",
     "tradeable": true,
     "filing_form": "20-F",
-    "feature_source": false
+    "feature_source": false,
+    "aliases": ["ASML", "ASML Holding"]
   },
   {
     "ticker": "AMAT",
     "sub_universe": "ai_infra",
     "sector": "semicap",
     "market_cap_tier": "large",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Applied Materials"]
   },
   {
     "ticker": "LRCX",
     "sub_universe": "ai_infra",
     "sector": "semicap",
     "market_cap_tier": "large",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Lam Research", "Lam"]
   },
   {
     "ticker": "KLAC",
     "sub_universe": "ai_infra",
     "sector": "semicap",
     "market_cap_tier": "large",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["KLA", "KLA Corporation", "KLA-Tencor"]
   },
   {
     "ticker": "TER",
     "sub_universe": "ai_infra",
     "sector": "semicap",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Teradyne"]
   },
   {
     "ticker": "ACMR",
     "sub_universe": "ai_infra",
     "sector": "semicap",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["ACM Research", "ACM"]
   },
   {
     "ticker": "AEHR",
     "sub_universe": "ai_infra",
     "sector": "semicap",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Aehr Test Systems", "Aehr"]
   },
   {
     "ticker": "NVMI",
@@ -262,28 +298,32 @@
     "market_cap_tier": "mid",
     "tradeable": true,
     "filing_form": "20-F",
-    "feature_source": false
+    "feature_source": false,
+    "aliases": ["Nova", "Nova Ltd", "Nova Measuring Instruments"]
   },
   {
     "ticker": "FORM",
     "sub_universe": "ai_infra",
     "sector": "semicap",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["FormFactor"]
   },
   {
     "ticker": "LSCC",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Lattice Semiconductor", "Lattice"]
   },
   {
     "ticker": "RMBS",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Rambus"]
   },
   {
     "ticker": "SIMO",
@@ -292,42 +332,48 @@
     "market_cap_tier": "small",
     "tradeable": true,
     "filing_form": "20-F",
-    "feature_source": false
+    "feature_source": false,
+    "aliases": ["Silicon Motion", "Silicon Motion Technology"]
   },
   {
     "ticker": "AMBA",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Ambarella"]
   },
   {
     "ticker": "ALGM",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Allegro MicroSystems", "Allegro"]
   },
   {
     "ticker": "SWKS",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Skyworks", "Skyworks Solutions"]
   },
   {
     "ticker": "QRVO",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Qorvo"]
   },
   {
     "ticker": "ON",
     "sub_universe": "ai_infra",
     "sector": "semiconductors",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["ON Semiconductor", "Onsemi", "onsemi"]
   },
   {
     "ticker": "GFS",
@@ -336,7 +382,8 @@
     "market_cap_tier": "mid",
     "tradeable": true,
     "filing_form": "20-F",
-    "feature_source": false
+    "feature_source": false,
+    "aliases": ["GlobalFoundries", "Global Foundries", "GF"]
   },
   {
     "ticker": "TSM",
@@ -345,98 +392,112 @@
     "market_cap_tier": "mega",
     "tradeable": true,
     "filing_form": "20-F",
-    "feature_source": false
+    "feature_source": false,
+    "aliases": ["TSMC", "Taiwan Semiconductor", "Taiwan Semiconductor Manufacturing", "Taiwan Semi"]
   },
   {
     "ticker": "SMCI",
     "sub_universe": "ai_infra",
     "sector": "it_services",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Super Micro", "Supermicro", "Super Micro Computer"]
   },
   {
     "ticker": "DELL",
     "sub_universe": "ai_infra",
     "sector": "it_services",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Dell", "Dell Technologies", "Dell EMC"]
   },
   {
     "ticker": "NTNX",
     "sub_universe": "ai_infra",
     "sector": "software_platform",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Nutanix"]
   },
   {
     "ticker": "IBM",
     "sub_universe": "ai_infra",
     "sector": "it_services",
     "market_cap_tier": "large",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["IBM", "International Business Machines"]
   },
   {
     "ticker": "BE",
     "sub_universe": "ai_infra",
     "sector": "power_equipment",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Bloom Energy"]
   },
   {
     "ticker": "VST",
     "sub_universe": "ai_infra",
     "sector": "power_generation",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Vistra", "Vistra Energy", "Vistra Corp"]
   },
   {
     "ticker": "CEG",
     "sub_universe": "ai_infra",
     "sector": "power_generation",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Constellation Energy", "Constellation"]
   },
   {
     "ticker": "TLN",
     "sub_universe": "ai_infra",
     "sector": "power_generation",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Talen Energy", "Talen"]
   },
   {
     "ticker": "NRG",
     "sub_universe": "ai_infra",
     "sector": "power_generation",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["NRG Energy", "NRG"]
   },
   {
     "ticker": "OKLO",
     "sub_universe": "ai_infra",
     "sector": "nuclear_smr",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Oklo"]
   },
   {
     "ticker": "SMR",
     "sub_universe": "ai_infra",
     "sector": "nuclear_smr",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["NuScale", "NuScale Power"]
   },
   {
     "ticker": "NNE",
     "sub_universe": "ai_infra",
     "sector": "nuclear_smr",
     "market_cap_tier": "micro",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Nano Nuclear", "Nano Nuclear Energy"]
   },
   {
     "ticker": "LEU",
     "sub_universe": "ai_infra",
     "sector": "nuclear_fuel",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Centrus Energy", "Centrus"]
   },
   {
     "ticker": "CCJ",
@@ -445,132 +506,151 @@
     "market_cap_tier": "mid",
     "tradeable": true,
     "filing_form": "40-F",
-    "feature_source": false
+    "feature_source": false,
+    "aliases": ["Cameco", "Cameco Corporation"]
   },
   {
     "ticker": "GEV",
     "sub_universe": "ai_infra",
     "sector": "power_equipment",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["GE Vernova", "Vernova"]
   },
   {
     "ticker": "VRT",
     "sub_universe": "ai_infra",
     "sector": "power_equipment",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Vertiv", "Vertiv Holdings"]
   },
   {
     "ticker": "ETN",
     "sub_universe": "ai_infra",
     "sector": "power_equipment",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Eaton", "Eaton Corporation"]
   },
   {
     "ticker": "PWR",
     "sub_universe": "ai_infra",
     "sector": "infrastructure_construction",
     "market_cap_tier": "mid",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Quanta Services", "Quanta"]
   },
   {
     "ticker": "STRL",
     "sub_universe": "ai_infra",
     "sector": "infrastructure_construction",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Sterling Infrastructure", "Sterling"]
   },
   {
     "ticker": "MIR",
     "sub_universe": "ai_infra",
     "sector": "power_equipment",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Mirion", "Mirion Technologies"]
   },
   {
     "ticker": "IONQ",
     "sub_universe": "frontier_tech",
     "sector": "quantum_computing",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["IonQ"]
   },
   {
     "ticker": "RGTI",
     "sub_universe": "frontier_tech",
     "sector": "quantum_computing",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Rigetti", "Rigetti Computing"]
   },
   {
     "ticker": "QBTS",
     "sub_universe": "frontier_tech",
     "sector": "quantum_computing",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["D-Wave", "D-Wave Quantum"]
   },
   {
     "ticker": "QUBT",
     "sub_universe": "frontier_tech",
     "sector": "quantum_computing",
     "market_cap_tier": "micro",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Quantum Computing Inc", "QCI"]
   },
   {
     "ticker": "HON",
     "sub_universe": "frontier_tech",
     "sector": "quantum_computing",
     "market_cap_tier": "large",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Honeywell", "Honeywell International", "Quantinuum"]
   },
   {
     "ticker": "RKLB",
     "sub_universe": "frontier_tech",
     "sector": "space_launch",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Rocket Lab", "Rocket Lab USA"]
   },
   {
     "ticker": "ASTS",
     "sub_universe": "frontier_tech",
     "sector": "space_satellite",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["AST SpaceMobile", "AST"]
   },
   {
     "ticker": "LUNR",
     "sub_universe": "frontier_tech",
     "sector": "space_services",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Intuitive Machines"]
   },
   {
     "ticker": "PL",
     "sub_universe": "frontier_tech",
     "sector": "space_eo",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Planet Labs", "Planet"]
   },
   {
     "ticker": "RDW",
     "sub_universe": "frontier_tech",
     "sector": "space_services",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["Redwire", "Redwire Space"]
   },
   {
     "ticker": "BKSY",
     "sub_universe": "frontier_tech",
     "sector": "space_eo",
     "market_cap_tier": "micro",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["BlackSky", "BlackSky Technology"]
   },
   {
     "ticker": "SATS",
     "sub_universe": "frontier_tech",
     "sector": "space_satellite",
     "market_cap_tier": "small",
-    "tradeable": true
+    "tradeable": true,
+    "aliases": ["EchoStar", "Hughes", "Hughes Network Systems"]
   }
 ]

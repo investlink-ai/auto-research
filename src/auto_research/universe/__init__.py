@@ -22,6 +22,12 @@ Two orthogonal flags carve the universe into operational roles:
 Use `load_universe(tradeable_only=True)` for the tradeable book and
 `load_universe(feature_source_only=True)` for names the extraction
 pipeline should ingest. Filters compose (both can be set).
+
+Each entry also carries `aliases: tuple[str, ...]` — the surface forms
+(canonical company name, common short forms, legacy names) that
+mention-to-ticker entity resolution embeds and matches against. Curated
+manually; the ticker symbol alone is too sparse to anchor fuzzy
+"our optical interconnect partners" → CRDO matches reliably.
 """
 
 from __future__ import annotations
@@ -52,6 +58,11 @@ class TickerEntry(BaseModel):
     # 7 foreign filers carry non-default values explicitly.
     filing_form: FilingForm = "10-K"
     feature_source: bool = True
+    # Surface forms the entity resolver embeds and matches against.
+    # Empty tuple means "not resolvable from narrative mentions" — the
+    # ticker is still in the universe for trading / feature lookup but
+    # the resolver index skips it.
+    aliases: tuple[str, ...] = ()
 
 
 def _default_path() -> Path:
