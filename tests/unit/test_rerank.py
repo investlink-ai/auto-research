@@ -291,3 +291,130 @@ def test_score_empty_passages_returns_empty_list() -> None:
     ):
         scores = Qwen3Reranker(tier="ci-cpu").score(query="q", passages=[])
     assert scores == []
+
+
+# ---------------------------------------------------------------------
+# Code-review fixes — exercised contracts post-review.
+# ---------------------------------------------------------------------
+
+def test_score_callable_positionally_without_lambda_wrapper() -> None:
+    """`scorer=reranker.score` must bind directly; rerank() invokes the
+    scorer positionally as `scorer(query, passages)`."""
+    fake_model = _FakeModel(score_sequence=[(2.0, -1.0)])
+    fake_tokenizer = _FakeTokenizer()
+    with patch(
+        "auto_research.extract.rerank._ensure_qwen3_reranker_warmup",
+        return_value=(fake_model, fake_tokenizer),
+    ):
+        reranker = Qwen3Reranker(tier="ci-cpu")
+        out = rerank(
+            query="q",
+            hits=[_hit("p", 0, 0.5)],
+            top_k=1,
+            scorer=reranker.score,
+        )
+    assert len(out) == 1
+
+
+def test_rerank_stamps_reranker_version_on_each_hit() -> None:
+    hits = [_hit(f"p{i}", i, 0.5 - i * 0.1) for i in range(3)]
+
+    def fake_scorer(q: str, ps: list[str]) -> list[float]:
+        return [1.0, 2.0, 3.0]
+
+    out = rerank(
+        query="q",
+        hits=hits,
+        top_k=3,
+        scorer=fake_scorer,
+        reranker_version="ci-cpu:Qwen3-Reranker-0.6B:v1",
+    )
+    assert all(h.reranker_version == "ci-cpu:Qwen3-Reranker-0.6B:v1" for h in out)
+
+
+def test_rerank_default_reranker_version_is_none() -> None:
+    hits = [_hit("p", 0, 0.5)]
+
+    def fake_scorer(q: str, ps: list[str]) -> list[float]:
+        return [1.0]
+
+    out = rerank(query="q", hits=hits, top_k=1, scorer=fake_scorer)
+    assert out[0].reranker_version is None
+
+
+def test_unknown_device_raises_loud_error() -> None:
+    """`_ensure_qwen3_reranker_warmup` rejects devices outside the
+    {mps, cpu} allowlist before attempting any model load."""
+    from auto_research.extract.rerank import _ensure_qwen3_reranker_warmup
+
+    with pytest.raises(ValueError, match="device must be"):
+        _ensure_qwen3_reranker_warmup("Qwen3-Reranker-0.6B", "cuda", "fp32")
+
+
+def test_warmup_cache_key_includes_dtype() -> None:
+    """Conftest populates the cache with a 3-tuple key including dtype.
+    The bare `(model_id, device)` key would collide if two tiers shared
+    the same `(model, device)` but used different dtypes."""
+    from auto_research.extract.rerank import _RERANKER_MODELS
+
+    assert ("Qwen3-Reranker-0.6B", "cpu", "fp32") in _RERANKER_MODELS
+
+
+def test_assert_single_token_raises_on_multi_token_yes() -> None:
+    """The yes/no scoring takes `tokenizer.encode(...)[0]` — if the
+    tokenizer splits 'yes' or 'no' across tokens the [0] slice silently
+    grabs the wrong id. The warmup helper must assert single-token
+    encoding loudly."""
+    from auto_research.extract.rerank import _assert_yes_no_single_token
+
+    class _MultiTokTokenizer:
+        def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
+            if text == "yes":
+                return [1, 2]  # split across two tokens — wrong
+            if text == "no":
+                return [3]
+            return [4]
+
+    with pytest.raises(RuntimeError, match="expected single tokens"):
+        _assert_yes_no_single_token(_MultiTokTokenizer())
+
+
+def test_truncate_passage_preserves_suffix_on_overlong_input() -> None:
+    """`_truncate_passage_to_budget` shrinks the passage so the assembled
+    prompt fits in `max_length`, leaving the assistant suffix intact at
+    the end of the encoded sequence."""
+    from auto_research.extract.rerank import _truncate_passage_to_budget
+
+    # A tokenizer where each space-separated word becomes one token id.
+    class _WordTokenizer:
+        def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
+            return list(range(1, len(text.split()) + 1))
+
+        def decode(self, ids: list[int], skip_special_tokens: bool = False) -> str:
+            return " ".join(f"w{i}" for i in ids)
+
+    long_passage = " ".join(["word"] * 5000)
+    truncated = _truncate_passage_to_budget(
+        passage=long_passage,
+        tokenizer=_WordTokenizer(),
+        budget=100,
+    )
+    # The returned string tokenizes to ≤ budget tokens.
+    assert len(_WordTokenizer().encode(truncated, add_special_tokens=False)) <= 100
+    # And it is shorter than the input.
+    assert len(truncated.split()) < len(long_passage.split())
+
+
+def test_truncate_passage_passthrough_when_under_budget() -> None:
+    """Short passages return unchanged — no decode round-trip cost."""
+    from auto_research.extract.rerank import _truncate_passage_to_budget
+
+    class _WordTokenizer:
+        def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
+            return list(range(1, len(text.split()) + 1))
+
+        def decode(self, ids: list[int], skip_special_tokens: bool = False) -> str:
+            raise AssertionError("decode should not be called for short passages")
+
+    short = "five short words here please"
+    assert _truncate_passage_to_budget(passage=short, tokenizer=_WordTokenizer(), budget=100) == short

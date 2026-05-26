@@ -111,15 +111,18 @@ def _warm_qwen3_reranker() -> None:
     entry; the `dev` tier's `(0.6B, mps)` entry is loaded lazily by
     the tests that actually exercise MPS.
 
-    Only swallows the "transformers / torch not installed" remediation
-    error — all other failures (cache miss, repo rename, API drift)
-    propagate so the session start fails loudly with the actionable
-    remediation, per the explicit-config-loud rule.
+    Only swallows the specific "transformers / torch not importable"
+    remediation error — all other failures (cache miss, repo rename,
+    API drift) propagate so the session start fails loudly with the
+    actionable remediation, per the explicit-config-loud rule.
     """
     from auto_research.extract.rerank import _ensure_qwen3_reranker_warmup
 
     try:
         _ensure_qwen3_reranker_warmup("Qwen3-Reranker-0.6B", "cpu", "fp32")
     except RuntimeError as exc:
-        if "uv sync" not in str(exc):
+        # Specific phrase from `_ensure_qwen3_reranker_warmup`'s
+        # ImportError branch. Substring matching on `uv sync` alone
+        # would also swallow unrelated errors mentioning those words.
+        if "`transformers` / `torch` could not be imported" not in str(exc):
             raise

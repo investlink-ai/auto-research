@@ -171,7 +171,8 @@ def test_rerank_06b_improves_precision_at_5_over_rrf() -> None:
         query=_QUERY,
         hits=corpus.hits,
         top_k=5,
-        scorer=lambda q, ps: reranker.score(query=q, passages=ps),
+        scorer=reranker.score,
+        reranker_version=reranker.reranker_version,
     )
     rerank_top5 = [h.parent.metadata.doc_id for h in reranked]
     rerank_p5 = _precision_at_5(rerank_top5, corpus.gold_doc_ids)
@@ -181,12 +182,15 @@ def test_rerank_06b_improves_precision_at_5_over_rrf() -> None:
         f"baseline={rrf_p5:.2f}. RRF top-5={rrf_top5}; "
         f"rerank top-5={rerank_top5}; gold={sorted(corpus.gold_doc_ids)}"
     )
+    # Score-space token is stamped on every hit.
+    assert all(h.reranker_version == reranker.reranker_version for h in reranked)
     # Reranker must produce a stable order on the same input.
     reranked2 = rerank(
         query=_QUERY,
         hits=corpus.hits,
         top_k=5,
-        scorer=lambda q, ps: reranker.score(query=q, passages=ps),
+        scorer=reranker.score,
+        reranker_version=reranker.reranker_version,
     )
     assert [h.parent.metadata.doc_id for h in reranked2] == rerank_top5
 
@@ -208,7 +212,8 @@ def test_rerank_4b_improves_precision_at_5_over_rrf() -> None:
         query=_QUERY,
         hits=corpus.hits,
         top_k=5,
-        scorer=lambda q, ps: reranker.score(query=q, passages=ps),
+        scorer=reranker.score,
+        reranker_version=reranker.reranker_version,
     )
     rerank_top5 = [h.parent.metadata.doc_id for h in reranked]
     rerank_p5 = _precision_at_5(rerank_top5, corpus.gold_doc_ids)

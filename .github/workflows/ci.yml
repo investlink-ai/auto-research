@@ -58,6 +58,14 @@ jobs:
       - name: Install NLP models
         run: make setup-nlp
 
+      # Pre-pull the Qwen3-Reranker 0.6B weights into the HF cache so
+      # the unit-conftest `_warm_qwen3_reranker` autouse fixture is
+      # served offline. Without this step the fixture would either
+      # download ~1.2 GB at session start every CI run or fail outright
+      # if HF Hub is rate-limited / unreachable.
+      - name: Install reranker weights
+        run: make setup-reranker
+
       - name: Lint + typecheck
         run: make quick
 

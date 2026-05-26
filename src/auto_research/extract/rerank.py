@@ -89,10 +89,32 @@ _RERANKER_HF_REPOS: dict[str, str] = {
     "Qwen3-Reranker-4B": "Qwen/Qwen3-Reranker-4B",
 }
 
-# Module-level singleton cache keyed by (model_id, device). 0.6B on MPS
-# and 0.6B on CPU are different cache entries because dtype and device
-# differ; the score distributions diverge accordingly.
-_RERANKER_MODELS: dict[tuple[str, str], tuple[Any, Any]] = {}
+# Module-level singleton cache keyed by `(model_id, device, dtype)`.
+# Including dtype keeps two tiers that happen to share `(model, device)`
+# but use different precision from silently sharing weights — score
+# distributions diverge by dtype even on the same hardware.
+_RERANKER_MODELS: dict[tuple[str, str, str], tuple[Any, Any]] = {}
+
+_ALLOWED_DEVICES: frozenset[str] = frozenset({"mps", "cpu"})
+
+
+def _assert_yes_no_single_token(tokenizer: Any) -> None:
+    """The yes/no scoring takes `tokenizer.encode(...)[0]`; if the
+    tokenizer splits 'yes' or 'no' across tokens (BPE merge update,
+    whitespace policy change), the `[0]` slice would silently grab the
+    wrong id and scores would be miscalibrated with no error signal.
+    Verified at warmup so the failure is loud and tied to its cause.
+    """
+    yes_ids = tokenizer.encode("yes", add_special_tokens=False)
+    no_ids = tokenizer.encode("no", add_special_tokens=False)
+    if len(yes_ids) != 1 or len(no_ids) != 1:
+        raise RuntimeError(
+            f"Qwen3-Reranker tokenizer encodes 'yes' to {yes_ids} and 'no' "
+            f"to {no_ids}; expected single tokens. The scoring code takes "
+            "[0] from each, which would be wrong for multi-token encodings. "
+            "This usually means the upstream tokenizer revision drifted; "
+            "pin a known-good revision or update the scoring logic."
+        )
 
 
 def _ensure_qwen3_reranker_warmup(
@@ -100,18 +122,24 @@ def _ensure_qwen3_reranker_warmup(
 ) -> tuple[Any, Any]:
     """Load a Qwen3-Reranker once and return `(model, tokenizer)`.
 
-    Idempotent via `_RERANKER_MODELS` keyed by `(model_id, device)`.
-    Raises `RuntimeError` with a clear remediation on:
+    Idempotent via `_RERANKER_MODELS` keyed by `(model_id, device, dtype)`.
+    Raises with a clear remediation on:
 
-    - `device="mps"` requested on a non-Apple-Silicon host (use
-      `tier="ci-cpu"` on Linux CI).
-    - `transformers` / `torch` import failure (should not happen with
-      core deps installed, but surfacing the right error beats a
-      `ModuleNotFoundError` from inside this function).
-    - HF cache miss with no network reachable (point at
+    - `device` not in `_ALLOWED_DEVICES` (e.g., `cuda`, `xla` — not yet
+      wired up; fail before torch surfaces a cryptic backend error).
+    - `device="mps"` requested on a non-Apple-Silicon host.
+    - `transformers` / `torch` import failure.
+    - HF cache miss / OSError with no network reachable (point at
       `make setup-reranker`).
     """
-    key = (model_id, device)
+    if device not in _ALLOWED_DEVICES:
+        raise ValueError(
+            f"device must be one of {sorted(_ALLOWED_DEVICES)}; got {device!r}. "
+            "Add the device to the tier table and `_ALLOWED_DEVICES` "
+            "together if a new backend is wired up."
+        )
+
+    key = (model_id, device, dtype)
     cached = _RERANKER_MODELS.get(key)
     if cached is not None:
         return cached
@@ -143,10 +171,21 @@ def _ensure_qwen3_reranker_warmup(
         )
 
     torch_dtype = torch.float16 if dtype == "fp16" else torch.float32
+    # `from_pretrained` allocates weights to host RAM first, then
+    # `.to(device)` copies them to the target device — peak memory is
+    # roughly 2x model size during load. The lower-peak alternative
+    # (`device_map={"": device}`) would require adding `accelerate` as
+    # a runtime dependency, which costs more than the niche
+    # memory-constrained-Mac 4B case we'd avoid.
     try:
         tokenizer: Any = AutoTokenizer.from_pretrained(repo)
         model: Any = AutoModelForCausalLM.from_pretrained(repo, dtype=torch_dtype)
-    except Exception as exc:
+    except OSError as exc:
+        # OSError is what HF/transformers raise for missing local files
+        # and network failures (`LocalEntryNotFoundError`,
+        # `OfflineModeIsEnabled`, etc.). Other exception types (ValueError
+        # for bad config, RuntimeError for backend issues) propagate
+        # unchanged so the user sees the actual cause.
         raise RuntimeError(
             f"Qwen3-Reranker {model_id!r} could not be loaded — likely a "
             "HuggingFace cache miss with no network reachable. Populate "
@@ -155,9 +194,31 @@ def _ensure_qwen3_reranker_warmup(
             f"(repo: {repo})"
         ) from exc
     model = model.to(device).eval()
+    _assert_yes_no_single_token(tokenizer)
 
     _RERANKER_MODELS[key] = (model, tokenizer)
     return _RERANKER_MODELS[key]
+
+
+def _truncate_passage_to_budget(
+    *, passage: str, tokenizer: Any, budget: int
+) -> str:
+    """Truncate `passage` so its tokenization is at most `budget` tokens.
+
+    Returns the input unchanged when it already fits — saves a decode
+    round-trip on the common path. The Qwen3-Reranker prompt is
+    assembled around a fixed prefix + suffix (the chat template);
+    right-truncating the WHOLE prompt would drop the assistant suffix
+    that carries the yes/no decision token, silently making scores
+    uninformative. Pre-truncating only the passage preserves the
+    suffix and keeps the model's last-token logits meaningful.
+    """
+    ids = tokenizer.encode(passage, add_special_tokens=False)
+    if len(ids) <= budget:
+        return passage
+    truncated_ids = ids[:budget]
+    decoded: str = tokenizer.decode(truncated_ids, skip_special_tokens=False)
+    return decoded
 
 
 RERANKER_VERSION_TAG: str = "v1"
@@ -228,37 +289,80 @@ class Qwen3Reranker:
     def _model_and_tokenizer(self) -> tuple[Any, Any]:
         return _ensure_qwen3_reranker_warmup(self._model_id, self._device, self._dtype)
 
-    def score(self, *, query: str, passages: list[str]) -> list[float]:
+    @cached_property
+    def _yes_no_token_ids(self) -> tuple[int, int]:
+        # Resolved once per instance — the warmup helper has already
+        # asserted single-token encoding.
+        _, tokenizer = self._model_and_tokenizer
+        return (
+            int(tokenizer.encode("yes", add_special_tokens=False)[0]),
+            int(tokenizer.encode("no", add_special_tokens=False)[0]),
+        )
+
+    @cached_property
+    def _non_passage_token_count(self) -> int:
+        # Count the tokens consumed by the prompt scaffold (prefix +
+        # instruction + query placeholder + "<Document>: " + suffix) so
+        # `_truncate_passage_to_budget` can size the remaining budget
+        # for the passage portion. `query` varies per call so the
+        # budget is recomputed per `score()` — this property only
+        # caches the QUERY-INDEPENDENT scaffold cost.
+        _, tokenizer = self._model_and_tokenizer
+        scaffold = (
+            _RERANKER_PROMPT_PREFIX
+            + f"<Instruct>: {_RERANKER_INSTRUCTION}\n"
+            + "<Query>: \n"
+            + "<Document>: "
+            + _RERANKER_PROMPT_SUFFIX
+        )
+        return len(tokenizer.encode(scaffold, add_special_tokens=False))
+
+    def score(self, query: str, passages: list[str]) -> list[float]:
         """Score `(query, passage)` pairs with the Qwen3-Reranker yes/no
         head; return per-passage `p(yes) / (p(yes) + p(no))`.
 
-        Deterministic: `eval()` mode, no sampling, no dropout. Score
-        magnitudes only meaningful within a single `(tier, model)`;
-        cross-tier comparison is forbidden by the `reranker_version`
-        guard.
+        Positional-friendly so `scorer=reranker.score` binds directly
+        when passed to `rerank()` — no lambda wrapper required.
+
+        Deterministic on CPU fp32; eval() mode, no sampling, no
+        dropout. MPS fp16 is deterministic in practice for the relevant
+        kernels but `torch.use_deterministic_algorithms` is NOT set
+        (the flag is process-global and would spill into unrelated
+        tests). Score magnitudes are only comparable within a single
+        `(tier, model, dtype, device)` — cross-tier comparison is
+        forbidden and the `reranker_version` token records the score
+        space for downstream guards.
         """
         if not passages:
             return []
         import torch
 
         model, tokenizer = self._model_and_tokenizer
-        yes_id = tokenizer.encode("yes", add_special_tokens=False)[0]
-        no_id = tokenizer.encode("no", add_special_tokens=False)[0]
+        yes_id, no_id = self._yes_no_token_ids
+        # Reserve scaffold + query tokens; rest is the per-passage budget.
+        # Keep an 8-token safety margin against tokenizer joining edge
+        # cases (e.g., a passage that joins with a preceding token on
+        # the prompt seam).
+        query_tokens = len(tokenizer.encode(query, add_special_tokens=False))
+        passage_budget = max(
+            16, _RERANKER_MAX_LENGTH - self._non_passage_token_count - query_tokens - 8
+        )
         scores: list[float] = []
         with torch.no_grad():
             for passage in passages:
+                fitted_passage = _truncate_passage_to_budget(
+                    passage=passage, tokenizer=tokenizer, budget=passage_budget
+                )
                 prompt = (
                     _RERANKER_PROMPT_PREFIX
                     + f"<Instruct>: {_RERANKER_INSTRUCTION}\n"
                     + f"<Query>: {query}\n"
-                    + f"<Document>: {passage}"
+                    + f"<Document>: {fitted_passage}"
                     + _RERANKER_PROMPT_SUFFIX
                 )
                 inputs = tokenizer(
                     prompt,
                     return_tensors="pt",
-                    truncation=True,
-                    max_length=_RERANKER_MAX_LENGTH,
                 ).to(self._device)
                 out = model(**inputs)
                 last_logits = out.logits[0, -1, :]
@@ -274,14 +378,26 @@ class Qwen3Reranker:
 @dataclass(frozen=True)
 class RerankHit:
     """One reranked hit, carrying both the reranker score and the prior
-    RRF context so a caller can diagnose how the reranker moved each
-    item (or persist both columns).
+    RRF context.
+
+    Score scales differ — `score` is the reranker yes-probability
+    ∈ [0, 1]; `prev_rrf_score` is the RRF fusion score (typically
+    ~0.01-0.05 for `rrf_k=60`). They are NOT directly comparable; the
+    reranker score is the authoritative ranking signal post-rerank,
+    `prev_rrf_score` is provenance.
+
+    `reranker_version` records the score space (`{tier}:{model}:{tag}`)
+    so a downstream worker persisting reranked rows can refuse to mix
+    them across tiers — the row-stamp analogue of `embed_model_version`.
+    Defaults to `None` when callers do not stamp it (e.g., unit tests
+    using a synthetic scorer).
     """
 
     parent: ParentChunk
     score: float
     prev_rrf_score: float
     prev_rank: int
+    reranker_version: str | None = None
 
 
 # A scorer maps `(query, passages)` to a per-passage relevance score
@@ -297,6 +413,7 @@ def rerank(
     hits: Sequence[HybridHit],
     top_k: int,
     scorer: ScorerFn,
+    reranker_version: str | None = None,
 ) -> list[RerankHit]:
     """Reorder `hits` by `scorer(query, [h.parent.text for h in hits])` and
     return the top `top_k`.
@@ -307,6 +424,11 @@ def rerank(
     rare, but they DO happen on identical passages (e.g., two filings
     that quote the same boilerplate); the fixed tie-break makes the
     output order reproducible across runs.
+
+    Pass `reranker_version=reranker.reranker_version` to stamp the
+    score-space token on every `RerankHit`. Required for any downstream
+    consumer that persists scores — the token is the cross-tier guard
+    against silent score-space mixing.
     """
     if top_k <= 0:
         raise ValueError(f"top_k must be positive; got {top_k}")
@@ -332,6 +454,7 @@ def rerank(
             score=s,
             prev_rrf_score=h.score,
             prev_rank=orig_idx + 1,
+            reranker_version=reranker_version,
         )
         for orig_idx, (h, s) in indexed[:top_k]
     ]
@@ -343,7 +466,9 @@ __all__ = [
     "Qwen3Reranker",
     "RerankHit",
     "ScorerFn",
+    "_assert_yes_no_single_token",
     "_ensure_qwen3_reranker_warmup",
+    "_truncate_passage_to_budget",
     "rerank",
     "reranker_version",
 ]
