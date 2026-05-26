@@ -145,7 +145,7 @@ def _ensure_qwen3_reranker_warmup(
     torch_dtype = torch.float16 if dtype == "fp16" else torch.float32
     try:
         tokenizer: Any = AutoTokenizer.from_pretrained(repo)
-        model: Any = AutoModelForCausalLM.from_pretrained(repo, torch_dtype=torch_dtype)
+        model: Any = AutoModelForCausalLM.from_pretrained(repo, dtype=torch_dtype)
     except Exception as exc:
         raise RuntimeError(
             f"Qwen3-Reranker {model_id!r} could not be loaded — likely a "

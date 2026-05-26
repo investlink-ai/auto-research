@@ -93,3 +93,33 @@ def _warm_qwen3_mlx_embeddings() -> None:
         # actionable remediation, per the explicit-config-loud rule.
         if "uv sync --extra mlx" not in str(exc):
             raise
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _warm_qwen3_reranker() -> None:
+    """Warm the Qwen3-Reranker-0.6B model once per session on any host.
+
+    Same lazy-load-then-socket-monkey-patch concern as the BGE and
+    Qwen3-Embedding warmups: the first hermetic reranker unit test
+    that triggers a real load would otherwise pull ~1.2 GB of
+    Qwen3-Reranker-0.6B weights from HuggingFace under a socket-blocked
+    environment. Pre-warming at session start lands the weights in HF
+    cache via `make setup-reranker`.
+
+    Cross-platform: the reranker's `ci-cpu` tier runs on Linux CI. On
+    Apple Silicon, the same warmup populates the `(0.6B, cpu)` cache
+    entry; the `dev` tier's `(0.6B, mps)` entry is loaded lazily by
+    the tests that actually exercise MPS.
+
+    Only swallows the "transformers / torch not installed" remediation
+    error — all other failures (cache miss, repo rename, API drift)
+    propagate so the session start fails loudly with the actionable
+    remediation, per the explicit-config-loud rule.
+    """
+    from auto_research.extract.rerank import _ensure_qwen3_reranker_warmup
+
+    try:
+        _ensure_qwen3_reranker_warmup("Qwen3-Reranker-0.6B", "cpu", "fp32")
+    except RuntimeError as exc:
+        if "uv sync" not in str(exc):
+            raise
