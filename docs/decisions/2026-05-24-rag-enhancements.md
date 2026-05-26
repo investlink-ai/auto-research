@@ -143,6 +143,46 @@ and are encoded here so those issues inherit the right starting state.
 > tier requires *proactive* pacing at the orchestrator layer (one call
 > every ~20s); reactive retries alone will not keep a parallel backfill
 > from 429-ing immediately. Tracked separately as a follow-up issue.
+>
+> *Amendment (2026-05-26, Issue #65):* The embedding backend
+> taxonomy is now three options, not two:
+>
+> 1. **`voyage`** — production cloud embedder (`voyage-finance-2`).
+>    Unchanged default for production runs and the path the cost /
+>    economics arguments in this document continue to assume.
+> 2. **`bge`** — cross-platform in-process `bge-small-en-v1.5`. The
+>    Linux-CI and airgapped-dev fallback. Kept because BGE-small is
+>    the only path that runs natively on x86_64-Linux and is the
+>    backend the hermetic unit tier exercises by default.
+> 3. **`qwen3-mlx`** — Apple-Silicon-only in-process Qwen3-Embedding
+>    via `mlx_embeddings`. Two model variants in the allowlist:
+>    `Qwen3-Embedding-0.6B` (1024-dim native, ~600 MB, dev/test
+>    default) and `Qwen3-Embedding-4B` (2560-dim native, ~8 GB,
+>    deployment-grade). Backed by the `mxfp8`-quantized weights
+>    published by mlx-community.
+>
+> Mac-only constraint is enforced at first-use: `_ensure_qwen3_warmup`
+> raises `RuntimeError` with a remediation pointing back at
+> `backend="voyage"` or `backend="bge"` on non-arm64-Darwin hosts.
+> `mlx-embeddings` lives under the `[mlx]` optional-dependency extra
+> so Linux `uv sync` doesn't try to install MLX wheels it can't use;
+> opt in on Mac with `uv sync --extra mlx`.
+>
+> *Deployment-architecture corollary:* `Qwen3-Embedding-4B` on
+> dedicated Apple-Silicon hardware (Mac Studio / Mac mini) is a
+> **credible offline alternative to Voyage at the 1000-name ×
+> 10-year backfill scope** — same accuracy class, no per-token cloud
+> spend, no 3-RPM quota window to architect around. This is a
+> **deployment-architecture option**, not a code-level default:
+> production code still routes `backend="voyage"` unless the operator
+> explicitly chooses otherwise via `EMBEDDING_BACKEND=qwen3-mlx` on
+> a host that has the weights pulled. The mid-run-switch invariant
+> (one corpus, one vector space) continues to apply across all three
+> backends — same-dim does not imply same space (Voyage and
+> Qwen3-0.6B both emit 1024-dim vectors but in incompatible
+> coordinate systems), so a re-embed under a different
+> `(backend, model)` requires the materialization-versioned-tables
+> path tracked by Issues #67 + #69, not an in-place swap.
 
 **D2. Reranker → `bge-reranker-v2-m3`.** Replace `bge-reranker-base` in
 `design.md:212` and `ARCHITECTURE.md:101`. Used by
