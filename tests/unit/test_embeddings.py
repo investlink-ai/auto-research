@@ -96,8 +96,17 @@ def test_resolve_backend_from_env_invalid_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("EMBEDDING_BACKEND", "openai")
-    with pytest.raises(RuntimeError, match="got 'openai'"):
+    with pytest.raises(RuntimeError) as excinfo:
         resolve_backend_from_env()
+    # The error must (a) echo back the invalid value the user supplied,
+    # AND (b) enumerate every canonical valid backend so the typo is
+    # self-remediating without a docs trip. Locking both halves
+    # prevents a future refactor from accidentally dropping any of the
+    # three names from the message.
+    msg = str(excinfo.value)
+    assert "openai" in msg
+    for valid in ("voyage", "bge", "qwen3-mlx"):
+        assert valid in msg, f"valid backend {valid!r} missing from error: {msg!r}"
 
 
 # ---- Shared helpers ------------------------------------------------------
@@ -537,6 +546,38 @@ def test_qwen3_mlx_on_non_darwin_raises_at_first_use(
         adapter.embed([_wrap(_make_child("anything", doc_id="doc-QWLNX"))])
 
 
+def test_qwen3_mlx_platform_check_fires_before_mlx_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the ordering bug where `_encode`'s qwen3-mlx
+    branch imported `mlx_embeddings` BEFORE accessing `self._qwen3`
+    (which triggers the platform check). On a Linux host without the
+    `[mlx]` extra installed, the import would fail with
+    `ModuleNotFoundError` instead of the friendly platform-check
+    `RuntimeError` naming the cross-platform backends.
+
+    Simulates the missing-module case by sticking `None` into
+    `sys.modules['mlx_embeddings']` (which makes `import` raise) and
+    confirms the platform check still wins on a non-Apple-Silicon
+    host. The test passes on both Linux CI (real ImportError absent
+    the extra) and Mac dev boxes (extra installed; sys.modules
+    override forces the import-error mode synthetically)."""
+    import platform
+    import sys
+
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    monkeypatch.setitem(sys.modules, "mlx_embeddings", None)
+
+    from auto_research.extract import embeddings as emb
+
+    monkeypatch.setattr(emb, "_QWEN3_MODELS", {}, raising=False)
+
+    adapter = EmbeddingAdapter(backend="qwen3-mlx", rag_root=tmp_path)
+    with pytest.raises(RuntimeError, match="Apple Silicon"):
+        adapter.embed([_wrap(_make_child("anything", doc_id="doc-QWORD"))])
+
+
 def test_qwen3_mlx_on_intel_mac_raises_at_first_use(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -568,10 +609,34 @@ def test_resolve_backend_from_env_invalid_lists_all_three(
 ) -> None:
     """The error message must enumerate all three valid values so a
     user setting `EMBEDDING_BACKEND=mlx` (typo) sees the canonical
-    spelling."""
+    spelling. Asserts each name appears individually."""
     monkeypatch.setenv("EMBEDDING_BACKEND", "mlx")
-    with pytest.raises(RuntimeError, match="qwen3-mlx"):
+    with pytest.raises(RuntimeError) as excinfo:
         resolve_backend_from_env()
+    msg = str(excinfo.value)
+    for valid in ("voyage", "bge", "qwen3-mlx"):
+        assert valid in msg, f"valid backend {valid!r} missing from error: {msg!r}"
+
+
+def test_qwen3_mlx_constants_kept_in_sync() -> None:
+    """Three parallel sources of truth — `ALLOWED_MLX_QWEN3_MODELS`
+    (the constructor allowlist), `_QWEN3_MLX_HF_REPOS` (the load-time
+    HF repo map), and `_MODEL_DIM` (the LanceDB schema dim) — must
+    agree. Drift between them is a silent failure mode (constructor
+    accepts a model that crashes at first use). Lock all three here
+    so adding a new variant requires updating all three or this
+    test fails loudly."""
+    from auto_research.extract.embeddings import _MODEL_DIM, _QWEN3_MLX_HF_REPOS
+
+    assert set(_QWEN3_MLX_HF_REPOS.keys()) == set(ALLOWED_MLX_QWEN3_MODELS), (
+        "ALLOWED_MLX_QWEN3_MODELS and _QWEN3_MLX_HF_REPOS keys disagree — "
+        "every allowlisted model needs an HF repo mapping"
+    )
+    for model_id in ALLOWED_MLX_QWEN3_MODELS:
+        assert model_id in _MODEL_DIM, (
+            f"allowlisted MLX model {model_id!r} missing from _MODEL_DIM — "
+            "the LanceDB schema won't know its native vector dim"
+        )
 
 
 # ---- Qwen3-MLX encode + embed (mlx_embeddings.load monkey-patched) -------
@@ -592,11 +657,21 @@ class _StubQwen3Generate:
         self.generate_calls: list[dict[str, object]] = []
 
     def __call__(
-        self, model: object, tokenizer: object, texts: list[str]
+        self,
+        model: object,
+        tokenizer: object,
+        texts: list[str],
+        **kwargs: object,
     ) -> object:
-        self.generate_calls.append(
-            {"model": model, "tokenizer": tokenizer, "texts": list(texts)}
-        )
+        # `**kwargs` absorbs `max_length` (and any future tunables the
+        # adapter passes through) so the stub keeps tracking the
+        # production call shape without per-kwarg fixture updates.
+        self.generate_calls.append({
+            "model": model,
+            "tokenizer": tokenizer,
+            "texts": list(texts),
+            "kwargs": dict(kwargs),
+        })
         out: list[list[float]] = []
         for i, _ in enumerate(texts):
             vec = [0.0] * self.dim
@@ -614,8 +689,12 @@ def _install_fake_mlx(
 ) -> _StubQwen3Generate:
     """Install a fake `mlx_embeddings` module + force Apple-Silicon
     platform values so the warmup path runs cross-platform under test.
-    `load(...)` returns a `(model_sentinel, tokenizer_sentinel)` tuple;
-    `generate(...)` records calls and emits deterministic output."""
+    `load(...)` returns a `(model_sentinel, tokenizer_sentinel)` tuple
+    but only after validating the repo string is one the production
+    `_QWEN3_MLX_HF_REPOS` actually publishes — that way a typo in the
+    constant surfaces here at unit-test time instead of slipping
+    through to the Mac live smoke. `generate(...)` records calls and
+    emits deterministic output."""
     import platform
     import sys
     import types
@@ -627,9 +706,19 @@ def _install_fake_mlx(
 
     monkeypatch.setattr(emb, "_QWEN3_MODELS", {}, raising=False)
 
+    known_repos = frozenset(emb._QWEN3_MLX_HF_REPOS.values())
+
+    def _fake_load(repo: str) -> tuple[str, str]:
+        assert repo in known_repos, (
+            f"production _QWEN3_MLX_HF_REPOS resolved to {repo!r}, "
+            f"which is not one of the published mlx-community repos "
+            f"{sorted(known_repos)} — typo or out-of-date constant?"
+        )
+        return ("model_sentinel", "tokenizer_sentinel")
+
     stub = _StubQwen3Generate(dim=dim)
     fake = types.ModuleType("mlx_embeddings")
-    fake.load = lambda _repo: ("model_sentinel", "tokenizer_sentinel")  # type: ignore[attr-defined]
+    fake.load = _fake_load  # type: ignore[attr-defined]
     fake.generate = stub  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "mlx_embeddings", fake)
     return stub

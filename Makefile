@@ -35,9 +35,9 @@ setup-nlp:
 # (the `mlx-embeddings` extra isn't installed there).
 setup-mlx:
 	@if [ "$$(uname -s)" = "Darwin" ] && [ "$$(uname -m)" = "arm64" ]; then \
-		uv run --extra mlx python -c "from mlx_embeddings import load; load('mlx-community/Qwen3-Embedding-0.6B-mxfp8')"; \
+		uv run --extra mlx python -c "from auto_research.extract.embeddings import _ensure_qwen3_warmup; _ensure_qwen3_warmup('Qwen3-Embedding-0.6B')"; \
 		if [ "$$QWEN3_FULL" = "1" ]; then \
-			uv run --extra mlx python -c "from mlx_embeddings import load; load('mlx-community/Qwen3-Embedding-4B-mxfp8')"; \
+			uv run --extra mlx python -c "from auto_research.extract.embeddings import _ensure_qwen3_warmup; _ensure_qwen3_warmup('Qwen3-Embedding-4B')"; \
 		fi; \
 	else \
 		echo "setup-mlx: skipped (non-Apple-Silicon host); MLX backend is Mac-only."; \

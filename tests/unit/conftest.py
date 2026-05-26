@@ -79,13 +79,17 @@ def _warm_qwen3_mlx_embeddings() -> None:
     """
     if not _is_apple_silicon():
         return
-    try:
-        from auto_research.extract.embeddings import _ensure_qwen3_warmup
+    from auto_research.extract.embeddings import _ensure_qwen3_warmup
 
+    try:
         _ensure_qwen3_warmup("Qwen3-Embedding-0.6B")
-    except Exception:
-        # Don't fail the entire unit session if MLX weights aren't
-        # yet pulled — individual Mac-only tests skip cleanly when
-        # the extra isn't installed. `make setup-mlx` is the
-        # remediation, surfaced by the per-test failure.
-        pass
+    except RuntimeError as exc:
+        # Only swallow the "mlx-embeddings extra not installed" case —
+        # that's a legitimate Mac-dev environment where unit tests
+        # should still run (qwen3-mlx tests will skip individually
+        # via the skipif gate). All other exceptions (HF cache miss,
+        # platform-check polarity bug, repo-name typo, API drift)
+        # must propagate so the session start fails loudly with the
+        # actionable remediation, per the explicit-config-loud rule.
+        if "uv sync --extra mlx" not in str(exc):
+            raise

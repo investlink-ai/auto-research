@@ -131,12 +131,24 @@ _QWEN3_MLX_HF_REPOS: dict[str, str] = {
 
 # Asymmetric-encoder instruction prefix applied on the query side only,
 # per the Qwen3-Embedding model card. Document-side text is encoded
-# unprefixed. The prefix is generic by design — finance-specific
-# task descriptions are an empirical tuning question for a later issue.
+# unprefixed. The task description is part of the embedding signal —
+# the model card explicitly recommends domain-tailoring it. This value
+# matches the corpus the adapter actually serves (SEC filings + earnings
+# transcripts + analyst materials); revisit when a Ragas / DeepEval
+# baseline gives a measurable handle for tuning.
 _QWEN3_QUERY_INSTRUCTION = (
-    "Instruct: Given a web search query, retrieve relevant passages "
-    "that answer the query\nQuery: "
+    "Instruct: Given a financial research query, retrieve relevant "
+    "passages from SEC filings, earnings transcripts, and analyst "
+    "materials\nQuery: "
 )
+
+# Tokenizer truncation budget for `mlx_embeddings.generate`. The upstream
+# default is 512, which silently truncates long passages even though
+# Qwen3-Embedding's native context is 32K. 2048 is generous enough for
+# the contextual-chunking pattern (LLM-generated context prefix + child
+# text) without paying the memory cost of pinning to full 32K on every
+# batch.
+_QWEN3_MAX_LENGTH = 2048
 
 # Voyage rate-limit posture. This project's Voyage account is on the
 # constrained tier — **3 RPM / 10,000 TPM** — not the doc-page Tier 1
@@ -224,19 +236,20 @@ def _ensure_qwen3_warmup(model_id: str) -> Any:
 
     try:
         from mlx_embeddings import load as _mlx_load
-
-        loaded = _mlx_load(repo)
-    except Exception as exc:
+    except ImportError as exc:
         raise RuntimeError(
-            f"Qwen3-MLX model {model_id!r} (HF repo {repo!r}) could "
-            "not be loaded — likely a HuggingFace cache miss with no "
-            "network reachable, or the `mlx-embeddings` extra is not "
-            "installed. Populate the cache and install the extra with:\n"
+            f"Qwen3-MLX model {model_id!r} requested but the "
+            "`mlx-embeddings` extra is not installed. Install it with:\n"
             "    uv sync --extra mlx\n"
-            "    make setup-mlx\n"
             "On non-Apple-Silicon hosts use backend='voyage' or "
             "backend='bge' instead."
         ) from exc
+
+    # Network / cache failures during `_mlx_load` propagate with their
+    # own message so operators don't get pointed at the wrong fix. The
+    # `make setup-mlx` target populates the HF cache one-shot; the
+    # underlying HF/MLX error already names the failing repo.
+    loaded = _mlx_load(repo)
 
     _QWEN3_MODELS[model_id] = loaded
     return loaded
@@ -453,14 +466,22 @@ class EmbeddingAdapter:
             # is unprefixed. Mirrors the Voyage `input_type` semantics
             # from the same call site below. `text_embeds` from the
             # MLX `generate` call is already L2-normalized.
+            #
+            # Resolve `self._qwen3` FIRST so the platform check inside
+            # `_ensure_qwen3_warmup` raises with its friendly remediation
+            # before the `mlx_embeddings` import runs — otherwise a
+            # Linux host without the `[mlx]` extra installed would leak
+            # a cryptic `ModuleNotFoundError` instead.
+            model, tokenizer = self._qwen3
             from mlx_embeddings import generate as _mlx_generate
 
             if input_type == "query":
                 prepared = [_QWEN3_QUERY_INSTRUCTION + t for t in texts]
             else:
                 prepared = list(texts)
-            model, tokenizer = self._qwen3
-            out = _mlx_generate(model, tokenizer, prepared)
+            out = _mlx_generate(
+                model, tokenizer, prepared, max_length=_QWEN3_MAX_LENGTH
+            )
             # `out.text_embeds` is an `mx.array` of shape (batch, dim);
             # numpy conversion via `np.asarray` triggers materialization
             # off the MLX device.
@@ -662,8 +683,10 @@ class EmbeddingAdapter:
                 db = lancedb.connect(self._rag_root)
                 table_name = doc_id if store == "per_doc" else _PER_CORPUS_STORE
                 tbl = db.open_table(table_name)
-                # Voyage benefits from input_type="query" on the query side
-                # of the asymmetric encoder; BGE ignores input_type.
+                # Voyage and Qwen3-MLX both consume input_type as the
+                # asymmetric-encoder switch on the query side (Voyage
+                # via its `input_type` kwarg, Qwen3 via the model-card
+                # instruction prefix). BGE ignores input_type.
                 qvec = self._encode([text], input_type="query")[0].tolist()
                 builder = tbl.search(qvec).limit(k)
                 if where:

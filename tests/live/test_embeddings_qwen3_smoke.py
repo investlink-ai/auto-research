@@ -28,6 +28,7 @@ cleanly on non-arm64-Darwin hosts.
 
 from __future__ import annotations
 
+import os
 import platform
 from pathlib import Path
 
@@ -37,13 +38,20 @@ from auto_research.extract.chunking import ChildChunk, ChunkMetadata
 from auto_research.extract.chunking_contextual import ContextualChildChunk
 from auto_research.extract.embeddings import EmbeddingAdapter
 
-live_requires_env = ("QWEN3_FULL",)
-
 
 def _is_apple_silicon() -> bool:
     return platform.system() == "Darwin" and platform.machine() == "arm64"
 
 
+# Gate the 8 GB 4B download on QWEN3_FULL=='1' — matches the Makefile's
+# `setup-mlx` shell check exactly. The live conftest's
+# `live_requires_env` mechanism gates on env-var non-emptiness, so
+# `QWEN3_FULL=0` would still trip it; this explicit `!= "1"` check is
+# what an operator typing `QWEN3_FULL=0` reasonably expects.
+@pytest.mark.skipif(
+    os.environ.get("QWEN3_FULL") != "1",
+    reason="QWEN3_FULL=1 required to opt into the 8 GB 4B download",
+)
 @pytest.mark.skipif(
     not _is_apple_silicon(),
     reason="Qwen3-MLX backend is Apple-Silicon-only",
