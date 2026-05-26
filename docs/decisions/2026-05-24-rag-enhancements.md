@@ -109,8 +109,7 @@ and are encoded here so those issues inherit the right starting state.
 > on Issue #20/#21 eval numbers, not vendor copy.
 
 > *Invariant (2026-05-26):* The embedding backend is selected ONCE at
-> adapter init and locked for the adapter's lifetime. The init decision
-> is one of `voyage_used | no_key | explicit_override`. On
+> adapter init and locked for the adapter's lifetime. On
 > `voyageai.error.RateLimitError` (or any other Voyage runtime error)
 > the call propagates — the adapter does NOT silently switch to BGE.
 > Voyage's 1024-dim and BGE's 384-dim outputs live in different vector
@@ -118,9 +117,23 @@ and are encoded here so those issues inherit the right starting state.
 > retrieval (and is INV-6-adjacent — a "pure function of (raw_doc,
 > prompt_version, model_id, …)" cannot depend on quota timing).
 > Operational quota handling — retry-with-backoff, circuit breaker,
-> alerting — lives at the worker layer. The original Issue #15 AC
-> wording ("fallback when `VOYAGE_API_KEY` absent or quota exceeded")
-> is superseded: only the "absent" half is in scope.
+> alerting — lives at the worker layer.
+>
+> *Amendment (2026-05-26, Issue #64):* Backend selection is now
+> **explicitly configured by the caller**, not inferred from env-var
+> presence. `EmbeddingAdapter.__init__` requires a `backend:
+> Literal["voyage", "bge"]` parameter; the prior implicit
+> `no_key` / `explicit_override` fallback paths (introduced in #15)
+> are removed. Workers / CLI entry points call
+> `resolve_backend_from_env()` to read the required `EMBEDDING_BACKEND`
+> env var (`voyage` or `bge`; missing → loud `RuntimeError`) and pass
+> the choice through to the adapter. A misconfigured `backend="voyage"`
+> without `VOYAGE_API_KEY` raises a clear `RuntimeError` at first
+> embed/query call rather than silently degrading to BGE — matching
+> the "no silent fallback" principle that also underlies the
+> mid-run-switch invariant above. The original Issue #15 AC wording
+> ("fallback when `VOYAGE_API_KEY` absent or quota exceeded") is
+> fully superseded: neither half of the implicit fallback remains.
 >
 > *Retry policy (2026-05-26):* The adapter applies tenacity exponential-
 > with-jitter backoff (`initial=20s, max=120s, attempts=6`) on

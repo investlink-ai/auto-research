@@ -74,9 +74,9 @@ def test_voyage_embed_round_trip_against_recorded_response(
             "Record with VOYAGE_API_KEY set: "
             "`pytest tests/integration/test_embeddings_vcr.py`."
         )
-    adapter = EmbeddingAdapter(rag_root=tmp_path)
-    assert adapter.decision.backend == "voyage"
-    assert adapter.decision.model == "voyage-finance-2"
+    adapter = EmbeddingAdapter(backend="voyage", rag_root=tmp_path)
+    assert adapter.backend == "voyage"
+    assert adapter.model == "voyage-finance-2"
     chunks = [_chunk("NVDA China export controls Q4 commentary")]
     with _build_vcr().use_cassette(CASSETTE_PATH.name):
         adapter.embed(chunks)

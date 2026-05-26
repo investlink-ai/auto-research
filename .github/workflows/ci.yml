@@ -43,12 +43,19 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras
 
-      # `unstructured.partition_html` requires spaCy's `en_core_web_sm`
-      # for element classification. spaCy hosts the model only on
-      # GitHub (no PyPI wheel), so `uv sync` does not install it.
-      # `auto_research.extract.chunking._ensure_nlp_warmup()` raises at
-      # first `parse_filing` call without it.
-      - name: Install NLP model
+      # Pre-download two lazy-loaded NLP models so hermetic unit tests
+      # don't trigger network access on first use:
+      #   - spaCy `en_core_web_sm` — needed by `unstructured.
+      #     partition_html`'s element classifier. Hosted only on
+      #     GitHub (no PyPI wheel), so `uv sync` does not install it.
+      #   - BGE `BAAI/bge-small-en-v1.5` — in-process embedding fallback
+      #     used by `EmbeddingAdapter` when `VOYAGE_API_KEY` is absent.
+      #     `sentence-transformers` lazy-loads from HuggingFace on first
+      #     instantiation; pre-warming lets the conftest's session-
+      #     autouse fixture serve hermetic tests without network.
+      # `_ensure_nlp_warmup` and `_ensure_bge_warmup` raise with a clear
+      # remediation pointing back here when their caches are missing.
+      - name: Install NLP models
         run: make setup-nlp
 
       - name: Lint + typecheck

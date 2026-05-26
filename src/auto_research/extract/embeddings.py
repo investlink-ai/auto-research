@@ -1,18 +1,21 @@
 """Embedding adapter for the RAG retrieval layer.
 
-Default model is Voyage `voyage-finance-2` per ADR D1
-(`docs/decisions/2026-05-24-rag-enhancements.md`); BGE
-`bge-small-en-v1.5` is selectable as a whole-run alternative when
-`VOYAGE_API_KEY` is absent or `force_local=True`.
+Backend selection is **explicit** — the caller passes
+`backend="voyage"` (production default, `voyage-finance-2` per ADR D1)
+or `backend="bge"` (in-process `bge-small-en-v1.5`, used by tests and
+airgapped dev). There is no env-var-driven implicit fallback: a
+missing `VOYAGE_API_KEY` does NOT silently switch the adapter to BGE
+— it raises when the Voyage client is first constructed, surfacing
+the misconfiguration loudly. Workers / CLI entry points read
+`EMBEDDING_BACKEND` themselves and pass the choice in.
 
-The backend is chosen once at adapter init and locked for its lifetime.
-There is no mid-run switch on quota or any other Voyage error — a
-single corpus must live in a single vector space, since Voyage's
-1024-dim and BGE's 384-dim outputs are not comparable under cosine
-similarity (dense retrieval would silently degrade). On
-`voyageai.error.RateLimitError` the call propagates; operational
-handling (retry-with-backoff, circuit breaking, quota alerting) lives
-at the worker layer.
+The backend is locked for the adapter's lifetime. There is no
+mid-run switch on quota or any other Voyage error — a single corpus
+must live in a single vector space, since Voyage's 1024-dim and BGE's
+384-dim outputs are not comparable under cosine similarity (dense
+retrieval would silently degrade). On `voyageai.error.RateLimitError`
+the call propagates; operational handling (retry-with-backoff,
+circuit breaking, quota alerting) lives at the worker layer.
 """
 
 from __future__ import annotations
@@ -65,8 +68,23 @@ _MODEL_DIM: dict[str, int] = {
 
 NARRATIVE_DOC_TYPES: frozenset[str] = frozenset({"10-K", "10-Q", "transcript"})
 _BGE_MODEL_NAME = "bge-small-en-v1.5"
+_BGE_HF_ID = f"BAAI/{_BGE_MODEL_NAME}"
 _PER_CORPUS_STORE = "_corpus_narrative"
 _WORKER = "embeddings"
+
+# One-shot BGE warmup. Mirrors `extract.chunking._nlp_warmup` for the
+# embedding side: `SentenceTransformer` lazy-loads its model from
+# HuggingFace on first instantiation, a network call that breaks
+# hermetic unit tests (socket-monkey-patched) and silently surprises
+# fresh CI runners that have no `~/.cache/huggingface/` populated.
+#
+# `_ensure_bge_warmup` is idempotent via `_BGE_MODEL` (the module-level
+# cache). The conftest autouse fixture calls it once at session start —
+# before any socket-blocking test runs — so the model lands in cache
+# during a "real" network window. `EmbeddingAdapter._bge` reuses the
+# same singleton so multiple adapter instances in a single process
+# share one loaded model rather than each paying the ~1-2s reload cost.
+_BGE_MODEL: Any = None
 
 # Voyage rate-limit posture. This project's Voyage account is on the
 # constrained tier — **3 RPM / 10,000 TPM** — not the doc-page Tier 1
@@ -116,6 +134,40 @@ _log = logging.getLogger(__name__)
 _tracer = trace.get_tracer(__name__)
 
 
+def _ensure_bge_warmup() -> Any:
+    """Load BGE once and return the cached `SentenceTransformer`.
+
+    Idempotent via the module-level `_BGE_MODEL` singleton. First call
+    instantiates the model (downloading from HuggingFace if absent from
+    the local cache, raising a clear `RuntimeError` if both the cache
+    is empty AND the network is unavailable — typically a hermetic-test
+    socket monkey-patch or an airgapped CI runner). Subsequent calls
+    return the cached instance.
+
+    Production code paths (`EmbeddingAdapter._bge`) call this to share
+    the singleton; the unit-conftest autouse fixture calls it at session
+    start so hermetic tests can monkey-patch sockets without triggering
+    a lazy HF download. Mirror of `extract.chunking._nlp_warmup`.
+    """
+    global _BGE_MODEL
+    if _BGE_MODEL is not None:
+        return _BGE_MODEL
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        _BGE_MODEL = SentenceTransformer(_BGE_HF_ID)
+    except Exception as exc:
+        raise RuntimeError(
+            f"BGE model {_BGE_HF_ID!r} could not be loaded — likely a "
+            "HuggingFace cache miss with no network reachable. Populate "
+            "the cache with:\n"
+            "    make setup-nlp\n"
+            "(CI runs this in the same step as `uv sync` per "
+            ".github/workflows/ci.yml.)"
+        ) from exc
+    return _BGE_MODEL
+
+
 def _schema(vector_dim: int) -> pa.Schema:
     return pa.schema([
         ("text", pa.string()),
@@ -142,57 +194,101 @@ class QueryHit:
     doc_id: str
 
 
-@dataclass(frozen=True)
-class FallbackDecision:
-    backend: str
-    model: str
-    reason: str  # voyage_used | no_key | explicit_override (all init-time)
+BGE_MODEL_ID = "bge-small-en-v1.5"
+
+
+def resolve_backend_from_env() -> Literal["voyage", "bge"]:
+    """Read `EMBEDDING_BACKEND` from the environment and validate.
+
+    Workers / CLI entry points call this once at startup and pass the
+    explicit choice into `EmbeddingAdapter(backend=...)`. The adapter
+    itself never reads this env var — selection is the caller's
+    responsibility, missing config is a loud error not a silent
+    fallback.
+    """
+    raw = os.environ.get("EMBEDDING_BACKEND")
+    if raw not in {"voyage", "bge"}:
+        raise RuntimeError(
+            "EMBEDDING_BACKEND env var must be set to 'voyage' or 'bge'; "
+            f"got {raw!r}. Set explicitly — there is no default fallback."
+        )
+    return raw  # type: ignore[return-value]
 
 
 class EmbeddingAdapter:
     def __init__(
         self,
         *,
+        backend: Literal["voyage", "bge"],
         rag_root: Path = Path("data/rag"),
         voyage_model: str | None = None,
-        force_local: bool = False,
     ) -> None:
-        resolved = voyage_model or os.environ.get("VOYAGE_MODEL") or DEFAULT_VOYAGE_MODEL
-        if resolved not in ALLOWED_VOYAGE_MODELS:
+        """Construct an adapter bound to an explicitly-chosen backend.
+
+        `backend` is required — no env-var inference, no default. Pass
+        `"voyage"` for production (`voyage-finance-2` by default, or
+        the model named in `voyage_model` / `$VOYAGE_MODEL`) or
+        `"bge"` for the in-process `bge-small-en-v1.5` fallback.
+
+        `voyage_model` is only honored when `backend="voyage"`; passing
+        it alongside `backend="bge"` is rejected so the caller's intent
+        stays unambiguous.
+        """
+        if backend == "voyage":
+            resolved = (
+                voyage_model
+                or os.environ.get("VOYAGE_MODEL")
+                or DEFAULT_VOYAGE_MODEL
+            )
+            if resolved not in ALLOWED_VOYAGE_MODELS:
+                raise ValueError(
+                    f"VOYAGE_MODEL={resolved!r} not in "
+                    f"{sorted(ALLOWED_VOYAGE_MODELS)}"
+                )
+            self._backend: Literal["voyage", "bge"] = "voyage"
+            self._model = resolved
+        elif backend == "bge":
+            if voyage_model is not None:
+                raise ValueError(
+                    "voyage_model is only valid when backend='voyage'; "
+                    f"got backend='bge' with voyage_model={voyage_model!r}"
+                )
+            self._backend = "bge"
+            self._model = BGE_MODEL_ID
+        else:
             raise ValueError(
-                f"VOYAGE_MODEL={resolved!r} not in {sorted(ALLOWED_VOYAGE_MODELS)}"
+                f"backend must be 'voyage' or 'bge'; got {backend!r}"
             )
         self._rag_root = rag_root
-        if force_local:
-            self._decision = FallbackDecision("bge", "bge-small-en-v1.5", "explicit_override")
-        elif not os.environ.get("VOYAGE_API_KEY"):
-            self._decision = FallbackDecision("bge", "bge-small-en-v1.5", "no_key")
-        else:
-            self._decision = FallbackDecision("voyage", resolved, "voyage_used")
         _log.info(
-            "embedding_adapter_init backend=%s model=%s reason=%s",
-            self._decision.backend,
-            self._decision.model,
-            self._decision.reason,
+            "embedding_adapter_init backend=%s model=%s",
+            self._backend,
+            self._model,
         )
 
     @property
-    def decision(self) -> FallbackDecision:
-        return self._decision
+    def backend(self) -> Literal["voyage", "bge"]:
+        return self._backend
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     @cached_property
     def _vector_dim(self) -> int:
-        return _MODEL_DIM[self._decision.model]
+        return _MODEL_DIM[self._model]
 
     @cached_property
     def _bge(self) -> Any:
-        from sentence_transformers import SentenceTransformer
-        return SentenceTransformer(f"BAAI/{_BGE_MODEL_NAME}")
+        # Routes through the module-level singleton so every adapter in
+        # the process shares one warm model; surfaces a clear remediation
+        # error when the HF cache is empty and the network is blocked.
+        return _ensure_bge_warmup()
 
     def _encode(
         self, texts: list[str], *, input_type: str = "document"
     ) -> NDArray[np.float32]:
-        if self._decision.backend == "bge":
+        if self._backend == "bge":
             # BGE-small doesn't take an input_type prompt; same encoder for
             # both corpus and query sides.
             arr: NDArray[np.float32] = self._bge.encode(
@@ -219,7 +315,7 @@ class EmbeddingAdapter:
         resp = retrying(
             self._voyage_client.embed,
             texts,
-            model=self._decision.model,
+            model=self._model,
             input_type=input_type,
         )
         return np.asarray(resp.embeddings, dtype=np.float32)
@@ -228,7 +324,19 @@ class EmbeddingAdapter:
     def _voyage_client(self) -> Any:
         import voyageai
 
-        return voyageai.Client(api_key=os.environ["VOYAGE_API_KEY"])  # type: ignore[attr-defined]
+        api_key = os.environ.get("VOYAGE_API_KEY")
+        if not api_key:
+            # Loud failure rather than silent fallback to BGE: the
+            # caller explicitly chose backend='voyage', so a missing
+            # key is a misconfiguration to surface, not a signal to
+            # quietly degrade.
+            raise RuntimeError(
+                "EmbeddingAdapter was constructed with backend='voyage' "
+                "but VOYAGE_API_KEY is not set. Provide the key, or "
+                "construct the adapter with backend='bge' for the "
+                "in-process fallback."
+            )
+        return voyageai.Client(api_key=api_key)  # type: ignore[attr-defined]
 
     def _rows(
         self, chunks: Sequence[ContextualChildChunk], vectors: NDArray[np.float32]
@@ -263,9 +371,8 @@ class EmbeddingAdapter:
             span.set_attribute("extract.worker", _WORKER)
             span.set_attribute("extract.doc_id", doc_id)
             span.set_attribute("embedding.chunks_count", len(chunks))
-            span.set_attribute("embedding.backend", self._decision.backend)
-            span.set_attribute("embedding.model", self._decision.model)
-            span.set_attribute("embedding.fallback_reason", self._decision.reason)
+            span.set_attribute("embedding.backend", self._backend)
+            span.set_attribute("embedding.model", self._model)
             try:
                 texts = [c.embedding_text for c in chunks]
                 vectors = self._encode(texts)
@@ -374,8 +481,8 @@ class EmbeddingAdapter:
             raise ValueError("doc_id required when store='per_doc'")
         with _tracer.start_as_current_span("extract.embed_query") as span:
             span.set_attribute("extract.worker", _WORKER)
-            span.set_attribute("embedding.backend", self._decision.backend)
-            span.set_attribute("embedding.model", self._decision.model)
+            span.set_attribute("embedding.backend", self._backend)
+            span.set_attribute("embedding.model", self._model)
             span.set_attribute("embedding.store", store)
             span.set_attribute("embedding.k", k)
             span.set_attribute("embedding.has_filter", where is not None)
