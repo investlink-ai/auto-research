@@ -119,11 +119,14 @@ def test_embed_query_is_deterministic_top_k(
     assert [h.text for h in a] == [h.text for h in b]
 
 
-def test_voyage_quota_switches_to_bge_with_logged_reason(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_voyage_rate_limit_error_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A live Voyage RateLimitError must propagate to the caller — the
+    adapter does NOT silently switch to BGE mid-run. Mixing Voyage and BGE
+    vectors in one corpus produces an incoherent vector space.
+    """
     monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
-    caplog.set_level("INFO", logger="auto_research.extract.embeddings")
 
     from voyageai.error import RateLimitError
 
@@ -131,18 +134,21 @@ def test_voyage_quota_switches_to_bge_with_logged_reason(
         def __init__(self) -> None:
             super().__init__("simulated 429")  # type: ignore[no-untyped-call]
 
-    class _FakeVoyage:
+    class _AlwaysQuota:
         def embed(self, texts: list[str], model: str, input_type: str) -> object:
             raise _QuotaError()
 
     adapter = EmbeddingAdapter(rag_root=tmp_path)
     assert adapter.decision.reason == "voyage_used"
-    adapter.__dict__["_voyage_client"] = _FakeVoyage()
+    adapter.__dict__["_voyage_client"] = _AlwaysQuota()
 
-    chunks = [_wrap(_make_child("data center revenue", doc_id="doc-Q"))]
-    adapter.embed(chunks)
-    assert adapter.decision == FallbackDecision("bge", "bge-small-en-v1.5", "quota")
-    assert any("reason=quota" in r.message for r in caplog.records)
+    with pytest.raises(RateLimitError):
+        adapter.embed([_wrap(_make_child("data center revenue", doc_id="doc-Q"))])
+
+    # Decision unchanged after the error — no silent backend swap.
+    assert adapter.decision == FallbackDecision(
+        "voyage", "voyage-finance-2", "voyage_used"
+    )
 
 
 def test_query_filter_ticker_and_filing_date(
@@ -183,54 +189,6 @@ def test_query_filter_ticker_and_filing_date(
     assert {h.doc_id for h in hits} == {"doc-NVDA-2025"}
     assert all(h.ticker == "NVDA" for h in hits)
     assert all(h.filing_date >= date(2025, 1, 1) for h in hits)
-
-
-def test_voyage_quota_after_successful_call_uses_fresh_bge_dim(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Regression: voyage 1024-dim writes followed by a 429 must not leave
-    a stale vector_dim cached — the post-switch BGE 384-dim write would
-    otherwise fail with a LanceDB schema mismatch.
-    """
-    monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
-
-    from voyageai.error import RateLimitError
-
-    class _QuotaError(RateLimitError):
-        def __init__(self) -> None:
-            super().__init__("simulated 429")  # type: ignore[no-untyped-call]
-
-    class _VoyageThenQuota:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def embed(self, texts: list[str], model: str, input_type: str) -> object:
-            self.calls += 1
-            if self.calls == 1:
-                # First call: succeed with 1024-dim vectors (voyage-finance-2 shape).
-                return type(
-                    "Resp", (), {"embeddings": [[0.0] * 1024 for _ in texts]}
-                )()
-            raise _QuotaError()
-
-    adapter = EmbeddingAdapter(rag_root=tmp_path)
-    fake = _VoyageThenQuota()
-    adapter.__dict__["_voyage_client"] = fake
-
-    # Call 1: voyage succeeds; with the bug, _vector_dim would cache at 1024.
-    adapter.embed([_wrap(_make_child("first voyage batch", doc_id="doc-V1"))])
-    assert adapter.decision.backend == "voyage"
-
-    # Call 2: voyage 429 → switches to BGE → bge encode returns 384-dim.
-    # The fixed code re-reads _vector_dim from the (now bge) decision; the
-    # old cached_property would have returned a stale 1024 → schema fail.
-    adapter.embed([_wrap(_make_child("second batch after 429", doc_id="doc-V2"))])
-    assert adapter.decision == FallbackDecision("bge", "bge-small-en-v1.5", "quota")
-
-    # And the resulting store is queryable end-to-end (catches any silent
-    # half-write under a schema mismatch).
-    hits = adapter.query("batch", k=1, store="per_doc", doc_id="doc-V2")
-    assert len(hits) == 1
 
 
 def test_query_uses_query_input_type_for_voyage(

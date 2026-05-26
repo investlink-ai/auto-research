@@ -1,8 +1,18 @@
 """Embedding adapter for the RAG retrieval layer.
 
 Default model is Voyage `voyage-finance-2` per ADR D1
-(`docs/decisions/2026-05-24-rag-enhancements.md`); falls back to local
-`bge-small-en-v1.5` when `VOYAGE_API_KEY` is absent or `force_local=True`.
+(`docs/decisions/2026-05-24-rag-enhancements.md`); BGE
+`bge-small-en-v1.5` is selectable as a whole-run alternative when
+`VOYAGE_API_KEY` is absent or `force_local=True`.
+
+The backend is chosen once at adapter init and locked for its lifetime.
+There is no mid-run switch on quota or any other Voyage error — a
+single corpus must live in a single vector space, since Voyage's
+1024-dim and BGE's 384-dim outputs are not comparable under cosine
+similarity (dense retrieval would silently degrade). On
+`voyageai.error.RateLimitError` the call propagates; operational
+handling (retry-with-backoff, circuit breaking, quota alerting) lives
+at the worker layer.
 """
 
 from __future__ import annotations
@@ -55,17 +65,6 @@ _log = logging.getLogger(__name__)
 _tracer = trace.get_tracer(__name__)
 
 
-def _corpus_vector_dim(tbl: Any) -> int:
-    """Read the existing LanceDB table's vector-column fixed-list size.
-
-    Used to detect a backend switch between embed() calls so the corpus
-    narrative index is dropped+recreated (rather than .add()ing rows of a
-    different dim, which raises pyarrow ArrowInvalid).
-    """
-    vector_field = tbl.schema.field("vector")
-    return int(vector_field.type.list_size)
-
-
 def _schema(vector_dim: int) -> pa.Schema:
     return pa.schema([
         ("text", pa.string()),
@@ -96,7 +95,7 @@ class QueryHit:
 class FallbackDecision:
     backend: str
     model: str
-    reason: str  # voyage_used | no_key | quota | explicit_override
+    reason: str  # voyage_used | no_key | explicit_override (all init-time)
 
 
 class EmbeddingAdapter:
@@ -130,12 +129,8 @@ class EmbeddingAdapter:
     def decision(self) -> FallbackDecision:
         return self._decision
 
-    @property
+    @cached_property
     def _vector_dim(self) -> int:
-        # Read from current decision every call: a quota-driven switch from
-        # voyage(1024) to bge(384) must not leave the schema at the
-        # pre-switch dimension on subsequent embeds. Plain dict lookup, no
-        # cost to recomputing.
         return _MODEL_DIM[self._decision.model]
 
     @cached_property
@@ -154,19 +149,13 @@ class EmbeddingAdapter:
             )
             return arr.astype(np.float32)
 
-        from voyageai.error import RateLimitError
-
-        try:
-            resp = self._voyage_client.embed(
-                texts, model=self._decision.model, input_type=input_type
-            )
-        except RateLimitError:
-            self._decision = FallbackDecision("bge", "bge-small-en-v1.5", "quota")
-            _log.warning(
-                "embedding_quota_switch backend=bge model=%s reason=quota",
-                _BGE_MODEL_NAME,
-            )
-            return self._encode(texts, input_type=input_type)
+        # Voyage errors (including RateLimitError) propagate to the caller.
+        # A live switch to BGE here would corrupt the corpus vector space —
+        # 1024-dim Voyage and 384-dim BGE embeddings are not comparable in
+        # dense retrieval. Quota/retry handling is the worker layer's job.
+        resp = self._voyage_client.embed(
+            texts, model=self._decision.model, input_type=input_type
+        )
         return np.asarray(resp.embeddings, dtype=np.float32)
 
     @cached_property
@@ -208,7 +197,9 @@ class EmbeddingAdapter:
             span.set_attribute("extract.worker", _WORKER)
             span.set_attribute("extract.doc_id", doc_id)
             span.set_attribute("embedding.chunks_count", len(chunks))
-            pre_reason = self._decision.reason
+            span.set_attribute("embedding.backend", self._decision.backend)
+            span.set_attribute("embedding.model", self._decision.model)
+            span.set_attribute("embedding.fallback_reason", self._decision.reason)
             try:
                 texts = [c.embedding_text for c in chunks]
                 vectors = self._encode(texts)
@@ -223,42 +214,13 @@ class EmbeddingAdapter:
                 narrative_rows = [r for r in rows if r["doc_type"] in NARRATIVE_DOC_TYPES]
                 if narrative_rows:
                     if _PER_CORPUS_STORE in db.table_names():
-                        existing = db.open_table(_PER_CORPUS_STORE)
-                        if _corpus_vector_dim(existing) == self._vector_dim:
-                            existing.add(narrative_rows)
-                        else:
-                            # Backend switch (e.g., voyage 1024 → bge 384 after
-                            # quota) means the existing corpus narrative index
-                            # is dim-incompatible with the new rows. Cross-
-                            # backend dense retrieval is incoherent, so we drop
-                            # the prior table and start fresh on the new dim.
-                            # WARN, not raise — backfill should keep moving.
-                            _log.warning(
-                                "embedding_corpus_dim_mismatch dropping=%s "
-                                "old_dim=%d new_dim=%d new_backend=%s",
-                                _PER_CORPUS_STORE,
-                                _corpus_vector_dim(existing),
-                                self._vector_dim,
-                                self._decision.backend,
-                            )
-                            db.drop_table(_PER_CORPUS_STORE)
-                            db.create_table(
-                                _PER_CORPUS_STORE, data=narrative_rows, schema=schema
-                            )
+                        db.open_table(_PER_CORPUS_STORE).add(narrative_rows)
                     else:
                         db.create_table(
                             _PER_CORPUS_STORE, data=narrative_rows, schema=schema
                         )
-                span.set_attribute("embedding.backend", self._decision.backend)
-                span.set_attribute("embedding.model", self._decision.model)
-                span.set_attribute("embedding.fallback_reason", self._decision.reason)
                 span.set_attribute("embedding.narrative_count", len(narrative_rows))
-                # quota_fallback = the embed completed, but switched mid-call.
-                # success = ran end-to-end on the original backend.
-                if pre_reason == "voyage_used" and self._decision.reason == "quota":
-                    span.set_attribute("extract.outcome", "quota_fallback")
-                else:
-                    span.set_attribute("extract.outcome", "success")
+                span.set_attribute("extract.outcome", "success")
             except Exception as exc:
                 span.set_attribute("extract.outcome", "error")
                 span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
