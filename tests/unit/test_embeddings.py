@@ -1671,3 +1671,99 @@ def test_reembed_doc_raises_when_active_matches_own_version(
     )
     with pytest.raises(RuntimeError, match="already matches"):
         adapter.reembed_doc("doc-SR")
+
+
+# ---- OTel coverage for error paths --------------------------------------
+
+
+def _make_exporter() -> tuple[Any, Any]:
+    """Build an in-memory OTel span exporter and a TracerProvider wired to
+    it; return both so callers can install the provider via emb._tracer
+    rebinding and read finished spans after the test action."""
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return exporter, trace.get_tracer(__name__, tracer_provider=provider)
+
+
+def test_query_span_carries_materialization_version_even_on_mismatch_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When `_resolve_read_active` raises due to embed_model_version
+    mismatch, the OTel `extract.embed_query` span must STILL carry
+    `embedding.materialization_version` so dashboards bucketing error
+    rates by version don't lose the routing key."""
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        now_utc_iso,
+        write_active_materialization,
+    )
+
+    adapter_v1 = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter_v1.embed([_wrap(_make_child("query span mismatch", doc_id="doc-QM"))])
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version=adapter_v1.materialization_version,
+            embed_model_version=adapter_v1.embed_model_version,
+            promoted_at=now_utc_iso(),
+            manifest_count=1,
+        ),
+    )
+    monkeypatch.setattr(
+        "auto_research.extract.embeddings.EMBED_MODEL_VERSION_TAG", "v-mismatch"
+    )
+    adapter_v2 = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+
+    exporter, fake_tracer = _make_exporter()
+    import auto_research.extract.embeddings as emb
+
+    original_tracer = emb._tracer
+    emb._tracer = fake_tracer
+    try:
+        with pytest.raises(RuntimeError):
+            adapter_v2.query("anything", k=1, store="per_doc", doc_id="doc-QM")
+    finally:
+        emb._tracer = original_tracer
+
+    spans = exporter.get_finished_spans()
+    query_spans = [s for s in spans if s.name == "extract.embed_query"]
+    assert query_spans
+    attrs = query_spans[0].attributes or {}
+    assert (
+        attrs["embedding.materialization_version"]
+        == adapter_v2.materialization_version
+    )
+
+
+def test_reembed_doc_emits_precondition_error_span_when_no_active_pointer(
+    tmp_path: Path,
+) -> None:
+    """`_resolve_reembed_source_version` raises BEFORE `_reembed_table`
+    creates its OTel span; the wrapper code must emit a one-shot
+    `extract.reembed` error span so traces still bucket the failure."""
+    exporter, fake_tracer = _make_exporter()
+    import auto_research.extract.embeddings as emb
+
+    original_tracer = emb._tracer
+    emb._tracer = fake_tracer
+    try:
+        adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+        with pytest.raises(RuntimeError, match="no active materialization"):
+            adapter.reembed_doc("doc-NOPE")
+    finally:
+        emb._tracer = original_tracer
+
+    spans = exporter.get_finished_spans()
+    reembed_spans = [s for s in spans if s.name == "extract.reembed"]
+    assert reembed_spans, "precondition-error reembed span missing"
+    attrs = reembed_spans[0].attributes or {}
+    assert attrs["extract.outcome"] == "error"
+    assert "embedding.materialization_version" in attrs

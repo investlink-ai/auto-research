@@ -153,11 +153,25 @@ def read_active_materialization(rag_root: Path) -> ActiveMaterialization | None:
     to whatever default they want (typically the adapter's own
     materialization version, so a single-shot build+query session works
     without an explicit promote step).
+
+    A corrupted or partially-written JSON file is treated as a hard error
+    (not None) — silently degrading to "no pointer" on parse failure would
+    make a manual edit or filesystem corruption indistinguishable from
+    "fresh install" and mask the very condition that needs operator
+    intervention. The error names the file so the remediation is obvious.
     """
     p = _path_active(rag_root)
     if not p.exists():
         return None
-    raw = json.loads(p.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"active materialization pointer at {p} is not valid JSON "
+            f"({exc.__class__.__name__}: {exc}). Inspect the file by hand; "
+            "if corruption is recent, restore from the most recent "
+            "promotion_history.json entry."
+        ) from exc
     return ActiveMaterialization(
         version=raw["version"],
         embed_model_version=raw["embed_model_version"],
@@ -218,11 +232,22 @@ def read_promotion_history(rag_root: Path) -> list[ActiveMaterialization]:
     order; the same version slug may appear more than once if an operator
     promoted-then-demoted-then-repromoted (no special handling, the most
     recent occurrence wins for "current" semantics).
+
+    A corrupted history file raises (same policy as the active pointer):
+    silently treating it as empty would let `gc-materialization` start
+    deleting tables it should be keeping.
     """
     p = _path_history(rag_root)
     if not p.exists():
         return []
-    raw = json.loads(p.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"promotion history at {p} is not valid JSON "
+            f"({exc.__class__.__name__}: {exc}). Inspect the file by "
+            "hand; the active pointer is unaffected if it's intact."
+        ) from exc
     return [
         ActiveMaterialization(
             version=row["version"],

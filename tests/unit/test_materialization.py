@@ -252,3 +252,28 @@ def test_list_materializations_empty_rag_root(tmp_path: Path) -> None:
     assert list_materializations(tmp_path) == []
     nonexistent = tmp_path / "never"
     assert list_materializations(nonexistent) == []
+
+
+# ---- corrupted-JSON handling --------------------------------------------
+
+
+def test_read_active_raises_on_corrupted_json(tmp_path: Path) -> None:
+    """A manually-edited or partially-written `active_materialization.json`
+    must raise loudly rather than silently degrade to None — silent
+    degradation would make corruption indistinguishable from a fresh
+    install and mask the condition that needs operator intervention.
+    """
+    (tmp_path / ACTIVE_FILE_NAME).write_text("{ this is not json", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="not valid JSON"):
+        read_active_materialization(tmp_path)
+
+
+def test_read_promotion_history_raises_on_corrupted_json(tmp_path: Path) -> None:
+    """Same policy as the active pointer: corrupted history must not be
+    silently treated as empty, or gc would start deleting tables the
+    operator intended to keep."""
+    (tmp_path / PROMOTION_HISTORY_FILE_NAME).write_text(
+        "[ malformed", encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="not valid JSON"):
+        read_promotion_history(tmp_path)

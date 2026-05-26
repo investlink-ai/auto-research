@@ -203,3 +203,59 @@ def test_migrate_pointer_includes_real_embed_model_version_from_rows(
 
     raw = json.loads((tmp_path / ACTIVE_FILE_NAME).read_text())
     assert raw["embed_model_version"] == "voyage:voyage-finance-2:v1"
+
+
+def test_migrate_refuses_mixed_embed_model_versions(tmp_path: Path) -> None:
+    """A legacy rag_root containing rows under MULTIPLE distinct
+    `embed_model_version` stamps is exactly the failure mode the
+    materialization-versioned layout exists to mitigate. Sampling an
+    arbitrary value would make the read-path mismatch guard ineffective
+    against the other half of the corpus; the migration must refuse and
+    name the conflicting stamps so the operator can resolve them."""
+    import lancedb
+    import pyarrow as pa
+    import pytest as _pytest
+
+    from auto_research.extract.embeddings import _schema
+
+    db = lancedb.connect(tmp_path)
+    # Two legacy tables stamped with different embed_model_version values.
+    rows_a = [
+        {
+            "text": "voyage stamped row",
+            "vector": [0.0] * 1024,
+            "ticker": "NVDA",
+            "filing_date": "2025-03-15",
+            "fiscal_period": "FY2025",
+            "doc_type": "10-K",
+            "doc_id": "doc-A",
+            "parent_id": "doc-A:0:18",
+            "section_name": "Item 7",
+            "chunker_version": "v1",
+            "contextual_prompt_version": "v1",
+            "embed_model_version": "voyage:voyage-finance-2:v1",
+        }
+    ]
+    rows_b = [
+        {
+            "text": "bge stamped row",
+            "vector": [0.0] * 1024,
+            "ticker": "AMD",
+            "filing_date": "2025-04-15",
+            "fiscal_period": "FY2025",
+            "doc_type": "10-K",
+            "doc_id": "doc-B",
+            "parent_id": "doc-B:0:15",
+            "section_name": "Item 7",
+            "chunker_version": "v1",
+            "contextual_prompt_version": "v1",
+            "embed_model_version": "bge:bge-small-en-v1.5:v1",
+        }
+    ]
+    schema = _schema(1024)
+    db.create_table("doc-A", data=pa.Table.from_pylist(rows_a, schema=schema), schema=schema)
+    db.create_table("doc-B", data=pa.Table.from_pylist(rows_b, schema=schema), schema=schema)
+
+    script = _import_script()
+    with _pytest.raises(RuntimeError, match="multiple"):
+        script.migrate(tmp_path)  # type: ignore[attr-defined]

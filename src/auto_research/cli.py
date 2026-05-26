@@ -594,6 +594,36 @@ def extract_list_materializations(rag_root: Path) -> None:
         )
 
 
+_NARRATIVE_DOC_TYPES: frozenset[str] = frozenset({"10-K", "10-Q", "transcript"})
+
+
+def _expected_doc_ids_from_manifest(manifest_path: Path) -> set[str]:
+    """All `status='ok'` doc_ids from the manifest, regardless of source.
+
+    `manifest_mod.existing_doc_ids` requires an explicit `source` kwarg
+    and is designed for fetch-loop dedup. Promotion validation needs the
+    union across every source the project ingests — today just `edgar`,
+    but `fmp` and future sources land in the same manifest under
+    different `source` values and MUST be covered by the completeness
+    check or partial namespaces could be promoted as the source set
+    grows.
+    """
+    import pyarrow.parquet as pq
+
+    if not manifest_path.exists():
+        return set()
+    table = pq.read_table(manifest_path, columns=["doc_id", "status"])
+    return {
+        d
+        for d, st in zip(
+            table.column("doc_id").to_pylist(),
+            table.column("status").to_pylist(),
+            strict=True,
+        )
+        if st == "ok"
+    }
+
+
 def _validate_promotion_candidate(
     rag_root: Path,
     *,
@@ -606,24 +636,31 @@ def _validate_promotion_candidate(
 
     Validation gates:
 
-    1. **Namespace completeness.** Every `(source='edgar', status='ok')`
-       doc_id in the manifest must have a `{doc_id}__{version}.lance`
-       table. Partial namespaces are refused with the list of missing
-       doc_ids — promoting a partial namespace would silently regress
-       corpus coverage at query time.
-    2. **Dim consistency.** Every table under this version must declare
+    1. **Namespace completeness.** Every `status='ok'` doc_id in the
+       manifest (across all sources) must have a
+       `{doc_id}__{version}.lance` table. Partial namespaces are refused
+       with the list of missing doc_ids — promoting a partial namespace
+       would silently regress corpus coverage at query time.
+    2. **Corpus narrative presence.** If any of the per-doc tables has
+       a narrative `doc_type` (10-K, 10-Q, transcript), the per-corpus
+       narrative table at this version MUST exist; otherwise Signal
+       A1's `store='corpus_narrative'` queries fail at runtime with
+       `FileNotFoundError` against a freshly-promoted namespace.
+    3. **Dim consistency.** Every table under this version must declare
        the same vector dim. Promoting a mixed-dim namespace would
        produce silent query failures at the boundary between docs.
-    3. **embed_model_version row stamp consistency.** Every row in every
+    4. **embed_model_version row stamp consistency.** Every row in every
        table under this version must carry the same
        `embed_model_version` stamp; this is the value that lands in the
        active pointer for the read-path mismatch guard. Heterogeneity
        here is a bug in the build path; refusing here surfaces it
        early.
+    5. **Non-empty namespace.** At least one row must exist somewhere
+       in the namespace — otherwise the embed_model_version stamp is
+       unrecoverable and the pointer would land with a placeholder no
+       adapter could ever match.
     """
     import lancedb
-
-    from auto_research.ingest import manifest as manifest_mod
 
     if not rag_root.exists():
         raise click.UsageError(f"--rag-root {rag_root} does not exist")
@@ -633,9 +670,7 @@ def _validate_promotion_candidate(
     db = lancedb.connect(rag_root)
     table_names = set(db.table_names())
 
-    expected_doc_ids = manifest_mod.existing_doc_ids(
-        manifest_path, source="edgar"
-    )
+    expected_doc_ids = _expected_doc_ids_from_manifest(manifest_path)
     missing: list[str] = []
     for doc_id in sorted(expected_doc_ids):
         if versioned_table_name(doc_id, version) not in table_names:
@@ -651,15 +686,19 @@ def _validate_promotion_candidate(
         )
 
     # Dim + embed_model_version_stamp consistency across every table at
-    # this version (including the optional corpus narrative table).
-    candidate_bases = list(expected_doc_ids)
+    # this version (including the optional corpus narrative table). The
+    # corpus is appended LAST so any narrative-bearing per-doc table is
+    # observed first and establishes the reference dim / embed_model
+    # value before the corpus is compared against it.
+    candidate_bases = sorted(expected_doc_ids)
     candidate_bases.append(_PER_CORPUS_STORE)
     dim_seen: int | None = None
     embed_model_version_seen: str | None = None
+    narrative_doc_present = False
     for base in candidate_bases:
         name = versioned_table_name(base, version)
         if name not in table_names:
-            continue  # corpus is optional; per-docs were validated above
+            continue  # corpus presence handled separately below
         tbl = db.open_table(name)
         field_type = tbl.schema.field("vector").type
         dim = int(field_type.list_size)
@@ -684,11 +723,38 @@ def _validate_promotion_candidate(
                 f"{version!r}: {name!r} carries {emv!r} but earlier tables "
                 f"carry {embed_model_version_seen!r}. Refusing to promote."
             )
+        if (
+            base != _PER_CORPUS_STORE
+            and str(df_head["doc_type"].iloc[0]) in _NARRATIVE_DOC_TYPES
+        ):
+            narrative_doc_present = True
+
     if embed_model_version_seen is None:
-        # All target tables were empty — unusual, but the pointer needs
-        # a value. Fall back to a placeholder; in practice this only
-        # surfaces under odd test setups.
-        embed_model_version_seen = "unknown:unknown:unknown"
+        # No table had any rows. Refuse: the pointer's embed_model_version
+        # stamp is unrecoverable, and an "unknown:unknown:unknown"
+        # placeholder would make every subsequent query fail the
+        # read-path mismatch guard. The operator likely embedded a
+        # manifest whose docs all quarantined; surface that.
+        raise click.UsageError(
+            f"materialization {version!r} contains no rows in any table "
+            f"under {rag_root}. Refusing to promote a fully-empty "
+            "namespace — the active pointer's embed_model_version stamp "
+            "is unrecoverable and the read-path mismatch guard would "
+            "reject every subsequent query. Verify the embed sweep "
+            "actually populated rows."
+        )
+
+    corpus_name = versioned_table_name(_PER_CORPUS_STORE, version)
+    if narrative_doc_present and corpus_name not in table_names:
+        raise click.UsageError(
+            f"materialization {version!r} contains narrative documents "
+            f"(10-K / 10-Q / transcript) but no {corpus_name!r} table. "
+            "Signal A1's cross-doc retrieval queries the corpus store "
+            "and would fail with FileNotFoundError against this "
+            "namespace. Re-run the embed sweep to lazily-create the "
+            "corpus, or delete the narrative per-doc tables if cross-doc "
+            "retrieval is not required."
+        )
 
     active = ActiveMaterialization(
         version=version,
@@ -814,14 +880,33 @@ def extract_gc_materialization(
         return
 
     removed = 0
+    failed: list[tuple[str, str]] = []
     for _, name in to_remove:
         path = rag_root / f"{name}.lance"
-        if path.exists():
+        if not path.exists():
+            continue
+        # Wrap each rmtree so a single locked / read-only / EIO table
+        # doesn't abort the whole sweep. The CLI reports both removed and
+        # failed counts so operators can re-run safely after fixing the
+        # underlying cause (closing a stale LanceDB process, fixing
+        # permissions). Exit nonzero if any failed so make-target wiring
+        # surfaces the partial-failure.
+        try:
             shutil.rmtree(path)
             removed += 1
+        except OSError as exc:
+            click.echo(
+                f"warn: rmtree({path}) failed: "
+                f"{exc.__class__.__name__}: {exc}",
+                err=True,
+            )
+            failed.append((name, str(exc)))
     click.echo(
-        f"gc-materialization: kept={sorted(keep_set)} removed_tables={removed}"
+        f"gc-materialization: kept={sorted(keep_set)} "
+        f"removed_tables={removed} failed_tables={len(failed)}"
     )
+    if failed:
+        raise SystemExit(1)
 
 
 @cli.group(name="feast", help="Wrap the Feast CLI against feast_repo/.")

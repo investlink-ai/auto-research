@@ -1017,6 +1017,31 @@ class EmbeddingAdapter:
             )
         return active.version
 
+    def _emit_reembed_precondition_error(
+        self, exc: RuntimeError, *, span_doc_id: str | None
+    ) -> None:
+        """Emit a one-shot `extract.reembed` error span for failures raised
+        BEFORE `_reembed_table`'s own span context begins.
+
+        Without this, the "no active materialization" / "already at this
+        materialization" guards in `_resolve_reembed_source_version`
+        surface as Python exceptions but leave no trace in OTel — error
+        dashboards bucketing reembed attempts would silently undercount
+        precondition failures. Same span name as the normal path so
+        consumers don't need a second filter.
+        """
+        with _tracer.start_as_current_span("extract.reembed") as span:
+            span.set_attribute("extract.worker", _WORKER)
+            span.set_attribute("embedding.backend", self._backend)
+            span.set_attribute("embedding.model", self._model)
+            span.set_attribute(
+                "embedding.materialization_version", self.materialization_version
+            )
+            if span_doc_id is not None:
+                span.set_attribute("extract.doc_id", span_doc_id)
+            span.set_attribute("extract.outcome", "error")
+            span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+
     def reembed_doc(self, doc_id: str) -> int:
         """Re-encode rows of `<doc_id>` from the active materialization into
         this adapter's own namespace; return the row count.
@@ -1044,7 +1069,11 @@ class EmbeddingAdapter:
         current adapter's `_vector_dim` (cross-dim swaps imply a new
         vector space and must build a fresh corpus, not append).
         """
-        source_version = self._resolve_reembed_source_version()
+        try:
+            source_version = self._resolve_reembed_source_version()
+        except RuntimeError as exc:
+            self._emit_reembed_precondition_error(exc, span_doc_id=doc_id)
+            raise
         source_table = versioned_table_name(doc_id, source_version)
         dest_table = self._write_table_name(doc_id)
         n, new_rows = self._reembed_table(
@@ -1070,7 +1099,11 @@ class EmbeddingAdapter:
         table, and `reembed --all` over such a corpus must succeed
         silently rather than crash with `FileNotFoundError`.
         """
-        source_version = self._resolve_reembed_source_version()
+        try:
+            source_version = self._resolve_reembed_source_version()
+        except RuntimeError as exc:
+            self._emit_reembed_precondition_error(exc, span_doc_id=None)
+            raise
         source_table = versioned_table_name(_PER_CORPUS_STORE, source_version)
         dest_table = self._write_table_name(_PER_CORPUS_STORE)
         db = lancedb.connect(self._rag_root)
@@ -1116,6 +1149,13 @@ class EmbeddingAdapter:
             span.set_attribute("embedding.store", store)
             span.set_attribute("embedding.k", k)
             span.set_attribute("embedding.has_filter", where is not None)
+            # Stamp the adapter's materialization_version up front so the
+            # attribute is present even when `_read_table_name` raises on
+            # an active-pointer mismatch — dashboards bucketing errors by
+            # version still have a key to group on.
+            span.set_attribute(
+                "embedding.materialization_version", self.materialization_version
+            )
             if doc_id is not None:
                 span.set_attribute("extract.doc_id", doc_id)
             try:
@@ -1127,10 +1167,6 @@ class EmbeddingAdapter:
                     else _PER_CORPUS_STORE
                 )
                 table_name = self._read_table_name(base)
-                span.set_attribute(
-                    "embedding.materialization_version",
-                    table_name.rsplit("__", 1)[-1],
-                )
                 tbl = db.open_table(table_name)
                 builder = tbl.search(text, query_type="fts").limit(k)
                 if where:
@@ -1175,6 +1211,12 @@ class EmbeddingAdapter:
             span.set_attribute("embedding.store", store)
             span.set_attribute("embedding.k", k)
             span.set_attribute("embedding.has_filter", where is not None)
+            # Stamp the adapter's materialization_version up front so error
+            # spans from `_read_table_name`'s mismatch guard still carry the
+            # routing key dashboards filter by.
+            span.set_attribute(
+                "embedding.materialization_version", self.materialization_version
+            )
             if doc_id is not None:
                 span.set_attribute("extract.doc_id", doc_id)
             try:
@@ -1186,10 +1228,6 @@ class EmbeddingAdapter:
                     else _PER_CORPUS_STORE
                 )
                 table_name = self._read_table_name(base)
-                span.set_attribute(
-                    "embedding.materialization_version",
-                    table_name.rsplit("__", 1)[-1],
-                )
                 tbl = db.open_table(table_name)
                 # Voyage and Qwen3-MLX both consume input_type as the
                 # asymmetric-encoder switch on the query side (Voyage

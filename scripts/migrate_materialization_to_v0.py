@@ -44,17 +44,23 @@ from auto_research.extract.materialization import (
 
 
 def _sample_embed_model_version(rag_root: Path) -> str:
-    """Best-effort: read one row from any present LanceDB table to recover
-    the `embed_model_version` stamp produced by issue #67's row-level
-    columns. Falls back to a placeholder when the rag_root is empty or
-    rows lack the column (extremely old tables predating #67).
+    """Recover the `embed_model_version` stamp produced by issue #67's
+    row-level columns. Scans EVERY readable table in the rag_root,
+    collects the distinct `embed_model_version` values, and:
 
-    The pointer's `embed_model_version` matters at query time as the
-    mismatch guard: adapters configured for a different model than the
-    active pointer's value raise loudly. For the v0 migration we want
-    the real value from disk so an operator constructing an adapter
-    matched to the legacy corpus sees a clean read path; the
-    placeholder is only for the truly degenerate empty-rag_root case.
+    - returns the single value if every non-empty table agrees;
+    - returns the placeholder `"unknown:unknown:unknown"` if no table
+      has any rows (or none has the column, e.g., tables predating #67);
+    - raises `RuntimeError` listing the conflicting stamps if more than
+      one distinct value is found.
+
+    Sampling a single arbitrary table (the previous behavior) would bake
+    a non-deterministic embed_model_version into the v0 pointer when a
+    legacy layout contained a mixed-vector-space corpus — exactly the
+    failure mode `[[feedback-embedding-vector-space-consistency]]`
+    warns against. A mixed legacy layout SHOULD fail the migration
+    loudly; the operator then sorts the rag_root manually before
+    re-running.
     """
     import lancedb
 
@@ -65,7 +71,8 @@ def _sample_embed_model_version(rag_root: Path) -> str:
         table_names = db.table_names()
     except Exception:
         return "unknown:unknown:unknown"
-    for table_name in table_names:
+    distinct: set[str] = set()
+    for table_name in sorted(table_names):
         try:
             tbl = db.open_table(table_name)
             df = tbl.head(1).to_pandas()
@@ -78,8 +85,20 @@ def _sample_embed_model_version(rag_root: Path) -> str:
             continue
         if "embed_model_version" not in df.columns:
             continue
-        return str(df["embed_model_version"].iloc[0])
-    return "unknown:unknown:unknown"
+        distinct.add(str(df["embed_model_version"].iloc[0]))
+    if len(distinct) > 1:
+        raise RuntimeError(
+            "legacy rag_root contains tables under multiple "
+            f"embed_model_version stamps: {sorted(distinct)!r}. The "
+            "migration refuses to bake a single value into the v0 "
+            "active pointer because doing so would make the read-path "
+            "mismatch guard ineffective against the other half of the "
+            "corpus. Resolve manually (rebuild the inconsistent tables "
+            "or delete them) before re-running the migration."
+        )
+    if not distinct:
+        return "unknown:unknown:unknown"
+    return next(iter(distinct))
 
 
 def _is_legacy_unversioned_table(path: Path) -> bool:
