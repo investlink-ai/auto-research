@@ -323,6 +323,10 @@ class EmbeddingAdapter:
             raise ValueError("doc_id required when store='per_doc'")
         with _tracer.start_as_current_span("extract.bm25_query") as span:
             span.set_attribute("extract.worker", _WORKER)
+            # `embedding.backend`/`model` deliberately omitted: BM25 is
+            # purely lexical (Lance FTS over the `text` column) and is
+            # independent of which embedding backend produced the
+            # vector index alongside it.
             span.set_attribute("embedding.store", store)
             span.set_attribute("embedding.k", k)
             span.set_attribute("embedding.has_filter", where is not None)

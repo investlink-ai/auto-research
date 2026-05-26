@@ -97,9 +97,8 @@ def test_rrf_score_strictly_decreases_with_bm25_rank(
     r_bm25_lo: int, r_bm25_hi_offset: int, r_dense: int
 ) -> None:
     """Worse BM25 rank → strictly lower RRF score, fixed dense rank + weights."""
+    # offset strategy is `min_value=1` so `r_bm25_hi > r_bm25_lo` always holds.
     r_bm25_hi = r_bm25_lo + r_bm25_hi_offset
-    if r_bm25_hi == r_bm25_lo:
-        return
     bm25_lo = [f"d{i}" for i in range(r_bm25_lo - 1)] + ["x"]
     bm25_hi = [f"d{i}" for i in range(r_bm25_hi - 1)] + ["x"]
     dense = [f"e{i}" for i in range(r_dense - 1)] + ["x"]
@@ -119,9 +118,8 @@ def test_rrf_score_strictly_decreases_with_dense_rank(
     r_dense_lo: int, r_dense_hi_offset: int, r_bm25: int
 ) -> None:
     """Worse dense rank → strictly lower RRF score, fixed BM25 rank + weights."""
+    # offset strategy is `min_value=1` so `r_dense_hi > r_dense_lo` always holds.
     r_dense_hi = r_dense_lo + r_dense_hi_offset
-    if r_dense_hi == r_dense_lo:
-        return
     bm25 = [f"d{i}" for i in range(r_bm25 - 1)] + ["x"]
     dense_lo = [f"e{i}" for i in range(r_dense_lo - 1)] + ["x"]
     dense_hi = [f"e{i}" for i in range(r_dense_hi - 1)] + ["x"]
@@ -135,6 +133,14 @@ def test_rrf_only_includes_ids_present_in_at_least_one_ranking() -> None:
     """No phantom ids in the fused output."""
     out = dict(rrf_fuse(bm25_ranking=["a", "b"], dense_ranking=["b", "c"]))
     assert set(out.keys()) == {"a", "b", "c"}
+
+
+def test_rrf_fuse_rejects_non_positive_rrf_k() -> None:
+    """`rrf_k <= 0` would zero or invert the denominator. Reject early."""
+    with pytest.raises(ValueError, match="rrf_k must be positive"):
+        rrf_fuse(bm25_ranking=["a"], dense_ranking=["b"], rrf_k=0)
+    with pytest.raises(ValueError, match="rrf_k must be positive"):
+        rrf_fuse(bm25_ranking=["a"], dense_ranking=["b"], rrf_k=-1)
 
 
 # ---- AC4: weight monotonicity (pure rrf_fuse) --------------------------
@@ -205,6 +211,36 @@ def test_hybrid_retrieve_returns_per_source_scores_and_parents(
     assert h0.score > 0
 
 
+def test_hybrid_retrieve_rejects_invalid_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative weights would invert relevance; zero-sum skips both
+    retrievers and silently returns no hits. Reject both at the entry
+    point so the failure mode is loud, not silent.
+    """
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    parents = [_parent("anything", idx=0)]
+    adapter = EmbeddingAdapter(rag_root=tmp_path)
+    _embed_corpus(adapter, parents)
+    doc_id = parents[0].metadata.doc_id
+
+    with pytest.raises(ValueError, match="non-negative"):
+        hybrid_retrieve(
+            query="x", adapter=adapter, parents=parents, doc_id=doc_id,
+            k=3, bm25_weight=-1.0, dense_weight=1.0,
+        )
+    with pytest.raises(ValueError, match="non-negative"):
+        hybrid_retrieve(
+            query="x", adapter=adapter, parents=parents, doc_id=doc_id,
+            k=3, bm25_weight=1.0, dense_weight=-1.0,
+        )
+    with pytest.raises(ValueError, match="at least one"):
+        hybrid_retrieve(
+            query="x", adapter=adapter, parents=parents, doc_id=doc_id,
+            k=3, bm25_weight=0.0, dense_weight=0.0,
+        )
+
+
 def test_hybrid_retrieve_falls_back_to_dense_only_when_no_bm25_match(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -219,8 +255,10 @@ def test_hybrid_retrieve_falls_back_to_dense_only_when_no_bm25_match(
     adapter = EmbeddingAdapter(rag_root=tmp_path)
     _embed_corpus(adapter, parents)
 
-    # Query is semantically related ("trade restrictions") but shares no
-    # tokens with the corpus; BM25 returns nothing.
+    # Nonsense query — no lexical overlap with any chunk → BM25 returns
+    # zero hits. Dense always returns its top-k by distance regardless
+    # of similarity, so the hybrid result is non-empty and BM25 fields
+    # must be None on every hit.
     hits = hybrid_retrieve(
         query="zzzunmatchedtoken qqqotherrare",
         adapter=adapter,
@@ -229,10 +267,9 @@ def test_hybrid_retrieve_falls_back_to_dense_only_when_no_bm25_match(
         k=5,
         candidate_k=5,
     )
-    # Dense will still rank the closest chunks; BM25 has no lexical hits.
-    if hits:
-        assert all(h.bm25_rank is None and h.bm25_score is None for h in hits)
-        assert all(h.dense_rank is not None for h in hits)
+    assert hits, "dense always returns top-k; hybrid result should be non-empty"
+    assert all(h.bm25_rank is None and h.bm25_score is None for h in hits)
+    assert all(h.dense_rank is not None for h in hits)
 
 
 # ---- AC3: micro-corpus precision@5 -------------------------------------

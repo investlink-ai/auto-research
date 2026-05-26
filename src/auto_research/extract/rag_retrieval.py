@@ -71,6 +71,8 @@ def rrf_fuse(
     with the missing term set to 0. Returned list is sorted score
     descending; ties broken by id (lexicographic) for determinism.
     """
+    if rrf_k <= 0:
+        raise ValueError(f"rrf_k must be positive; got {rrf_k}")
     bm25_ranks = {doc: i + 1 for i, doc in enumerate(bm25_ranking)}
     dense_ranks = {doc: i + 1 for i, doc in enumerate(dense_ranking)}
     keys = set(bm25_ranks) | set(dense_ranks)
@@ -122,6 +124,13 @@ def hybrid_retrieve(
     """Run BM25 and dense in parallel over the adapter's per-doc store
     and fuse via RRF.
 
+    **Scope: per-doc only.** Operates against `adapter.bm25_query(...,
+    store="per_doc", doc_id=...)` and the matching dense `query(...)`.
+    Cross-doc / corpus-wide retrieval (Signal A1 in W3) needs a
+    different `parents`-resolution shape — passing the full corpus
+    parent set is impractical at 10⁴-10⁵ rows — and will land its own
+    entry point rather than extending this signature.
+
     `candidate_k` controls how many children each retriever pulls before
     fusion; the final result is the top-`k` parents after RRF. Setting
     `dense_weight=0` (or `bm25_weight=0`) skips the corresponding side —
@@ -131,6 +140,16 @@ def hybrid_retrieve(
     D7 — ticker/filing_date scoping is a corpus property, not a
     retriever-specific concern).
     """
+    if bm25_weight < 0 or dense_weight < 0:
+        raise ValueError(
+            f"weights must be non-negative; got bm25_weight={bm25_weight} "
+            f"dense_weight={dense_weight}"
+        )
+    if bm25_weight + dense_weight <= 0:
+        raise ValueError(
+            "at least one of bm25_weight, dense_weight must be positive "
+            "(both zero would skip both retrievers and return no hits)"
+        )
     with _tracer.start_as_current_span("extract.hybrid_retrieve") as span:
         span.set_attribute("extract.worker", _WORKER)
         span.set_attribute("extract.doc_id", doc_id)
