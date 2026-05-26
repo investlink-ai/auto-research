@@ -43,6 +43,19 @@ setup-mlx:
 		echo "setup-mlx: skipped (non-Apple-Silicon host); MLX backend is Mac-only."; \
 	fi
 
+# Cross-platform Qwen3-Reranker warmup. Pre-pulls the 0.6B weights
+# (~1.2 GB) into the HuggingFace cache so the conftest's session-autouse
+# fixture serves hermetic tests without network access. Loads on CPU
+# regardless of host (the cache entry is keyed by device, so the MPS
+# entry on Apple Silicon is still lazily populated by the first test
+# that exercises it). The 4B variant (~8 GB) is opt-in via
+# `QWEN3_FULL=1`. Idempotent.
+setup-reranker:
+	uv run python -c "from auto_research.extract.rerank import _ensure_qwen3_reranker_warmup; _ensure_qwen3_reranker_warmup('Qwen3-Reranker-0.6B', 'cpu', 'fp32')"
+	@if [ "$$QWEN3_FULL" = "1" ]; then \
+		uv run python -c "from auto_research.extract.rerank import _ensure_qwen3_reranker_warmup; _ensure_qwen3_reranker_warmup('Qwen3-Reranker-4B', 'cpu', 'fp32')"; \
+	fi
+
 # Full local gate: + integration. Requires `docker compose up -d` first.
 check-full: quick test integration
 

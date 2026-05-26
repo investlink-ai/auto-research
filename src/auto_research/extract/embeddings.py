@@ -36,13 +36,14 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
-from functools import cached_property
+from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
 import lancedb
 import numpy as np
 import pyarrow as pa
+from lancedb.pydantic import LanceModel, Vector
 from numpy.typing import NDArray
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
@@ -360,29 +361,50 @@ def _ensure_bge_warmup() -> Any:
     return _BGE_MODEL
 
 
+@lru_cache(maxsize=8)
+def _row_model(vector_dim: int) -> type[LanceModel]:
+    """Pydantic row model for one `vector_dim` schema namespace.
+
+    Used both to derive `pa.Schema` (via `to_arrow_schema()`) and as a
+    typed row class for callers that prefer Pydantic instances over
+    raw dicts. The function factory is needed because `Vector(N)` pins
+    the dim at class-definition time and our adapter serves multiple
+    dims (Voyage 1024, BGE 384, Qwen3-0.6B 1024, Qwen3-4B 2560);
+    `lru_cache` keeps each dim's class identity stable so downstream
+    `isinstance` checks behave.
+
+    `chunker_version` / `contextual_prompt_version` / `embed_model_version`
+    stamp each row with the three pure-function contracts that produced
+    it; provenance is recoverable per-row.
+    """
+
+    class ChunkRow(LanceModel):  # type: ignore[misc]
+        text: str
+        vector: Vector(vector_dim)  # type: ignore[valid-type]
+        ticker: str
+        filing_date: str
+        fiscal_period: str
+        doc_type: str
+        doc_id: str
+        parent_id: str
+        section_name: str
+        chunker_version: str
+        contextual_prompt_version: str
+        embed_model_version: str
+
+    return ChunkRow
+
+
 def _schema(vector_dim: int) -> pa.Schema:
-    # `chunker_version` / `contextual_prompt_version` / `embed_model_version`
-    # stamp each row with the three pure-function contracts that produced
-    # it. At backfill scope these enable point-in-time provenance queries
-    # ("which rows came from chunker v3?") and back the materialization-
-    # versioned tables follow-up; at present they are write-only audit
-    # metadata. Same-name string values use `pa.string()` rather than
-    # dictionary-encoding — cardinality is tiny but per-row cost stays
-    # negligible at the corpus sizes LanceDB handles here.
-    return pa.schema([
-        ("text", pa.string()),
-        ("vector", pa.list_(pa.float32(), vector_dim)),
-        ("ticker", pa.string()),
-        ("filing_date", pa.string()),
-        ("fiscal_period", pa.string()),
-        ("doc_type", pa.string()),
-        ("doc_id", pa.string()),
-        ("parent_id", pa.string()),
-        ("section_name", pa.string()),
-        ("chunker_version", pa.string()),
-        ("contextual_prompt_version", pa.string()),
-        ("embed_model_version", pa.string()),
-    ])
+    """Arrow schema for a `vector_dim`-dim RAG table.
+
+    Derived from the Pydantic `LanceModel` so the row contract has a
+    single source of truth — `pa.Schema` is the storage view of
+    `_row_model(vector_dim)`. The Pydantic-derived schema marks all
+    fields as `not null`; row construction in `_rows()` guarantees
+    non-null inputs (every dataclass field used here is non-Optional).
+    """
+    return _row_model(vector_dim).to_arrow_schema()
 
 
 @dataclass(frozen=True)
