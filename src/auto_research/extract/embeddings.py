@@ -214,6 +214,24 @@ _VOYAGE_RETRY_WAIT_INITIAL = 20.0
 _VOYAGE_RETRY_WAIT_MAX = 120.0
 _VOYAGE_RETRY_ATTEMPTS = 6
 
+# Voyage USD price per 1M tokens, keyed by model id. Used only by
+# `EmbeddingAdapter.reembed_*` dry-run cost estimation; nothing in the
+# normal embed path reads this. Source: voyageai.com/pricing as of the
+# project's account onboarding (constrained tier, finance-2 + 3.x family
+# at $0.12/MTok). Bump or split when Voyage publishes a different rate;
+# missing entries cause dry-run to report `unknown` rather than crash.
+#
+# BGE / Qwen3-MLX backends are in-process and report $0.0 — encoded as
+# absence from this dict and special-cased in the dry-run formatter.
+_VOYAGE_USD_PER_MTOK: dict[str, float] = {
+    "voyage-finance-2": 0.12,
+    "voyage-3": 0.06,
+    "voyage-3-large": 0.18,
+    "voyage-3.5": 0.06,
+    "voyage-4": 0.12,
+    "voyage-4-large": 0.18,
+}
+
 # LanceDB FTS kwargs applied identically to the per-doc and per-corpus
 # narrative tables. Pulled to a module constant so the two `create_fts_
 # index` callsites stay in sync — diverging tokenizer / stopword / stem
@@ -660,6 +678,237 @@ class EmbeddingAdapter:
                 span.set_attribute("extract.outcome", "error")
                 span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
                 raise
+
+    def _existing_vector_dim(self, table: Any) -> int:
+        """Read the fixed-size vector column dim from a LanceDB table schema.
+
+        The vector column is declared as `pa.list_(pa.float32(), N)` at
+        write-time (see `_schema`); arrow surfaces `N` as the field type's
+        `list_size`. Used by the reembed path to refuse cross-dim swaps
+        loudly instead of silently corrupting a mixed-vector-space corpus.
+        """
+        field_type = table.schema.field("vector").type
+        return int(field_type.list_size)
+
+    def _assert_dim_compatible(self, table: Any, label: str) -> None:
+        existing = self._existing_vector_dim(table)
+        if existing != self._vector_dim:
+            raise RuntimeError(
+                f"reembed dim mismatch for {label}: existing vectors are "
+                f"{existing}-dim but current adapter "
+                f"(backend={self._backend!r} model={self._model!r}) produces "
+                f"{self._vector_dim}-dim. Same-dim cross-encoder swaps are the "
+                "caller's responsibility, but a dim change means a new vector "
+                "space — build a new corpus instead of re-embedding in place."
+            )
+
+    def _rows_from_existing(
+        self, df: Any, vectors: NDArray[np.float32]
+    ) -> list[dict[str, object]]:
+        """Build row dicts from an existing LanceDB dataframe + new vectors.
+
+        Metadata columns + `chunker_version` + `contextual_prompt_version`
+        are preserved byte-for-byte from the source row — by definition this
+        path is encoder-only, so those upstream-contract stamps must NOT be
+        re-stamped to the current module-level values (that would lie about
+        which chunker contract produced the row). Only `vector` and
+        `embed_model_version` are updated.
+        """
+        embed_version = self.embed_model_version
+        rows: list[dict[str, object]] = []
+        for (_, row), vec in zip(df.iterrows(), vectors, strict=True):
+            rows.append({
+                "text": row["text"],
+                "vector": vec.tolist(),
+                "ticker": row["ticker"],
+                "filing_date": row["filing_date"],
+                "fiscal_period": row["fiscal_period"],
+                "doc_type": row["doc_type"],
+                "doc_id": row["doc_id"],
+                "parent_id": row["parent_id"],
+                "section_name": row["section_name"],
+                "chunker_version": row["chunker_version"],
+                "contextual_prompt_version": row["contextual_prompt_version"],
+                "embed_model_version": embed_version,
+            })
+        return rows
+
+    def _reembed_table(
+        self, table_name: str, *, span_doc_id: str | None
+    ) -> tuple[int, list[dict[str, object]]]:
+        """Shared body for `reembed_doc` / `reembed_corpus`.
+
+        Reads the existing table's `text` column, re-encodes with the
+        adapter's current backend/model, overwrites the table in place
+        with the new vectors (preserving metadata), and rebuilds the FTS
+        index with `_FTS_INDEX_KWARGS`.
+
+        Returns `(rows_reencoded, new_rows)` — callers (specifically
+        `reembed_doc`) reuse the encoded rows to propagate vectors into
+        the per-corpus narrative store without re-encoding (issue #68
+        review finding #1).
+
+        Empty-table case short-circuits BEFORE the dim check — there is
+        nothing to corrupt in a zero-row table, so refusing it on dim
+        grounds (finding #10) would surprise operators who hit an empty
+        placeholder during a re-embed sweep. Non-empty tables still
+        fail loudly on dim drift.
+
+        `span_doc_id` is only set for per-doc reembeds — the per-corpus
+        store contains rows from many docs, so the OTel `extract.doc_id`
+        attribute is omitted for it (matching the behavior of `embed`
+        which only sets it on the per-doc surface).
+        """
+        with _tracer.start_as_current_span("extract.reembed") as span:
+            span.set_attribute("extract.worker", _WORKER)
+            span.set_attribute("embedding.backend", self._backend)
+            span.set_attribute("embedding.model", self._model)
+            span.set_attribute("embedding.store", table_name)
+            if span_doc_id is not None:
+                span.set_attribute("extract.doc_id", span_doc_id)
+            try:
+                db = lancedb.connect(self._rag_root)
+                tbl = db.open_table(table_name)
+                df = tbl.to_pandas()
+                n = len(df)
+                if n == 0:
+                    span.set_attribute("embedding.rows_reencoded", 0)
+                    span.set_attribute("embedding.narrative_count", 0)
+                    span.set_attribute("extract.outcome", "success")
+                    return (0, [])
+                self._assert_dim_compatible(tbl, table_name)
+                texts = df["text"].tolist()
+                vectors = self._encode(texts, input_type="document")
+                new_rows = self._rows_from_existing(df, vectors)
+                schema = _schema(self._vector_dim)
+                new_tbl = db.create_table(
+                    table_name, data=new_rows, schema=schema, mode="overwrite"
+                )
+                new_tbl.create_fts_index("text", **_FTS_INDEX_KWARGS)
+                narrative_count = sum(
+                    1 for r in new_rows if r["doc_type"] in NARRATIVE_DOC_TYPES
+                )
+                span.set_attribute("embedding.rows_reencoded", n)
+                span.set_attribute("embedding.narrative_count", narrative_count)
+                span.set_attribute("extract.outcome", "success")
+                return (n, new_rows)
+            except Exception as exc:
+                span.set_attribute("extract.outcome", "error")
+                span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+                raise
+
+    def _propagate_to_corpus(
+        self, new_rows: list[dict[str, object]]
+    ) -> int:
+        """Push fresh vectors for the narrative-eligible rows of one doc into
+        the per-corpus narrative store by deleting the doc's existing
+        corpus rows and re-inserting the new ones in a single LanceDB
+        transaction-equivalent pair.
+
+        Encoder-only: no `_encode` call here. Vectors are copied from
+        `new_rows` (already computed by the caller's `_reembed_table`
+        invocation).
+
+        No-ops in three cases:
+        - `new_rows` is empty (caller just reembedded an empty per-doc
+          table).
+        - None of `new_rows` are narrative-eligible (S-1 / S-3 / 8-K /
+          DEF 14A doc types).
+        - The corpus table does not exist yet (no narrative doc has ever
+          been embedded under this rag_root). Per the original `embed()`
+          contract, the corpus is lazily created when the first
+          narrative chunk lands; we honor that — re-embedding a doc
+          that is not narrative-eligible must not create an empty
+          corpus.
+
+        Implementation note: `merge_insert(on=...)` looked tempting but
+        no LanceDB column is a unique chunk identifier — `parent_id` is
+        shared across the multiple child chunks of one parent, and
+        `(parent_id, text)` would require a composite join key that
+        LanceDB's merge_insert handles awkwardly with duplicate-key
+        source rows. Delete-by-doc-id + insert is the simplest
+        primitive that matches the embed-time write semantics exactly:
+        every embed() call appends one doc's narrative rows; this path
+        replaces them. Single-quoted SQL literal is safe because
+        `doc_id` is validated at chunking time (no embedded quotes in
+        the doc_id grammar) and we further reject any `'` defensively.
+        """
+        narrative_rows = [
+            r for r in new_rows if r["doc_type"] in NARRATIVE_DOC_TYPES
+        ]
+        if not narrative_rows:
+            return 0
+        db = lancedb.connect(self._rag_root)
+        if _PER_CORPUS_STORE not in db.table_names():
+            return 0
+        # All narrative_rows share the same doc_id by construction
+        # (caller is _reembed_table for a single per-doc table).
+        doc_id = str(narrative_rows[0]["doc_id"])
+        if "'" in doc_id:
+            raise ValueError(
+                f"doc_id {doc_id!r} contains a single quote; refusing to "
+                "build the corpus-delete SQL predicate. Sanitize upstream."
+            )
+        corpus_tbl = db.open_table(_PER_CORPUS_STORE)
+        corpus_tbl.delete(f"doc_id = '{doc_id}'")
+        # Reuse the same fixed-size-list schema the original embed() path
+        # writes; pa.Table.from_pylist needs the schema to lock in
+        # `pa.list_(pa.float32(), dim)` instead of inferring a variable-
+        # length list from the row dicts (which would mismatch the corpus
+        # table's column type and fail the add).
+        schema = _schema(self._vector_dim)
+        new_data = pa.Table.from_pylist(narrative_rows, schema=schema)
+        corpus_tbl.add(new_data)
+        return len(narrative_rows)
+
+    def reembed_doc(self, doc_id: str) -> int:
+        """Re-encode rows of `<doc_id>` against current backend; return count.
+
+        Encoder-only path: the `text` column (already the contextual prefix
+        + chunk text concatenation from the original `embed()` call) is
+        re-encoded, no Anthropic / contextual-chunking calls are made,
+        upstream chunker output is not touched. This is the cost-saving
+        primitive for embed-model swaps at backfill scope.
+
+        Also propagates the new vectors into the per-corpus narrative
+        store for this doc's narrative-eligible rows via vector-copy
+        (no second encoder pass). This keeps the two stores in the same
+        vector space after a per-doc reembed — without this propagation,
+        store='corpus_narrative' queries would silently return stale
+        vectors for rows whose per-doc table was just refreshed
+        (review finding #1).
+
+        Raises `RuntimeError` if the existing vectors' dim does not match
+        the current adapter's `_vector_dim` — a dim change means a new
+        vector space and re-embedding in place would corrupt the table.
+        Same-dim cross-encoder swaps (e.g., voyage-finance-2 ↔ Qwen3-0.6B,
+        both 1024-dim) are NOT detected here; the caller is responsible
+        for sticking to within-backend swaps or treating cross-backend as
+        a new corpus.
+        """
+        n, new_rows = self._reembed_table(doc_id, span_doc_id=doc_id)
+        self._propagate_to_corpus(new_rows)
+        return n
+
+    def reembed_corpus(self) -> int:
+        """Re-encode the `_corpus_narrative` table in place; return count.
+
+        Same encoder-only semantics as `reembed_doc`. The corpus narrative
+        store aggregates rows from many docs; re-encoding it on its own
+        is correct because every row's `text` column already contains the
+        embedding-ready string written by the original `embed()` call.
+
+        Returns 0 (no-op) when the corpus table does not exist — a
+        rag_root populated solely from non-narrative doc_types (S-1,
+        S-3, 8-K, DEF 14A) has no `_corpus_narrative` table, and
+        `reembed --all` over such a corpus must succeed silently rather
+        than crash with `FileNotFoundError` (review finding #3).
+        """
+        db = lancedb.connect(self._rag_root)
+        if _PER_CORPUS_STORE not in db.table_names():
+            return 0
+        n, _ = self._reembed_table(_PER_CORPUS_STORE, span_doc_id=None)
+        return n
 
     def bm25_query(
         self,
