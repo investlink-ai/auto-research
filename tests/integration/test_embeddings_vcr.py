@@ -23,6 +23,11 @@ CASSETTE_PATH = (
     / "voyage_embed_finance_v2.yaml"
 )
 
+REEMBED_CASSETTE_PATH = (
+    Path(__file__).parent / "cassettes" / "test_embeddings"
+    / "voyage_reembed_finance_v2.yaml"
+)
+
 
 def _build_vcr() -> vcr.VCR:
     return vcr.VCR(
@@ -37,11 +42,19 @@ def _build_vcr() -> vcr.VCR:
 @pytest.fixture
 def voyage_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VOYAGE_MODEL", raising=False)
-    # On replay (cassette exists), supply a dummy key so the adapter picks
-    # the voyage backend; the live header is redacted by `filter_headers`
-    # in the cassette anyway. On record, leave the shell-provided key
-    # alone — overriding it would 401 against the live endpoint.
-    if CASSETTE_PATH.exists() and not os.environ.get("VOYAGE_API_KEY"):
+    # On replay (any cassette this module references exists), supply a
+    # dummy key so the adapter picks the voyage backend; the live header
+    # is redacted by `filter_headers` in the cassette anyway. On record,
+    # leave the shell-provided key alone — overriding it would 401
+    # against the live endpoint.
+    #
+    # Review finding #13: pre-fix this only checked CASSETTE_PATH (the
+    # embed cassette), so a session with the reembed cassette but not
+    # the embed cassette would fail to inject the dummy key and the
+    # reembed test would crash in _voyage_client looking for a real
+    # VOYAGE_API_KEY. Now any cassette this module owns is sufficient.
+    any_cassette = CASSETTE_PATH.exists() or REEMBED_CASSETTE_PATH.exists()
+    if any_cassette and not os.environ.get("VOYAGE_API_KEY"):
         monkeypatch.setenv("VOYAGE_API_KEY", "vk-test-not-a-real-key")
 
 
@@ -84,12 +97,6 @@ def test_voyage_embed_round_trip_against_recorded_response(
     assert (tmp_path / "_corpus_narrative.lance").exists()
 
 
-REEMBED_CASSETTE_PATH = (
-    Path(__file__).parent / "cassettes" / "test_embeddings"
-    / "voyage_reembed_finance_v2.yaml"
-)
-
-
 def test_voyage_reembed_doc_round_trip_against_recorded_response(
     tmp_path: Path, voyage_env: None
 ) -> None:
@@ -118,9 +125,21 @@ def test_voyage_reembed_doc_round_trip_against_recorded_response(
 
     adapter = EmbeddingAdapter(backend="voyage", rag_root=tmp_path)
     chunks = [_chunk("Reembed round-trip text against voyage-finance-2")]
-    with _build_vcr().use_cassette(REEMBED_CASSETTE_PATH.name):
+    with _build_vcr().use_cassette(REEMBED_CASSETTE_PATH.name) as cassette:
         adapter.embed(chunks)
         n = adapter.reembed_doc("doc-vcr")
+        # Review finding #12: assert the call-count contract directly.
+        # The encoder-only reembed must hit Voyage exactly once for the
+        # re-encode (after embed's one call) — a regression where
+        # reembed_doc accidentally re-invokes embed() internally
+        # (doubling Voyage spend and reintroducing Anthropic calls)
+        # would otherwise pass the dim/text/count round-trip below.
+        # The corpus-propagation vector-copy is a metadata-only op
+        # (LanceDB merge_insert) and must NOT add a third request.
+        assert len(cassette.requests) == 2, (
+            f"expected exactly 2 POST /v1/embeddings calls (1 embed + "
+            f"1 reembed_doc); got {len(cassette.requests)}"
+        )
 
     assert n == 1
     df = lancedb.connect(tmp_path).open_table("doc-vcr").to_pandas()

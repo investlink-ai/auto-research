@@ -1116,3 +1116,192 @@ def test_reembed_doc_empty_table_short_circuits(
     n = adapter.reembed_doc("doc-EMPTY")
     assert n == 0
     assert encode_calls == [], "encoder must not be called for an empty table"
+
+
+def test_reembed_doc_propagates_new_vectors_into_corpus_narrative(
+    tmp_path: Path,
+) -> None:
+    """Review finding #1: after reembed_doc(X), the per-corpus narrative
+    rows for doc X must carry the new encoder's vectors and stamp, not the
+    pre-reembed ones. Without this propagation, store='corpus_narrative'
+    silently returns stale vectors for the same parent_ids whose per-doc
+    table was just refreshed — the mixed-vector-space failure mode the
+    module preamble warns against.
+    """
+    import lancedb
+
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter.embed([
+        _wrap(_make_child("narrative passage one", doc_id="doc-PROP")),
+        _wrap(_make_child("narrative passage two", doc_id="doc-PROP")),
+    ])
+
+    db = lancedb.connect(tmp_path)
+    before_corpus = db.open_table("_corpus_narrative").to_pandas()
+    assert len(before_corpus) == 2
+
+    # Bump the embed-model-version tag so the new corpus rows are
+    # distinguishable from the original embed-time write.
+    import auto_research.extract.embeddings as emb
+
+    original_tag = emb.EMBED_MODEL_VERSION_TAG
+    try:
+        emb.EMBED_MODEL_VERSION_TAG = "v999"
+        adapter.reembed_doc("doc-PROP")
+    finally:
+        emb.EMBED_MODEL_VERSION_TAG = original_tag
+
+    after_corpus = db.open_table("_corpus_narrative").to_pandas()
+    assert len(after_corpus) == 2
+    # The corpus rows for doc-PROP must reflect the new embed-model-version
+    # stamp — proving the vector-copy fired, not just the per-doc rewrite.
+    for stamp in after_corpus["embed_model_version"]:
+        assert stamp.endswith(":v999"), (
+            f"corpus row stamp {stamp!r} was not updated by reembed_doc; "
+            "vector-copy into _corpus_narrative did not fire"
+        )
+    # Per-doc table got the same new stamp.
+    after_doc = db.open_table("doc-PROP").to_pandas()
+    for stamp in after_doc["embed_model_version"]:
+        assert stamp.endswith(":v999")
+
+    # Re-affirm that EMBED_MODEL_VERSION_TAG is restored — defends the
+    # finally-clause against accidental leakage into later tests.
+    assert original_tag == emb.EMBED_MODEL_VERSION_TAG
+
+
+def test_reembed_doc_non_narrative_doc_does_not_touch_corpus(
+    tmp_path: Path,
+) -> None:
+    """Non-narrative doc_types (S-1, S-3, 8-K, DEF 14A) are never written
+    to _corpus_narrative by embed(). reembed_doc on such a doc must not
+    create or write to the corpus table — the vector-copy hook must
+    no-op for non-narrative-eligible rows.
+    """
+    import lancedb
+
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter.embed([
+        _wrap(_make_child("s-filing passage", doc_id="doc-S1", doc_type="S-1")),
+    ])
+
+    db = lancedb.connect(tmp_path)
+    # embed() did not create the corpus table for a non-narrative doc.
+    assert "_corpus_narrative" not in db.table_names()
+
+    adapter.reembed_doc("doc-S1")
+
+    # reembed_doc did not create one either.
+    assert "_corpus_narrative" not in db.table_names()
+
+
+def test_reembed_doc_does_not_re_encode_for_corpus_propagation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The corpus-propagation path must REUSE the vectors computed during
+    the per-doc re-encode rather than calling the encoder a second time.
+    Otherwise --all reverts to the 2x-cost regime review finding #2
+    flagged.
+    """
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter.embed([
+        _wrap(_make_child(f"prop-cost passage {i}", doc_id="doc-COST"))
+        for i in range(3)
+    ])
+
+    encode_call_count = 0
+    original_encode = adapter._encode
+
+    def _count(texts: list[str], *, input_type: str = "document") -> object:
+        nonlocal encode_call_count
+        encode_call_count += 1
+        return original_encode(texts, input_type=input_type)
+
+    monkeypatch.setattr(adapter, "_encode", _count)
+
+    adapter.reembed_doc("doc-COST")
+
+    assert encode_call_count == 1, (
+        f"reembed_doc invoked the encoder {encode_call_count} times; expected "
+        "exactly 1 (per-doc only — corpus propagates via vector-copy)"
+    )
+
+
+def test_reembed_corpus_missing_table_returns_zero(tmp_path: Path) -> None:
+    """Review finding #3: a rag_root populated solely from non-narrative
+    doc_types never produces a `_corpus_narrative` table. reembed_corpus
+    must return 0 silently rather than raise FileNotFoundError, so
+    `extract reembed --all` over a non-narrative corpus succeeds.
+    """
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter.embed([
+        _wrap(_make_child("s-filing only", doc_id="doc-NONARR", doc_type="S-1")),
+    ])
+
+    n = adapter.reembed_corpus()
+    assert n == 0
+
+
+def test_reembed_doc_dim_check_runs_only_for_non_empty_tables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding #10: the empty-table short-circuit must precede the
+    dim-mismatch check. An empty placeholder table with a 384-dim schema
+    reembedded by a 1024-dim adapter has zero rows to corrupt — the
+    operation should no-op, not raise.
+    """
+    import lancedb
+    import pyarrow as pa
+
+    from auto_research.extract.embeddings import _schema
+
+    # Write an empty 384-dim table directly.
+    db = lancedb.connect(tmp_path)
+    schema_384 = _schema(384)
+    db.create_table("doc-EMPTY-DIM", data=pa.Table.from_pylist([], schema=schema_384))
+
+    # Construct an adapter that produces 1024-dim vectors (qwen3-mlx).
+    _install_fake_mlx(monkeypatch, dim=1024)
+    adapter = EmbeddingAdapter(backend="qwen3-mlx", rag_root=tmp_path)
+    n = adapter.reembed_doc("doc-EMPTY-DIM")
+    assert n == 0
+
+
+def test_reembed_doc_emits_otel_narrative_count_attribute(tmp_path: Path) -> None:
+    """Review finding #14: the OTel `extract.reembed` span must carry the
+    `embedding.narrative_count` attribute that the original embed span
+    emits, so dashboards joining the two span sources see consistent
+    schema and can track the narrative-eligible fraction of reembed work.
+    """
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    # Rebind the embeddings module's tracer at the source so the span
+    # produced inside _reembed_table flows to our exporter.
+    import auto_research.extract.embeddings as emb
+
+    original_tracer = emb._tracer
+    emb._tracer = trace.get_tracer(__name__, tracer_provider=provider)
+    try:
+        adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+        adapter.embed([
+            _wrap(_make_child("narrative one", doc_id="doc-OTEL")),
+        ])
+        exporter.clear()
+        adapter.reembed_doc("doc-OTEL")
+    finally:
+        emb._tracer = original_tracer
+
+    spans = exporter.get_finished_spans()
+    reembed_spans = [s for s in spans if s.name == "extract.reembed"]
+    assert reembed_spans, "no extract.reembed span emitted"
+    attrs = reembed_spans[0].attributes or {}
+    assert "embedding.narrative_count" in attrs
+    assert attrs["embedding.narrative_count"] == 1

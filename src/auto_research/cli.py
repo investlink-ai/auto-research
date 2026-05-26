@@ -29,15 +29,12 @@ import httpx
 import pyarrow.parquet as pq
 
 from auto_research._io import atomic_write_text
+from auto_research.extract.embeddings import _PER_CORPUS_STORE
 from auto_research.extract.workers.s_filings import extract_s_filing
 from auto_research.ingest.edgar import EdgarConfigError, fetch_filings_for_cik
 from auto_research.telemetry import try_init_telemetry
 
 _DEFAULT_RAG_ROOT = Path("data/rag")
-# Per-corpus narrative table name (mirrors `extract.embeddings._PER_CORPUS_STORE`).
-# Surfaced in the CLI so `--all` can exclude it from the per-doc walk and so
-# `--corpus` has a single source of truth for the table name.
-_PER_CORPUS_STORE = "_corpus_narrative"
 
 _ENV_VAR_EPILOG = """
 \b
@@ -271,25 +268,47 @@ def _resolve_reembed_targets(
 
     `--doc-id X` → (["X"], False); `--corpus` → ([], True); `--all` →
     (every `<rag_root>/*.lance` directory minus `_corpus_narrative`,
-    True). Raises `click.UsageError` if zero or multiple were passed.
+    False — corpus rows are propagated by per-doc reembed via vector-
+    copy, so --all does NOT separately re-encode the corpus).
+
+    Raises `click.UsageError` if zero or multiple targets were passed,
+    if `--doc-id` is an empty string, or if `--doc-id` is the reserved
+    corpus-store name (review findings #9 and #15).
     """
-    chosen = [name for name, val in (
-        ("--doc-id", doc_id),
-        ("--corpus", corpus),
-        ("--all", all_),
-    ) if val]
+    # Treat `doc_id` presence by identity rather than truthiness so
+    # `--doc-id ""` raises a meaningful error rather than being silently
+    # dropped as 'not specified'.
+    chosen: list[str] = []
+    if doc_id is not None:
+        chosen.append("--doc-id")
+    if corpus:
+        chosen.append("--corpus")
+    if all_:
+        chosen.append("--all")
     if len(chosen) != 1:
         raise click.UsageError(
             f"exactly one of --doc-id, --corpus, --all is required; got "
             f"{chosen if chosen else 'none'}"
         )
     if doc_id is not None:
+        if not doc_id:
+            raise click.UsageError("--doc-id must be a non-empty string")
+        if doc_id == _PER_CORPUS_STORE:
+            raise click.UsageError(
+                f"--doc-id={doc_id!r} is the reserved corpus-narrative "
+                "table name. Use --corpus to re-embed it explicitly."
+            )
         return ([doc_id], False)
     if corpus:
         return ([], True)
     # --all: enumerate per-doc tables on disk, treating _corpus_narrative as
     # the shared store. LanceDB writes each table as a `<name>.lance/` dir
-    # under `rag_root` (see `extract.embeddings.embed()`).
+    # under `rag_root` (see `extract.embeddings.embed()`). The corpus flag
+    # is set False: per-doc reembed propagates fresh vectors to the
+    # narrative store via vector-copy, so re-encoding the corpus
+    # separately would (a) double-spend on Voyage and (b) risk batch-
+    # boundary nondeterminism between per-doc and corpus vectors for the
+    # same chunk (review findings #2 and #4).
     per_doc: list[str] = []
     if rag_root.exists():
         for entry in sorted(rag_root.iterdir()):
@@ -297,7 +316,7 @@ def _resolve_reembed_targets(
                 name = entry.stem
                 if name != _PER_CORPUS_STORE:
                     per_doc.append(name)
-    return (per_doc, True)
+    return (per_doc, False)
 
 
 @extract.command(
@@ -367,7 +386,6 @@ def extract_reembed(
 
     from auto_research.extract.embeddings import (
         _MODEL_DIM,
-        _PER_CORPUS_STORE,
         _VOYAGE_USD_PER_MTOK,
         EmbeddingAdapter,
         embed_model_version,
@@ -376,6 +394,13 @@ def extract_reembed(
     per_doc_targets, include_corpus = _resolve_reembed_targets(
         rag_root, doc_id=doc_id, corpus=corpus, all_=all_,
     )
+
+    # rag_root.exists() is validated up-front for BOTH dry-run and the
+    # live path. Pre-fix, only dry-run checked, so a typo'd live
+    # invocation hit a misleading 'table not found' from lancedb after
+    # silently creating the directory (review finding #7).
+    if not rag_root.exists():
+        raise click.UsageError(f"--rag-root {rag_root} does not exist")
 
     # Construct the adapter once. Adapter init validates that the
     # backend/model kwargs are coherent (e.g., voyage_model with
@@ -398,12 +423,20 @@ def extract_reembed(
         # for chunk-budget arithmetic upstream, so the numbers are
         # comparable to ingestion-time bookkeeping. USD only applies
         # to Voyage; BGE / Qwen3-MLX are in-process.
+        #
+        # `target_table_names` deliberately does NOT add
+        # `_PER_CORPUS_STORE` for the --all case: --all routes corpus
+        # updates through vector-copy from per-doc reembed (see
+        # `_resolve_reembed_targets`), so the corpus rows incur no
+        # additional encoder work and counting them here would inflate
+        # the operator's cost estimate ~2x for narrative-heavy corpora
+        # (review finding #2). `--corpus` alone still encodes the
+        # corpus directly, in which case `include_corpus=True` and the
+        # corpus table is the only target.
         import lancedb
 
         from auto_research.extract.chunking import count_tokens
 
-        if not rag_root.exists():
-            raise click.UsageError(f"--rag-root {rag_root} does not exist")
         db = lancedb.connect(rag_root)
         tables_seen = 0
         total_rows = 0
@@ -419,15 +452,26 @@ def extract_reembed(
             df = tbl.to_pandas()
             tables_seen += 1
             total_rows += len(df)
-            total_tokens += sum(count_tokens(t) for t in df["text"].tolist())
+            # `count_tokens(None)` would raise; guard against the
+            # nullable-text schema slot so dry-run can't crash on a
+            # malformed row (defensive; the embed path never writes
+            # NULL text but the schema permits it).
+            total_tokens += sum(
+                count_tokens(t) for t in df["text"].tolist() if t is not None
+            )
         rate = _VOYAGE_USD_PER_MTOK.get(adapter.model)
         if backend_lit in ("bge", "qwen3-mlx"):
-            cost_str = "$0.00 (in-process)"
+            cost_str = "$0.0000 (in-process)"
         elif rate is None:
             cost_str = "unknown (no rate in _VOYAGE_USD_PER_MTOK)"
         else:
+            # 4 decimal places: sub-cent estimates are real signal at
+            # the small-batch scale this command is most often used for
+            # (one doc dry-run is fractions of a cent). `:.2f` rounded
+            # those to $0.00 and falsely advertised free runs (review
+            # finding #6).
             usd = (total_tokens / 1_000_000) * rate
-            cost_str = f"~${usd:.2f} @ ${rate:.4f}/MTok"
+            cost_str = f"~${usd:.4f} @ ${rate:.4f}/MTok"
         click.echo(
             f"reembed dry-run: backend={backend_lit} model={adapter.model} "
             f"version={version_token} dim={new_dim} tables={tables_seen} "

@@ -902,11 +902,16 @@ def test_extract_reembed_doc_id_invokes_reembed_doc(
     mock_corpus.assert_not_called()
 
 
-def test_extract_reembed_all_walks_rag_root_excluding_corpus(
+def test_extract_reembed_all_walks_rag_root_and_does_not_call_reembed_corpus(
     runner: CliRunner, tmp_path: Path
 ) -> None:
     """--all enumerates `<rag_root>/*.lance` directories minus the corpus
-    store, then reembeds every per-doc table + the corpus once.
+    store and reembeds every per-doc table; it does NOT additionally call
+    reembed_corpus because reembed_doc internally propagates fresh vectors
+    into the corpus narrative store via vector-copy (review finding #2).
+    Calling reembed_corpus on top would re-encode every narrative chunk a
+    second time, doubling Voyage spend and risking batch-boundary
+    nondeterminism between the per-doc and corpus stores.
     """
     _write_doc(tmp_path, "doc-A1", "alpha text", doc_type="10-K")
     _write_doc(tmp_path, "doc-A2", "beta text", doc_type="10-K")
@@ -930,7 +935,7 @@ def test_extract_reembed_all_walks_rag_root_excluding_corpus(
     assert result.exit_code == 0, result.output
     called_doc_ids = sorted(c.args[1] for c in mock_doc.call_args_list)
     assert called_doc_ids == ["doc-A1", "doc-A2"]
-    assert mock_corpus.call_count == 1
+    mock_corpus.assert_not_called()
 
 
 def test_extract_reembed_corpus_only_skips_per_doc_tables(
@@ -981,3 +986,118 @@ def test_extract_reembed_failure_returns_nonzero_exit(
         )
     assert result.exit_code != 0
     assert "simulated dim mismatch" in result.output
+
+
+def test_extract_reembed_doc_id_empty_string_rejected(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Review finding #15: `--doc-id ''` is rejected with a clear message
+    rather than silently misclassified as 'no target specified'."""
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "reembed", "--backend", "bge",
+            "--rag-root", str(tmp_path),
+            "--doc-id", "",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--doc-id must be a non-empty string" in result.output
+
+
+def test_extract_reembed_doc_id_corpus_store_rejected(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Review finding #9: `--doc-id _corpus_narrative` would route the
+    corpus reembed through `reembed_doc`, polluting OTel `extract.doc_id`
+    with a synthetic non-doc id. Reject loudly and point the operator at
+    `--corpus`.
+    """
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "reembed", "--backend", "bge",
+            "--rag-root", str(tmp_path),
+            "--doc-id", "_corpus_narrative",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "_corpus_narrative" in result.output
+    assert "--corpus" in result.output
+
+
+def test_extract_reembed_live_path_validates_rag_root(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Review finding #7: a typo'd --rag-root on the live path produces
+    a clear UsageError up front rather than a misleading per-table
+    'reembed_doc() failed' message after lancedb silently creates the
+    missing directory.
+    """
+    missing = tmp_path / "does-not-exist"
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "reembed", "--backend", "bge",
+            "--rag-root", str(missing),
+            "--doc-id", "doc-X",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "does not exist" in result.output
+
+
+def test_extract_reembed_dry_run_voyage_estimates_to_four_decimals(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding #6: dry-run USD format must surface sub-cent
+    estimates. A few-word reembed at $0.06/MTok is ~$0.0001 — formatted
+    via :.2f it would render as $0.00 and falsely advertise a free run.
+    """
+    _write_doc(tmp_path, "doc-CENT", "a tiny doc")
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "reembed", "--backend", "voyage",
+            "--rag-root", str(tmp_path),
+            "--doc-id", "doc-CENT",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # Four decimal places visible (matches the ":.4f" specifier).
+    import re
+
+    match = re.search(r"~\$(\d+\.\d{4})", result.output)
+    assert match is not None, (
+        f"dry-run output missing 4-decimal USD format: {result.output!r}"
+    )
+
+
+def test_extract_reembed_all_dry_run_does_not_double_count_narrative_rows(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Review finding #2: a narrative chunk lives in both <doc>.lance AND
+    _corpus_narrative. The dry-run for `--all` must count it ONCE
+    (per-doc only) because per-doc reembed propagates corpus rows via
+    vector-copy with no encoder cost. Pre-fix, `--all` dry-run included
+    the corpus table in the token sum and inflated USD ~2x for
+    narrative-heavy corpora.
+    """
+    _write_doc(tmp_path, "doc-DD1", "narrative passage one", doc_type="10-K")
+    _write_doc(tmp_path, "doc-DD2", "narrative passage two", doc_type="10-K")
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "reembed", "--backend", "bge",
+            "--rag-root", str(tmp_path),
+            "--all",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # Only the two per-doc tables are counted; _corpus_narrative is
+    # excluded from --all's dry-run target list.
+    assert "tables=2" in result.output
+    assert "rows=2" in result.output
