@@ -69,6 +69,7 @@ from opentelemetry.trace import Status, StatusCode
 from auto_research._models import route_model
 from auto_research.extract import cache as content_cache
 from auto_research.extract.chunking import (
+    CHUNKER_VERSION,
     ChildChunk,
     ChunkSet,
     ParentChunk,
@@ -186,10 +187,23 @@ def _cache_payload_key(
 ) -> str:
     """Build the content-hash cache key per ADR D6.
 
-    Covers child text + parent text + document metadata + contextual prompt
-    version + payload schema version + routed model + decoding params. Any
-    change forces a fresh generation, so a `bump-prompt-version` edit
-    cannot silently reuse stale cache.
+    Covers child text + parent text + document metadata + chunker
+    version + contextual prompt version + payload schema version +
+    routed model + decoding params. Any change forces a fresh
+    generation, so a `bump-prompt-version`-style edit (whether the
+    prompt, the chunker, or the embed model) cannot silently reuse
+    stale cache.
+
+    `CHUNKER_VERSION` lives in the inner payload (not the
+    `prompt_version` slot of `cache_key`) so a chunker bump
+    invalidates the contextual cache transitively even when the
+    contextual prompt version stays put — and vice versa. This is the
+    orthogonality the issue's design proposal calls out (#67).
+
+    `EMBED_MODEL_VERSION` is deliberately NOT in this key: the embed
+    model is a downstream consumer of `ContextualChildChunk` output,
+    not an input. Bumping it must re-embed, not re-call the LLM for
+    contextual text.
 
     `filing_date` is rendered via `strftime` (not `isoformat`) so a
     `datetime` accidentally passed where a `date` is expected does not
@@ -208,6 +222,7 @@ def _cache_payload_key(
             "child_text": child.text,
             "parent_text": parent.text,
             "metadata": metadata,
+            "chunker_version": CHUNKER_VERSION,
         },
         sort_keys=True,
         separators=(",", ":"),

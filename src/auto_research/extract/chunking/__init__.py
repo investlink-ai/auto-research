@@ -103,6 +103,7 @@ from ._types import ChunkSet as ChunkSet
 from ._types import ChunkValidationError as ChunkValidationError
 from ._types import ParentChunk as ParentChunk
 from ._types import UnsupportedDocTypeError as UnsupportedDocTypeError
+from ._version import CHUNKER_VERSION as CHUNKER_VERSION
 
 # Section-detection internals re-exported for scripts that validate the
 # regex against external sources: `scripts/validate_10k_items.py`
@@ -119,6 +120,7 @@ from .detect._periodic import (
 )
 
 __all__ = [
+    "CHUNKER_VERSION",
     "DEFAULT_QUARANTINE_ROOT",
     "MAX_CHILD_TOKENS",
     "MAX_PARENT_TOKENS",

@@ -54,7 +54,11 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
+from auto_research.extract.chunking import CHUNKER_VERSION
 from auto_research.extract.chunking_contextual import ContextualChildChunk
+from auto_research.extract.prompts.contextual_chunk import (
+    CONTEXTUAL_CHUNK_PROMPT_VERSION,
+)
 from auto_research.telemetry import truncate_status_description as _truncate
 
 ALLOWED_VOYAGE_MODELS: frozenset[str] = frozenset({
@@ -95,6 +99,49 @@ _BGE_MODEL_NAME = "bge-small-en-v1.5"
 _BGE_HF_ID = f"BAAI/{_BGE_MODEL_NAME}"
 _PER_CORPUS_STORE = "_corpus_narrative"
 _WORKER = "embeddings"
+
+EMBED_MODEL_VERSION_TAG: str = "v1"
+"""Bump when the embed-model contract changes.
+
+The pure-function contract for embedding is `(text, backend, model) →
+vector`. Bump triggers:
+
+- A vendor opaquely changes the model behind the same name (Voyage
+  occasionally re-weights without renaming; HuggingFace
+  `bge-small-en-v1.5` could be re-uploaded under the same id).
+- Query / document side prefixing changes (Qwen3 instruction prefix
+  edit, BGE `query:` prefix policy flip).
+- Tokenizer truncation budget changes (`_QWEN3_MAX_LENGTH` adjustment).
+- L2-normalization policy flip (currently all backends emit normalized
+  vectors; turning that off would change cosine semantics).
+
+Non-triggers:
+- Choosing a different backend / model at call time — the resulting
+  `embed_model_version()` token differs by `backend`/`model` already.
+- Adding a new allowed model to `ALLOWED_VOYAGE_MODELS` /
+  `ALLOWED_MLX_QWEN3_MODELS` (existing model contracts unchanged).
+
+This tag is the embed-model analogue of `*_PROMPT_VERSION` and
+`CHUNKER_VERSION` and is covered by the same `bump-prompt-version`
+skill workflow. Per AGENTS.md INV-6, exactly one upstream version is
+bumped per PR; downstream row materialization stamps the resulting
+token transitively.
+"""
+
+
+def embed_model_version(
+    backend: Literal["voyage", "bge", "qwen3-mlx"], model: str
+) -> str:
+    """Stable token identifying an embedding vector space.
+
+    Returns `"{backend}:{model}:{EMBED_MODEL_VERSION_TAG}"`. Including the
+    backend distinguishes future overlap (e.g., a Qwen3 weight served by
+    both MLX and `transformers` would diverge on quantization-driven
+    tiny float differences). Including the tag lets us invalidate
+    downstream caches / row metadata transitively even when neither
+    backend nor model id changed (vendor opaque re-upload).
+    """
+    return f"{backend}:{model}:{EMBED_MODEL_VERSION_TAG}"
 
 # One-shot BGE warmup. Mirrors `extract.chunking._nlp_warmup` for the
 # embedding side: `SentenceTransformer` lazy-loads its model from
@@ -290,6 +337,14 @@ def _ensure_bge_warmup() -> Any:
 
 
 def _schema(vector_dim: int) -> pa.Schema:
+    # `chunker_version` / `contextual_prompt_version` / `embed_model_version`
+    # stamp each row with the three pure-function contracts that produced it
+    # (issue #67). At backfill scope these enable point-in-time provenance
+    # queries ("which rows came from chunker v3?") and back the
+    # materialization-versioned tables follow-up; at present they are
+    # write-only audit metadata. Same-name string values use `pa.string()`
+    # rather than dictionary-encoding — cardinality is tiny but per-row
+    # cost stays negligible at the corpus sizes LanceDB handles here.
     return pa.schema([
         ("text", pa.string()),
         ("vector", pa.list_(pa.float32(), vector_dim)),
@@ -300,6 +355,9 @@ def _schema(vector_dim: int) -> pa.Schema:
         ("doc_id", pa.string()),
         ("parent_id", pa.string()),
         ("section_name", pa.string()),
+        ("chunker_version", pa.string()),
+        ("contextual_prompt_version", pa.string()),
+        ("embed_model_version", pa.string()),
     ])
 
 
@@ -430,6 +488,10 @@ class EmbeddingAdapter:
     def model(self) -> str:
         return self._model
 
+    @property
+    def embed_model_version(self) -> str:
+        return embed_model_version(self._backend, self._model)
+
     @cached_property
     def _vector_dim(self) -> int:
         return _MODEL_DIM[self._model]
@@ -532,6 +594,7 @@ class EmbeddingAdapter:
     def _rows(
         self, chunks: Sequence[ContextualChildChunk], vectors: NDArray[np.float32]
     ) -> list[dict[str, object]]:
+        embed_version = self.embed_model_version
         rows: list[dict[str, object]] = []
         for chunk, vec in zip(chunks, vectors, strict=True):
             md = chunk.child.metadata
@@ -545,6 +608,9 @@ class EmbeddingAdapter:
                 "doc_id": md.doc_id,
                 "parent_id": chunk.child.parent_id,
                 "section_name": chunk.child.section_name,
+                "chunker_version": CHUNKER_VERSION,
+                "contextual_prompt_version": CONTEXTUAL_CHUNK_PROMPT_VERSION,
+                "embed_model_version": embed_version,
             })
         return rows
 

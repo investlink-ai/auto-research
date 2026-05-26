@@ -92,6 +92,30 @@ prompt + schema co-versioning; the cache key itself defends `model_id`
 and `decoding_params`. Promotion to the Langfuse `production` tag is
 gated by `scripts/promote_prompt.py` — eval-gated, not a manual flip.
 
+INV-6 generalizes to the two upstream-of-LLM pure-function contracts
+the RAG layer depends on (issue #67):
+
+- **`CHUNKER_VERSION`** in `extract/chunking/_version.py` — bumped when
+  the chunker's `(html, metadata) → ChunkSet` boundary contract
+  changes. Folded into the contextual-chunking cache key so a chunker
+  bump invalidates downstream contextual cache transitively.
+- **`EMBED_MODEL_VERSION_TAG`** in `extract/embeddings.py` — bumped
+  when the embed-model's `(text, backend, model) → vector` contract
+  changes (vendor opaque re-upload, prefixing / truncation /
+  normalization policy flip). Composed via
+  `embed_model_version(backend, model)` and stamped on every LanceDB
+  row so re-embed economics stay sound at backfill scope.
+
+Each LanceDB row in the RAG store carries `chunker_version`,
+`contextual_prompt_version`, and `embed_model_version` columns so
+provenance is recoverable per-row. The single-bump rule applies:
+bumping any one upstream version is the invalidation primitive for
+all downstream caches and row materialization. The
+`bump-prompt-version` skill covers all three contracts;
+orthogonality (e.g., a re-embed must NOT re-call the contextual-
+chunking LLM) is asserted by unit tests in
+`tests/unit/test_chunking_contextual.py`.
+
 **INV-7. Secrets never leak.** No agent or script reads `.env` directly, dumps
 environment variables, or logs Anthropic / FMP / Voyage credentials. Diagnostics
 may report presence/absence or masked values (`***`). `.claude/settings.json`

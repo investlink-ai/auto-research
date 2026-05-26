@@ -198,6 +198,78 @@ def test_contextualize_chunks_prompt_version_bump_invalidates_cache(
     assert sdk.messages.create.call_count == 2
 
 
+def test_contextualize_chunks_chunker_version_bump_invalidates_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #67 evidence: bumping `CHUNKER_VERSION` forces a fresh SDK call
+    even though the chunk text and contextual prompt version are unchanged.
+
+    The silent-reuse mode this prevents: a chunker change that keeps a
+    given child text byte-identical while re-bounding its siblings would
+    otherwise reuse contextual context generated against the OLD parent
+    layout. Folding `CHUNKER_VERSION` into the cache key removes that
+    path; this test asserts the invalidation primitive directly.
+    """
+    chunkset = _make_chunkset(child_texts=("Only one child here.",))
+    sdk = MagicMock()
+    sdk.messages.create.return_value = _make_response(
+        "This chunk is from CRDO FY2024 10-K Item 7 example."
+    )
+
+    contextualize_chunks(
+        chunkset=chunkset, cache_root=tmp_path,
+        anthropic_client=cast(anthropic.Anthropic, sdk),
+    )
+
+    monkeypatch.setattr(
+        "auto_research.extract.chunking_contextual.CHUNKER_VERSION", "v2",
+    )
+
+    contextualize_chunks(
+        chunkset=chunkset, cache_root=tmp_path,
+        anthropic_client=cast(anthropic.Anthropic, sdk),
+    )
+
+    assert sdk.messages.create.call_count == 2
+
+
+def test_contextualize_chunks_embed_model_version_bump_does_not_invalidate_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #67 orthogonality: `EMBED_MODEL_VERSION_TAG` must NOT feed the
+    contextual cache key — the embed model is a downstream consumer of
+    `ContextualChildChunk`, not an input. Bumping it must re-embed, not
+    re-call the LLM for contextual text.
+
+    The bug shape this prevents: a re-embed (cheap, in-process) silently
+    re-spending the contextual-chunking USD budget on docs whose chunk +
+    parent text + chunker contract + prompt version are all unchanged.
+    """
+    chunkset = _make_chunkset(child_texts=("Only one child here.",))
+    sdk = MagicMock()
+    sdk.messages.create.return_value = _make_response(
+        "This chunk is from CRDO FY2024 10-K Item 7 example."
+    )
+
+    contextualize_chunks(
+        chunkset=chunkset, cache_root=tmp_path,
+        anthropic_client=cast(anthropic.Anthropic, sdk),
+    )
+
+    monkeypatch.setattr(
+        "auto_research.extract.embeddings.EMBED_MODEL_VERSION_TAG", "v999",
+    )
+
+    contextualize_chunks(
+        chunkset=chunkset, cache_root=tmp_path,
+        anthropic_client=cast(anthropic.Anthropic, sdk),
+    )
+
+    # Embed-model bump is orthogonal to the contextual cache — second call
+    # hit cache, no second SDK invocation.
+    assert sdk.messages.create.call_count == 1
+
+
 def test_contextualize_chunks_drops_over_cap_context_and_does_not_cache(
     tmp_path: Path,
 ) -> None:
