@@ -85,6 +85,33 @@ _VOYAGE_RETRY_WAIT_INITIAL = 20.0
 _VOYAGE_RETRY_WAIT_MAX = 120.0
 _VOYAGE_RETRY_ATTEMPTS = 6
 
+# LanceDB FTS kwargs applied identically to the per-doc and per-corpus
+# narrative tables. Pulled to a module constant so the two `create_fts_
+# index` callsites stay in sync — diverging tokenizer / stopword / stem
+# settings across the two stores would make the same BM25 query produce
+# different rankings depending on which surface it hit.
+#
+# - `use_tantivy=False`: Lance native FTS, not the Tantivy backend.
+#   Native supports incremental updates via `table.add()` (needed for
+#   the corpus store, which appends per filing), avoids Tantivy's
+#   1 GB writer-heap allocation per index, and matches the BM25
+#   semantics we need (phrase / fuzzy / regex queries are out of scope).
+# - `replace=True`: idempotent against re-embeds — the per-doc table is
+#   recreated on every `embed()` (`mode="overwrite"`); defensive on the
+#   per-corpus path against future code paths that might re-invoke this.
+# - `remove_stop_words=True` and `stem=True`: empirically required for
+#   SEC English. Without stopword removal, chunks containing only
+#   common-word query overlap rank above lexically-disjoint relevant
+#   chunks. Without stemming, BM25 misses morphological variants
+#   ("change"/"changed"/"changes" don't collapse). Both calibrated
+#   during Issue #16's hybrid-retrieval micro-corpus tuning.
+_FTS_INDEX_KWARGS: dict[str, Any] = {
+    "use_tantivy": False,
+    "replace": True,
+    "remove_stop_words": True,
+    "stem": True,
+}
+
 _log = logging.getLogger(__name__)
 _tracer = trace.get_tracer(__name__)
 
@@ -251,35 +278,18 @@ class EmbeddingAdapter:
                 per_doc_tbl = db.create_table(
                     doc_id, data=rows, schema=schema, mode="overwrite"
                 )
-                # Native Lance FTS (no tantivy / no extra dep). The per-doc
-                # table is rewritten on every embed() (`mode="overwrite"`),
-                # so the FTS index is recreated alongside. `replace=True`
-                # makes the call idempotent across re-embeds.
-                per_doc_tbl.create_fts_index(
-                    "text",
-                    use_tantivy=False,
-                    replace=True,
-                    remove_stop_words=True,
-                    stem=True,
-                )
+                per_doc_tbl.create_fts_index("text", **_FTS_INDEX_KWARGS)
 
                 narrative_rows = [r for r in rows if r["doc_type"] in NARRATIVE_DOC_TYPES]
                 if narrative_rows:
                     if _PER_CORPUS_STORE in db.table_names():
-                        # Existing per-corpus table already has an FTS index;
-                        # LanceDB updates it incrementally on `.add()`.
+                        # LanceDB updates the FTS index incrementally on `.add()`.
                         db.open_table(_PER_CORPUS_STORE).add(narrative_rows)
                     else:
                         corpus_tbl = db.create_table(
                             _PER_CORPUS_STORE, data=narrative_rows, schema=schema
                         )
-                        corpus_tbl.create_fts_index(
-                            "text",
-                            use_tantivy=False,
-                            replace=True,
-                            remove_stop_words=True,
-                            stem=True,
-                        )
+                        corpus_tbl.create_fts_index("text", **_FTS_INDEX_KWARGS)
                 span.set_attribute("embedding.narrative_count", len(narrative_rows))
                 span.set_attribute("extract.outcome", "success")
             except Exception as exc:
