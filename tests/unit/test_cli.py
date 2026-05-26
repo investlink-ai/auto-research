@@ -759,15 +759,22 @@ def test_extract_s_filings_initializes_telemetry(
 
 
 def _write_doc(rag_root: Path, doc_id: str, text: str, doc_type: str = "10-K") -> None:
-    """Embed one chunk under `doc_id` via BGE so `extract reembed` has a
-    real LanceDB table to operate on. Kept tiny — these tests exercise CLI
-    wiring, not adapter mechanics (those are covered in test_embeddings.py).
+    """Embed one chunk under `doc_id` via BGE and promote that
+    materialization so `extract reembed` has both a real LanceDB table
+    AND an active pointer to read the source from. Kept tiny — these
+    tests exercise CLI wiring, not adapter mechanics (those are covered
+    in test_embeddings.py).
     """
     from datetime import date
 
     from auto_research.extract.chunking import ChildChunk, ChunkMetadata
     from auto_research.extract.chunking_contextual import ContextualChildChunk
     from auto_research.extract.embeddings import EmbeddingAdapter
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        now_utc_iso,
+        write_active_materialization,
+    )
 
     md = ChunkMetadata(
         ticker="NVDA",
@@ -787,6 +794,19 @@ def _write_doc(rag_root: Path, doc_id: str, text: str, doc_type: str = "10-K") -
     )
     adapter = EmbeddingAdapter(backend="bge", rag_root=rag_root)
     adapter.embed([ContextualChildChunk(child=child, context="")])
+    # Promote the just-embedded materialization so subsequent reembed CLI
+    # paths (which require an active pointer) have a valid source. Same
+    # materialization_version each call so repeated _write_doc invocations
+    # accumulate into the same active namespace.
+    write_active_materialization(
+        rag_root,
+        ActiveMaterialization(
+            version=adapter.materialization_version,
+            embed_model_version=adapter.embed_model_version,
+            promoted_at=now_utc_iso(),
+            manifest_count=1,
+        ),
+    )
 
 
 def test_extract_reembed_help_advertises_qwen3_default(runner: CliRunner) -> None:
@@ -1101,3 +1121,214 @@ def test_extract_reembed_all_dry_run_does_not_double_count_narrative_rows(
     # excluded from --all's dry-run target list.
     assert "tables=2" in result.output
     assert "rows=2" in result.output
+
+
+# ---- extract list-materializations / promote-materialization / gc -------
+
+
+def _write_manifest(manifest_path: Path, doc_ids: list[str]) -> None:
+    """Write a minimal ingest manifest with the given doc_ids under
+    `source='edgar'`, `status='ok'` so `promote-materialization` can
+    validate namespace completeness against it. Field set matches
+    `auto_research.ingest.manifest.SCHEMA` exactly so the parquet
+    append succeeds.
+    """
+    from datetime import UTC, datetime
+
+    from auto_research.ingest import manifest as manifest_mod
+
+    ts = datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC)
+    rows = [
+        {
+            "source": "edgar",
+            "entity_id": "0001045810",
+            "doc_id": doc_id,
+            "form_type": "10-K",
+            "event_datetime": ts,
+            "fetched_at": ts,
+            "content_sha256": "x" * 64,
+            "path": f"data/raw/{doc_id}.txt",
+            "status": "ok",
+        }
+        for doc_id in doc_ids
+    ]
+    manifest_mod.append(manifest_path, rows)
+
+
+def test_list_materializations_empty_rag_root_reports_no_results(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    result = runner.invoke(
+        cli,
+        ["extract", "list-materializations", "--rag-root", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "no materializations found" in result.output
+
+
+def test_list_materializations_marks_active_version(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    _write_doc(tmp_path, "doc-L1", "list-mat passage")
+    _write_doc(tmp_path, "doc-L2", "list-mat passage two")
+    result = runner.invoke(
+        cli,
+        ["extract", "list-materializations", "--rag-root", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    # _write_doc embeds + promotes the same materialization for both docs.
+    # Expect: 1 materialization line, marked (active), tables=3 (2 per-doc + corpus).
+    assert "(active)" in result.output
+    assert "tables=3" in result.output
+
+
+def test_promote_materialization_succeeds_when_namespace_complete(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    from auto_research.extract.materialization import read_active_materialization
+
+    _write_doc(tmp_path, "doc-P1", "promote-ok one")
+    _write_doc(tmp_path, "doc-P2", "promote-ok two")
+    manifest = tmp_path / "manifest.parquet"
+    _write_manifest(manifest, ["doc-P1", "doc-P2"])
+
+    from auto_research.extract.embeddings import EmbeddingAdapter
+
+    version = EmbeddingAdapter(backend="bge", rag_root=tmp_path).materialization_version
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "promote-materialization",
+            "--version", version,
+            "--rag-root", str(tmp_path),
+            "--manifest-path", str(manifest),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "promoted" in result.output
+    active = read_active_materialization(tmp_path)
+    assert active is not None
+    assert active.version == version
+    assert active.manifest_count == 2
+
+
+def test_promote_materialization_refuses_incomplete_namespace(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Manifest with 3 doc_ids vs only 2 embedded tables — promotion
+    refused with the missing doc_id named so the operator can fix it."""
+    _write_doc(tmp_path, "doc-INC1", "incomplete one")
+    _write_doc(tmp_path, "doc-INC2", "incomplete two")
+    manifest = tmp_path / "manifest.parquet"
+    _write_manifest(manifest, ["doc-INC1", "doc-INC2", "doc-INC3-MISSING"])
+
+    from auto_research.extract.embeddings import EmbeddingAdapter
+
+    version = EmbeddingAdapter(backend="bge", rag_root=tmp_path).materialization_version
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "promote-materialization",
+            "--version", version,
+            "--rag-root", str(tmp_path),
+            "--manifest-path", str(manifest),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "incomplete" in result.output.lower()
+    assert "doc-INC3-MISSING" in result.output
+
+
+def test_gc_materialization_keeps_active_and_drops_oldest(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """GC sorts by promotion history; keeps active + (--keep-last - 1)
+    most-recent previous; removes the rest. Sanity-checks the on-disk
+    `.lance` directories actually get removed."""
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        append_promotion_history,
+        write_active_materialization,
+    )
+
+    for version in ("aaaaaaaa", "bbbbbbbb", "cccccccc"):
+        (tmp_path / f"doc-GC__{version}.lance").mkdir(parents=True)
+
+    for version in ("aaaaaaaa", "bbbbbbbb", "cccccccc"):
+        append_promotion_history(
+            tmp_path,
+            ActiveMaterialization(
+                version=version,
+                embed_model_version=f"bge:bge-small-en-v1.5:tag-{version}",
+                promoted_at=f"2026-05-{version[0]}0T12:00:00Z",
+                manifest_count=1,
+            ),
+        )
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version="cccccccc",
+            embed_model_version="bge:bge-small-en-v1.5:tag-cccccccc",
+            promoted_at="2026-05-26T12:00:00Z",
+            manifest_count=1,
+        ),
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "gc-materialization",
+            "--keep-last", "2",
+            "--rag-root", str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "doc-GC__cccccccc.lance").exists()
+    assert (tmp_path / "doc-GC__bbbbbbbb.lance").exists()
+    assert not (tmp_path / "doc-GC__aaaaaaaa.lance").exists()
+
+
+def test_gc_materialization_dry_run_makes_no_changes(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    from auto_research.extract.materialization import (
+        ActiveMaterialization,
+        append_promotion_history,
+        write_active_materialization,
+    )
+
+    (tmp_path / "doc-GCD__aaaaaaaa.lance").mkdir(parents=True)
+    (tmp_path / "doc-GCD__bbbbbbbb.lance").mkdir(parents=True)
+    for version in ("aaaaaaaa", "bbbbbbbb"):
+        append_promotion_history(
+            tmp_path,
+            ActiveMaterialization(
+                version=version,
+                embed_model_version="bge:bge-small-en-v1.5:tag",
+                promoted_at="2026-05-26T12:00:00Z",
+                manifest_count=1,
+            ),
+        )
+    write_active_materialization(
+        tmp_path,
+        ActiveMaterialization(
+            version="bbbbbbbb",
+            embed_model_version="bge:bge-small-en-v1.5:tag",
+            promoted_at="2026-05-26T12:00:00Z",
+            manifest_count=1,
+        ),
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "gc-materialization",
+            "--keep-last", "1",
+            "--rag-root", str(tmp_path),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "dry-run" in result.output
+    assert (tmp_path / "doc-GCD__aaaaaaaa.lance").exists()
+    assert (tmp_path / "doc-GCD__bbbbbbbb.lance").exists()
