@@ -24,10 +24,12 @@ worker persists reranked output.
 from __future__ import annotations
 
 import logging
+import math
+import platform
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Literal
+from typing import Any, Literal
 
 from auto_research.extract.chunking import ParentChunk
 from auto_research.extract.rag_retrieval import HybridHit
@@ -53,6 +55,110 @@ _TIER_TO_DTYPE: dict[str, str] = {
     "deployment": "fp16",
     "ci-cpu": "fp32",
 }
+
+# Tokenizer truncation budget. Qwen3-Reranker is a causal LM with
+# 32K-token context; 2048 covers the contextual-chunking pattern
+# (LLM-generated context prefix + child text + query + instruction)
+# without pinning the device to full 32K on every batch.
+_RERANKER_MAX_LENGTH = 2048
+
+# Prompt template per the Qwen3-Reranker model card. The instruction
+# is domain-tailored to this corpus (SEC filings + earnings transcripts
+# + analyst materials) — matches the embeddings module's Qwen3 query
+# instruction and is the natural-language analogue of the same domain
+# tailoring. Revisit when a Ragas / DeepEval baseline gives a tuning
+# handle.
+_RERANKER_INSTRUCTION = (
+    "Given a financial research query, judge whether the passage is "
+    "relevant. Answer yes or no."
+)
+_RERANKER_PROMPT_PREFIX = (
+    "<|im_start|>system\n"
+    "Judge whether the Document meets the requirements based on the "
+    'Query and the Instruct provided. Note that the answer can only '
+    'be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
+)
+_RERANKER_PROMPT_SUFFIX = (
+    "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+)
+
+# HF repo ids. Use the upstream Qwen org weights directly (the reranker
+# has not been re-quantized by mlx-community at issue pickup time).
+_RERANKER_HF_REPOS: dict[str, str] = {
+    "Qwen3-Reranker-0.6B": "Qwen/Qwen3-Reranker-0.6B",
+    "Qwen3-Reranker-4B": "Qwen/Qwen3-Reranker-4B",
+}
+
+# Module-level singleton cache keyed by (model_id, device). 0.6B on MPS
+# and 0.6B on CPU are different cache entries because dtype and device
+# differ; the score distributions diverge accordingly.
+_RERANKER_MODELS: dict[tuple[str, str], tuple[Any, Any]] = {}
+
+
+def _ensure_qwen3_reranker_warmup(
+    model_id: str, device: str, dtype: str
+) -> tuple[Any, Any]:
+    """Load a Qwen3-Reranker once and return `(model, tokenizer)`.
+
+    Idempotent via `_RERANKER_MODELS` keyed by `(model_id, device)`.
+    Raises `RuntimeError` with a clear remediation on:
+
+    - `device="mps"` requested on a non-Apple-Silicon host (use
+      `tier="ci-cpu"` on Linux CI).
+    - `transformers` / `torch` import failure (should not happen with
+      core deps installed, but surfacing the right error beats a
+      `ModuleNotFoundError` from inside this function).
+    - HF cache miss with no network reachable (point at
+      `make setup-reranker`).
+    """
+    key = (model_id, device)
+    cached = _RERANKER_MODELS.get(key)
+    if cached is not None:
+        return cached
+
+    if device == "mps" and not (
+        platform.system() == "Darwin" and platform.machine() == "arm64"
+    ):
+        raise RuntimeError(
+            f"Qwen3-Reranker tier requested device={device!r} but host is "
+            f"system={platform.system()!r} machine={platform.machine()!r}. "
+            "Construct with tier='ci-cpu' on non-Apple-Silicon hosts."
+        )
+
+    try:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Qwen3-Reranker {model_id!r} requested but `transformers` / "
+            "`torch` could not be imported. Run `uv sync` to install "
+            "core deps."
+        ) from exc
+
+    repo = _RERANKER_HF_REPOS.get(model_id)
+    if repo is None:
+        raise ValueError(
+            f"No HF repo mapping for Qwen3-Reranker model {model_id!r}; "
+            f"known: {sorted(_RERANKER_HF_REPOS)}"
+        )
+
+    torch_dtype = torch.float16 if dtype == "fp16" else torch.float32
+    try:
+        tokenizer: Any = AutoTokenizer.from_pretrained(repo)
+        model: Any = AutoModelForCausalLM.from_pretrained(repo, torch_dtype=torch_dtype)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Qwen3-Reranker {model_id!r} could not be loaded — likely a "
+            "HuggingFace cache miss with no network reachable. Populate "
+            "the cache with:\n"
+            "    make setup-reranker\n"
+            f"(repo: {repo})"
+        ) from exc
+    model = model.to(device).eval()
+
+    _RERANKER_MODELS[key] = (model, tokenizer)
+    return _RERANKER_MODELS[key]
+
 
 RERANKER_VERSION_TAG: str = "v1"
 """Bump when the reranker scoring contract changes.
@@ -117,6 +223,52 @@ class Qwen3Reranker:
     @cached_property
     def reranker_version(self) -> str:
         return reranker_version(self._tier, self._model_id)
+
+    @cached_property
+    def _model_and_tokenizer(self) -> tuple[Any, Any]:
+        return _ensure_qwen3_reranker_warmup(self._model_id, self._device, self._dtype)
+
+    def score(self, *, query: str, passages: list[str]) -> list[float]:
+        """Score `(query, passage)` pairs with the Qwen3-Reranker yes/no
+        head; return per-passage `p(yes) / (p(yes) + p(no))`.
+
+        Deterministic: `eval()` mode, no sampling, no dropout. Score
+        magnitudes only meaningful within a single `(tier, model)`;
+        cross-tier comparison is forbidden by the `reranker_version`
+        guard.
+        """
+        if not passages:
+            return []
+        import torch
+
+        model, tokenizer = self._model_and_tokenizer
+        yes_id = tokenizer.encode("yes", add_special_tokens=False)[0]
+        no_id = tokenizer.encode("no", add_special_tokens=False)[0]
+        scores: list[float] = []
+        with torch.no_grad():
+            for passage in passages:
+                prompt = (
+                    _RERANKER_PROMPT_PREFIX
+                    + f"<Instruct>: {_RERANKER_INSTRUCTION}\n"
+                    + f"<Query>: {query}\n"
+                    + f"<Document>: {passage}"
+                    + _RERANKER_PROMPT_SUFFIX
+                )
+                inputs = tokenizer(
+                    prompt,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=_RERANKER_MAX_LENGTH,
+                ).to(self._device)
+                out = model(**inputs)
+                last_logits = out.logits[0, -1, :]
+                yes_logit = float(last_logits[yes_id])
+                no_logit = float(last_logits[no_id])
+                m = max(yes_logit, no_logit)
+                ey = math.exp(yes_logit - m)
+                en = math.exp(no_logit - m)
+                scores.append(ey / (ey + en))
+        return scores
 
 
 @dataclass(frozen=True)
@@ -191,6 +343,7 @@ __all__ = [
     "Qwen3Reranker",
     "RerankHit",
     "ScorerFn",
+    "_ensure_qwen3_reranker_warmup",
     "rerank",
     "reranker_version",
 ]
