@@ -245,8 +245,12 @@ class _MicroQuery:
 
 
 def _micro_corpus() -> list[ParentChunk]:
-    """Hand-built corpus designed so RRF strictly beats either retriever
-    on precision@5 for ≥ 2 of 3 queries.
+    """Hand-built corpus that lets RRF demonstrably outperform either
+    retriever alone on the precision@5 contract enforced by
+    `test_hybrid_beats_either_retriever_on_precision_at_5`
+    (Pareto-dominance per query + ≥ 1 strict beat + strict beat on the
+    mean — see that test's docstring for why the assertion shape was
+    chosen).
 
     Construction principle (the bit that makes it work): the two trap
     categories are DISJOINT.

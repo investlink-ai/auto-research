@@ -20,11 +20,18 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from auto_research.extract.chunking import ParentChunk
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
+from auto_research.extract.chunking import ParentChunk, _parent_id
 from auto_research.extract.embeddings import EmbeddingAdapter
+from auto_research.telemetry import truncate_status_description as _truncate
 
 DEFAULT_RRF_K: int = 60
 DEFAULT_CANDIDATE_K: int = 20
+_WORKER = "hybrid_retrieval"
+
+_tracer = trace.get_tracer(__name__)
 
 
 @dataclass(frozen=True)
@@ -34,8 +41,11 @@ class HybridHit:
     `bm25_rank` / `dense_rank` are 1-based parent-level ranks (None if
     the parent was not returned by that retriever). `bm25_score` /
     `dense_score` are the raw retriever scores for the best child of
-    each parent — BM25's positive relevance score and the dense
-    retriever's distance respectively, surfaced for downstream tuning.
+    each parent, oriented so that LARGER = MORE RELEVANT for both:
+    BM25 is LanceDB's positive `_score`; `dense_score` is the
+    negated LanceDB `_distance` (small distance → large score). The
+    direction is unified so downstream tuning can compose the two
+    without inverting one side.
     """
 
     parent: ParentChunk
@@ -121,58 +131,72 @@ def hybrid_retrieve(
     D7 — ticker/filing_date scoping is a corpus property, not a
     retriever-specific concern).
     """
-    parent_by_id = {
-        f"{p.metadata.doc_id}::{p.char_span[0]}-{p.char_span[1]}": p
-        for p in parents
-    }
+    with _tracer.start_as_current_span("extract.hybrid_retrieve") as span:
+        span.set_attribute("extract.worker", _WORKER)
+        span.set_attribute("extract.doc_id", doc_id)
+        span.set_attribute("hybrid.k", k)
+        span.set_attribute("hybrid.candidate_k", candidate_k)
+        span.set_attribute("hybrid.bm25_weight", bm25_weight)
+        span.set_attribute("hybrid.dense_weight", dense_weight)
+        span.set_attribute("hybrid.rrf_k", rrf_k)
+        span.set_attribute("hybrid.has_filter", where is not None)
+        try:
+            parent_by_id = {_parent_id(p): p for p in parents}
 
-    bm25_hits = (
-        adapter.bm25_query(
-            query, k=candidate_k, store="per_doc", doc_id=doc_id, where=where
-        )
-        if bm25_weight > 0
-        else []
-    )
-    dense_hits = (
-        adapter.query(
-            query, k=candidate_k, store="per_doc", doc_id=doc_id, where=where
-        )
-        if dense_weight > 0
-        else []
-    )
+            bm25_hits = (
+                adapter.bm25_query(
+                    query, k=candidate_k, store="per_doc", doc_id=doc_id, where=where
+                )
+                if bm25_weight > 0
+                else []
+            )
+            dense_hits = (
+                adapter.query(
+                    query, k=candidate_k, store="per_doc", doc_id=doc_id, where=where
+                )
+                if dense_weight > 0
+                else []
+            )
 
-    bm25_ranking, bm25_best = _collapse_to_parent_ranking(
-        (h.parent_id, h.score) for h in bm25_hits if h.parent_id in parent_by_id
-    )
-    # `adapter.query` packs LanceDB `_distance` into `score` (smaller =
-    # closer); flip the sign so the surfaced `dense_score` is monotone
-    # with relevance — same direction as BM25's positive score.
-    dense_ranking, dense_best = _collapse_to_parent_ranking(
-        (h.parent_id, -h.score) for h in dense_hits if h.parent_id in parent_by_id
-    )
+            bm25_ranking, bm25_best = _collapse_to_parent_ranking(
+                (h.parent_id, h.score) for h in bm25_hits if h.parent_id in parent_by_id
+            )
+            # `adapter.query` packs LanceDB `_distance` into `score` (smaller =
+            # closer); flip the sign so the surfaced `dense_score` is monotone
+            # with relevance — same direction as BM25's positive score.
+            dense_ranking, dense_best = _collapse_to_parent_ranking(
+                (h.parent_id, -h.score) for h in dense_hits if h.parent_id in parent_by_id
+            )
 
-    fused = rrf_fuse(
-        bm25_ranking=bm25_ranking,
-        dense_ranking=dense_ranking,
-        bm25_weight=bm25_weight,
-        dense_weight=dense_weight,
-        rrf_k=rrf_k,
-    )
+            fused = rrf_fuse(
+                bm25_ranking=bm25_ranking,
+                dense_ranking=dense_ranking,
+                bm25_weight=bm25_weight,
+                dense_weight=dense_weight,
+                rrf_k=rrf_k,
+            )
 
-    bm25_rank_of = {pid: i + 1 for i, pid in enumerate(bm25_ranking)}
-    dense_rank_of = {pid: i + 1 for i, pid in enumerate(dense_ranking)}
+            bm25_rank_of = {pid: i + 1 for i, pid in enumerate(bm25_ranking)}
+            dense_rank_of = {pid: i + 1 for i, pid in enumerate(dense_ranking)}
 
-    return [
-        HybridHit(
-            parent=parent_by_id[pid],
-            score=rrf_score,
-            bm25_rank=bm25_rank_of.get(pid),
-            dense_rank=dense_rank_of.get(pid),
-            bm25_score=bm25_best.get(pid),
-            dense_score=dense_best.get(pid),
-        )
-        for pid, rrf_score in fused[:k]
-    ]
+            hits = [
+                HybridHit(
+                    parent=parent_by_id[pid],
+                    score=rrf_score,
+                    bm25_rank=bm25_rank_of.get(pid),
+                    dense_rank=dense_rank_of.get(pid),
+                    bm25_score=bm25_best.get(pid),
+                    dense_score=dense_best.get(pid),
+                )
+                for pid, rrf_score in fused[:k]
+            ]
+            span.set_attribute("hybrid.hits_count", len(hits))
+            span.set_attribute("extract.outcome", "success")
+            return hits
+        except Exception as exc:
+            span.set_attribute("extract.outcome", "error")
+            span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+            raise
 
 
 __all__ = [
