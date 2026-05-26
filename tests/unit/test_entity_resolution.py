@@ -3,31 +3,20 @@
 LLM is mocked; embeddings use the in-process BGE backend warmed by the
 session fixture in `tests/unit/conftest.py`. A 3-ticker fixture universe
 keeps each test under a second.
-
-Coverage:
-- happy path: explicit name in mention -> correct ticker.
-- LLM returns null -> `EntityResolution.resolved_ticker is None`.
-- LLM returns off-list ticker -> downgraded to unknown with bug noted.
-- LLM returns malformed JSON -> downgraded to unknown.
-- Empty mention text short-circuits before the LLM call.
-- Constructor rejects a universe with no aliases.
-- top_k controls candidate-slate size.
-- Markdown fences in the LLM response are stripped.
-- `confidence` is forced to None when ticker is None even if the LLM
-  contradicts itself.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import MagicMock
 
 import anthropic
 import pytest
-from anthropic.types import Message, TextBlock, Usage
+from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
 from pydantic import ValidationError
 
+from auto_research.extract import embeddings as embeddings_module
 from auto_research.extract.embeddings import EmbeddingAdapter
 from auto_research.extract.entity_resolution import (
     CandidateTicker,
@@ -56,13 +45,18 @@ def _fixture_universe() -> tuple[TickerEntry, ...]:
     )
 
 
-def _make_response(text: str) -> Message:
+_StopReason = Literal[
+    "end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal"
+]
+
+
+def _make_response(text: str, *, stop_reason: _StopReason = "end_turn") -> Message:
     return Message(
         id="msg_test",
         content=[TextBlock(type="text", text=text, citations=None)],
         model="claude-haiku-4-5",
         role="assistant",
-        stop_reason="end_turn",
+        stop_reason=stop_reason,
         stop_sequence=None,
         type="message",
         usage=Usage(
@@ -78,9 +72,39 @@ def _make_response(text: str) -> Message:
     )
 
 
-def _fake_client(text: str) -> anthropic.Anthropic:
+def _make_tool_only_response() -> Message:
+    return Message(
+        id="msg_test",
+        content=[
+            ToolUseBlock(
+                id="tu_1",
+                input={"foo": "bar"},
+                name="some_tool",
+                type="tool_use",
+            )
+        ],
+        model="claude-haiku-4-5",
+        role="assistant",
+        stop_reason="tool_use",
+        stop_sequence=None,
+        type="message",
+        usage=Usage(
+            input_tokens=100,
+            output_tokens=50,
+            cache_creation=None,
+            cache_creation_input_tokens=None,
+            cache_read_input_tokens=None,
+            inference_geo=None,
+            server_tool_use=None,
+            service_tier="standard",
+        ),
+    )
+
+
+def _fake_client(message: Message | str) -> anthropic.Anthropic:
+    msg = _make_response(message) if isinstance(message, str) else message
     fake = MagicMock()
-    fake.messages.create.return_value = _make_response(text)
+    fake.messages.create.return_value = msg
     return cast(anthropic.Anthropic, fake)
 
 
@@ -90,19 +114,25 @@ def _bge_adapter() -> EmbeddingAdapter:
 
 def _resolver(
     *,
-    response_json: dict[str, Any] | str,
+    response_json: dict[str, Any] | str | Message,
     top_k: int = 3,
     universe: tuple[TickerEntry, ...] | None = None,
 ) -> EntityResolver:
-    text = (
-        response_json if isinstance(response_json, str) else json.dumps(response_json)
-    )
+    if isinstance(response_json, Message):
+        message: Message | str = response_json
+    elif isinstance(response_json, str):
+        message = response_json
+    else:
+        message = json.dumps(response_json)
     return EntityResolver(
         adapter=_bge_adapter(),
         universe=universe if universe is not None else _fixture_universe(),
-        anthropic_client=_fake_client(text),
+        anthropic_client=_fake_client(message),
         top_k=top_k,
     )
+
+
+# ---------- happy path & basic outcomes ----------
 
 
 def test_resolve_returns_ticker_for_explicit_name() -> None:
@@ -135,7 +165,6 @@ def test_resolve_returns_unknown_when_llm_picks_null() -> None:
 
 
 def test_resolve_downgrades_off_list_ticker_to_unknown() -> None:
-    # The LLM picks INTC, which isn't in the fixture universe at all.
     resolver = _resolver(
         response_json={
             "ticker": "INTC",
@@ -147,7 +176,7 @@ def test_resolve_downgrades_off_list_ticker_to_unknown() -> None:
     assert result.resolved_ticker is None
     assert result.confidence is None
     assert "INTC" in result.reasoning
-    assert "off-list" in result.reasoning.lower() or "not in" in result.reasoning.lower()
+    assert "not in" in result.reasoning.lower()
 
 
 def test_resolve_downgrades_malformed_json_to_unknown() -> None:
@@ -155,14 +184,11 @@ def test_resolve_downgrades_malformed_json_to_unknown() -> None:
     result = resolver.resolve("NVIDIA H100 GPUs")
     assert result.resolved_ticker is None
     assert result.confidence is None
-    assert "could not be parsed" in result.reasoning.lower() or "malformed" in result.reasoning.lower()
+    assert "could not be parsed" in result.reasoning.lower()
 
 
 def test_resolve_short_circuits_empty_mention() -> None:
     fake = MagicMock()
-    # If the resolver were to call the LLM here, the mock would raise on
-    # an unexpected attribute access — we assert messages.create was never
-    # called instead, to keep the failure mode crisp.
     resolver = EntityResolver(
         adapter=_bge_adapter(),
         universe=_fixture_universe(),
@@ -174,23 +200,170 @@ def test_resolve_short_circuits_empty_mention() -> None:
     fake.messages.create.assert_not_called()
 
 
+# ---------- LLM-misbehavior collapse paths ----------
+
+
+def test_resolve_normalizes_lowercase_ticker_to_canonical() -> None:
+    """Haiku case drift ('nvda' instead of 'NVDA') must not lose a real match."""
+    resolver = _resolver(
+        response_json={
+            "ticker": "nvda",
+            "confidence": 0.9,
+            "reasoning": "lowercase ticker",
+        }
+    )
+    result = resolver.resolve("NVIDIA chips")
+    assert result.resolved_ticker == "NVDA"  # canonical casing from universe
+
+
+def test_resolve_normalizes_whitespace_around_ticker() -> None:
+    """Trailing/leading whitespace on the LLM's ticker shouldn't trip off-list."""
+    resolver = _resolver(
+        response_json={
+            "ticker": "  NVDA  ",
+            "confidence": 0.9,
+            "reasoning": "whitespace around ticker",
+        }
+    )
+    result = resolver.resolve("NVIDIA chips")
+    assert result.resolved_ticker == "NVDA"
+
+
+@pytest.mark.parametrize("sentinel", ["null", "None", "n/a", "unknown", "  "])
+def test_resolve_treats_stringified_nulls_as_unknown(sentinel: str) -> None:
+    """LLM returning the string 'null' (or kin) is a stringification bug,
+    not an off-list bug — collapse to clean unknown without the off-list
+    reasoning noise.
+    """
+    payload = {
+        "ticker": sentinel,
+        "confidence": 0.5 if sentinel.strip() else None,
+        "reasoning": "stringified-null sentinel",
+    }
+    # Pydantic validator rejects ticker-with-nonzero-confidence pairings;
+    # for non-empty sentinels we still pass `confidence` so validation
+    # succeeds, then the resolver normalizes the stringified null to
+    # None and forces confidence to None.
+    resolver = _resolver(response_json=payload)
+    result = resolver.resolve("a vague supplier")
+    assert result.resolved_ticker is None
+    assert result.confidence is None
+    assert "not in" not in result.reasoning.lower(), (
+        f"stringified null {sentinel!r} should not surface as off-list: {result.reasoning!r}"
+    )
+
+
+def test_resolve_downgrades_zero_confidence_with_ticker() -> None:
+    """ticker + confidence=0 is self-contradictory; Pydantic validator
+    rejects, resolver reports as malformed disambiguator."""
+    resolver = _resolver(
+        response_json={
+            "ticker": "NVDA",
+            "confidence": 0.0,
+            "reasoning": "weak signal",
+        }
+    )
+    result = resolver.resolve("NVIDIA GPUs")
+    assert result.resolved_ticker is None
+    assert result.confidence is None
+    assert "could not be parsed" in result.reasoning.lower()
+
+
+def test_resolve_downgrades_empty_reasoning() -> None:
+    """Empty reasoning fails Pydantic min_length=1 → malformed."""
+    resolver = _resolver(
+        response_json={"ticker": "NVDA", "confidence": 0.9, "reasoning": ""}
+    )
+    result = resolver.resolve("NVIDIA chips")
+    assert result.resolved_ticker is None
+    assert result.reasoning  # the resolver's own reasoning is non-empty
+    assert "could not be parsed" in result.reasoning.lower()
+
+
+def test_resolve_handles_truncated_response_distinctly() -> None:
+    """stop_reason='max_tokens' is reported as a truncation, not malformed."""
+    # Truncated mid-JSON — looks like nonsense to json.loads.
+    truncated = _make_response('{"ticker": "NVDA", "confidence": 0.9, "reaso',
+                               stop_reason="max_tokens")
+    resolver = _resolver(response_json=truncated)
+    result = resolver.resolve("NVIDIA chips")
+    assert result.resolved_ticker is None
+    assert "truncated" in result.reasoning.lower()
+    assert "max_tokens" in result.reasoning
+
+
+def test_resolve_handles_no_text_block_distinctly() -> None:
+    """A tool-use-only response collapses to unknown with a clear cause string."""
+    resolver = _resolver(response_json=_make_tool_only_response())
+    result = resolver.resolve("NVIDIA chips")
+    assert result.resolved_ticker is None
+    assert "no text block" in result.reasoning.lower()
+
+
+def test_resolve_extracts_json_from_partial_fence_with_prelude() -> None:
+    """LLM prepending prose + fenced JSON shouldn't quarantine the response."""
+    body = json.dumps({"ticker": "NVDA", "confidence": 0.9, "reasoning": "ok"})
+    text = f"Here is the JSON:\n```json\n{body}\n```"
+    resolver = _resolver(response_json=text)
+    result = resolver.resolve("NVIDIA chips")
+    assert result.resolved_ticker == "NVDA"
+
+
+def test_resolve_extracts_json_from_unfenced_response_with_prelude() -> None:
+    body = json.dumps({"ticker": "NVDA", "confidence": 0.9, "reasoning": "ok"})
+    text = f"Sure! {body} (let me know if you have questions)"
+    resolver = _resolver(response_json=text)
+    result = resolver.resolve("NVIDIA chips")
+    assert result.resolved_ticker == "NVDA"
+
+
+# ---------- construction-time guards ----------
+
+
 def test_constructor_rejects_universe_with_no_aliases() -> None:
     empty = (_entry("FOO", "semiconductors", ()),)
     with pytest.raises(ValueError, match="aliases"):
         EntityResolver(
             adapter=_bge_adapter(),
             universe=empty,
-            anthropic_client=_fake_client('{"ticker": null, "confidence": null, "reasoning": "n/a"}'),
+            anthropic_client=_fake_client(
+                '{"ticker": null, "confidence": null, "reasoning": "n/a"}'
+            ),
         )
+
+
+def test_constructor_rejects_empty_alias_string() -> None:
+    """An empty alias would embed to a degenerate vector that magnets
+    unrelated mentions. Fail loud at construction."""
+    bad = (_entry("NVDA", "semiconductors", ("NVIDIA", "", "Nvidia Corp")),)
+    with pytest.raises(ValueError, match="empty"):
+        EntityResolver(
+            adapter=_bge_adapter(),
+            universe=bad,
+            anthropic_client=_fake_client(
+                '{"ticker": null, "confidence": null, "reasoning": "n/a"}'
+            ),
+        )
+
+
+def test_constructor_rejects_whitespace_only_alias() -> None:
+    bad = (_entry("NVDA", "semiconductors", ("NVIDIA", "   ", "Nvidia Corp")),)
+    with pytest.raises(ValueError, match="whitespace"):
+        EntityResolver(
+            adapter=_bge_adapter(),
+            universe=bad,
+            anthropic_client=_fake_client(
+                '{"ticker": null, "confidence": null, "reasoning": "n/a"}'
+            ),
+        )
+
+
+# ---------- structural invariants ----------
 
 
 def test_top_k_controls_candidate_slate_size() -> None:
     resolver = _resolver(
-        response_json={
-            "ticker": "NVDA",
-            "confidence": 0.9,
-            "reasoning": "x",
-        },
+        response_json={"ticker": "NVDA", "confidence": 0.9, "reasoning": "x"},
         top_k=2,
     )
     result = resolver.resolve("NVIDIA chips")
@@ -207,9 +380,9 @@ def test_markdown_fence_stripped_from_response() -> None:
 
 
 def test_confidence_forced_none_when_ticker_none_even_if_llm_contradicts() -> None:
-    # LLM returns ticker=null but confidence=0.4 (self-contradiction). The
-    # resolver normalizes this — a null ticker must carry null confidence so
-    # downstream consumers can't accidentally treat 0.4 as a real score.
+    """LLM returns ticker=null but confidence=0.4 (self-contradiction). The
+    resolver normalizes — a null ticker must carry null confidence so
+    downstream consumers can't accidentally treat 0.4 as a real score."""
     resolver = _resolver(
         response_json={
             "ticker": None,
@@ -230,8 +403,6 @@ def test_universe_size_returns_distinct_ticker_count() -> None:
 
 
 def test_top_candidates_dedupes_by_ticker() -> None:
-    # NVDA has three aliases in the fixture — all three embed-rows must
-    # collapse into a single NVDA candidate when ranked.
     resolver = _resolver(
         response_json={"ticker": "NVDA", "confidence": 0.9, "reasoning": "x"}
     )
@@ -256,8 +427,27 @@ def test_resolution_records_prompt_and_embed_versions() -> None:
         response_json={"ticker": "NVDA", "confidence": 0.9, "reasoning": "x"}
     )
     result = resolver.resolve("NVIDIA")
-    assert result.prompt_version  # non-empty string
+    assert result.prompt_version
     assert result.embed_model_version.startswith("bge:")
+
+
+def test_embed_version_captured_at_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mid-run EMBED_MODEL_VERSION_TAG mutation must not drift the
+    resolver's recorded version away from the contract under which the
+    matrix vectors were produced. The resolver captures the tag at init.
+    """
+    monkeypatch.setattr(embeddings_module, "EMBED_MODEL_VERSION_TAG", "v1")
+    resolver = _resolver(
+        response_json={"ticker": "NVDA", "confidence": 0.9, "reasoning": "x"}
+    )
+    # Now bump the module-level tag after the resolver is constructed.
+    monkeypatch.setattr(embeddings_module, "EMBED_MODEL_VERSION_TAG", "v2-bumped")
+    result = resolver.resolve("NVIDIA")
+    # The resolver should still report v1, matching the tag in effect when
+    # the matrix was encoded.
+    assert result.embed_model_version.endswith(":v1")
 
 
 def test_resolution_is_frozen() -> None:
@@ -270,9 +460,6 @@ def test_resolution_is_frozen() -> None:
 
 
 def test_candidate_score_clamped_in_valid_range() -> None:
-    """L2-normalized cosine is in [-1, 1]; bookkeeping should never produce a
-    score outside that range. Smoke-test the constraint by inspecting the
-    constructed candidates against the fixture universe."""
     resolver = _resolver(
         response_json={"ticker": "NVDA", "confidence": 0.9, "reasoning": "x"},
         top_k=3,
@@ -282,8 +469,52 @@ def test_candidate_score_clamped_in_valid_range() -> None:
 
 
 def test_candidate_ticker_validates_score_range() -> None:
-    # Direct schema-level check that out-of-range scores are rejected.
     with pytest.raises(ValidationError):
         CandidateTicker(
             ticker="NVDA", primary_name="NVIDIA", sector="semiconductors", score=1.5
         )
+
+
+def test_top_candidates_breaks_ties_by_ticker_symbol() -> None:
+    """Construct a universe where two tickers must share the top score, then
+    confirm the slate order is deterministic regardless of universe load order.
+
+    Uses identical alias strings for two tickers so the cosine scores are
+    exactly equal — the only way to disambiguate is the tie-breaker rule.
+    """
+    universe_a = (
+        _entry("ZZZA", "semiconductors", ("identical alias",)),
+        _entry("AAAA", "semiconductors", ("identical alias",)),
+    )
+    universe_b = (
+        _entry("AAAA", "semiconductors", ("identical alias",)),
+        _entry("ZZZA", "semiconductors", ("identical alias",)),
+    )
+    r_a = _resolver(
+        response_json={"ticker": "AAAA", "confidence": 0.9, "reasoning": "x"},
+        universe=universe_a,
+        top_k=2,
+    )
+    r_b = _resolver(
+        response_json={"ticker": "AAAA", "confidence": 0.9, "reasoning": "x"},
+        universe=universe_b,
+        top_k=2,
+    )
+    order_a = [c.ticker for c in r_a.resolve("identical alias").considered]
+    order_b = [c.ticker for c in r_b.resolve("identical alias").considered]
+    assert order_a == order_b == ["AAAA", "ZZZA"]  # alphabetical tie-break
+
+
+def test_returned_ticker_uses_canonical_universe_casing() -> None:
+    """Even when the LLM returns a candidate ticker in mixed case, the
+    EntityResolution stores the canonical (universe) casing — so downstream
+    Feast lookups don't have to case-fold."""
+    resolver = _resolver(
+        response_json={
+            "ticker": "Nvda",
+            "confidence": 0.9,
+            "reasoning": "mixed case",
+        }
+    )
+    result = resolver.resolve("NVIDIA chips")
+    assert result.resolved_ticker == "NVDA"
