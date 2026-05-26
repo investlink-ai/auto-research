@@ -6,13 +6,24 @@ quick: lint typecheck
 # Default pre-PR gate: lint + typecheck + unit tests. Cheap, hermetic.
 check: quick test
 
-# One-time NLP setup. `unstructured.partition_html`'s element classifier
-# calls into spaCy `en_core_web_sm`, which is hosted only on GitHub (not
-# on PyPI). Running this once after `uv sync` makes the chunking module
-# (`src/auto_research/extract/chunking.py`) importable. CI runs this in
-# the same step as `uv sync`.
+# One-time NLP setup. Pre-downloads two lazy-loaded models that would
+# otherwise hit the network on first test/use:
+#
+#   1. spaCy `en_core_web_sm` — needed by
+#      `unstructured.partition_html`'s element classifier. Hosted only
+#      on GitHub (not on PyPI), so `uv sync` does not install it.
+#   2. BGE `BAAI/bge-small-en-v1.5` — the in-process embedding fallback
+#      used by `EmbeddingAdapter` when `VOYAGE_API_KEY` is absent.
+#      `sentence-transformers` lazy-loads from HuggingFace on first
+#      instantiation; pre-warming the HF cache here lets the
+#      conftest's session-autouse fixture serve hermetic tests without
+#      network access.
+#
+# Both warmups are idempotent — re-running is a no-op once the caches
+# are populated. CI runs this in the same step as `uv sync`.
 setup-nlp:
 	uv run python -m spacy download en_core_web_sm
+	uv run python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"
 
 # Full local gate: + integration. Requires `docker compose up -d` first.
 check-full: quick test integration

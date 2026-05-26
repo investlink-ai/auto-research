@@ -177,13 +177,12 @@ def test_hybrid_retrieve_returns_per_source_scores_and_parents(
     ParentChunk plus per-source ranks/scores from each retriever, and a
     parent retrieved by only one side has the other side's fields = None.
     """
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     parents = [
         _parent("export controls limit AI accelerator shipments", idx=0),
         _parent("forward revenue guidance raised this quarter", idx=1),
         _parent("competitive landscape includes AMD and Intel", idx=2),
     ]
-    adapter = EmbeddingAdapter(rag_root=tmp_path)
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
     _embed_corpus(adapter, parents)
     doc_id = parents[0].metadata.doc_id
 
@@ -218,9 +217,8 @@ def test_hybrid_retrieve_rejects_invalid_weights(
     retrievers and silently returns no hits. Reject both at the entry
     point so the failure mode is loud, not silent.
     """
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     parents = [_parent("anything", idx=0)]
-    adapter = EmbeddingAdapter(rag_root=tmp_path)
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
     _embed_corpus(adapter, parents)
     doc_id = parents[0].metadata.doc_id
 
@@ -247,12 +245,11 @@ def test_hybrid_retrieve_falls_back_to_dense_only_when_no_bm25_match(
     """A query whose terms share NO tokens with any child surfaces hits only
     through dense — `bm25_rank` / `bm25_score` are None on every returned hit.
     """
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     parents = [
         _parent("export controls limit AI accelerator shipments", idx=0),
         _parent("forward revenue guidance raised this quarter", idx=1),
     ]
-    adapter = EmbeddingAdapter(rag_root=tmp_path)
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
     _embed_corpus(adapter, parents)
 
     # Nonsense query — no lexical overlap with any chunk → BM25 returns
@@ -397,9 +394,8 @@ def test_hybrid_beats_either_retriever_on_precision_at_5(
     delivering complementary-signal lift over either retriever alone —
     and holds it to a level the corpus can defensibly demonstrate.
     """
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     parents = _micro_corpus()
-    adapter = EmbeddingAdapter(rag_root=tmp_path)
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
     _embed_corpus(adapter, parents)
     doc_id = parents[0].metadata.doc_id
 
