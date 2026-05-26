@@ -24,6 +24,7 @@ from auto_research.extract.rerank import (
     rerank,
     reranker_version,
 )
+from tests._otel_helpers import SpanRecorder
 
 
 def _parent(text: str, idx: int) -> ParentChunk:
@@ -319,6 +320,87 @@ def test_score_empty_passages_returns_empty_list() -> None:
     ):
         scores = Qwen3Reranker(tier="ci-cpu").score(query="q", passages=[])
     assert scores == []
+
+
+def test_rerank_emits_extract_rerank_span(span_recorder: SpanRecorder) -> None:
+    """`rerank()` wraps its orchestration in an `extract.rerank` span
+    carrying input/output counts and the score-space token. Mirrors
+    `extract.hybrid_retrieve` from `rag_retrieval.py`."""
+    hits = [_hit(f"p{i}", i, rrf_score=1.0 - i * 0.1) for i in range(3)]
+
+    def fake_scorer(q: str, ps: list[str]) -> list[float]:
+        return [0.1, 0.2, 0.3]
+
+    rerank(
+        query="q",
+        hits=hits,
+        top_k=2,
+        scorer=fake_scorer,
+        reranker_version="ci-cpu:Qwen3-Reranker-0.6B:v1",
+    )
+    attrs = span_recorder.attrs("extract.rerank")
+    assert attrs["extract.worker"] == "reranker"
+    assert attrs["rerank.candidate_count"] == 3
+    assert attrs["rerank.top_k"] == 2
+    assert attrs["rerank.hits_count"] == 2
+    assert attrs["rerank.reranker_version"] == "ci-cpu:Qwen3-Reranker-0.6B:v1"
+    assert attrs["extract.outcome"] == "success"
+
+
+def test_rerank_span_marks_error_outcome_on_scorer_failure(
+    span_recorder: SpanRecorder,
+) -> None:
+    """A scorer raising propagates, and the span records outcome=error
+    with a status description so traces bucket failures correctly."""
+    hits = [_hit("p", 0, 0.5)]
+
+    def boom(q: str, ps: list[str]) -> list[float]:
+        raise RuntimeError("scorer broke")
+
+    with pytest.raises(RuntimeError, match="scorer broke"):
+        rerank(query="q", hits=hits, top_k=1, scorer=boom)
+    attrs = span_recorder.attrs("extract.rerank")
+    assert attrs["extract.outcome"] == "error"
+
+
+def test_rerank_span_omits_reranker_version_when_not_provided(
+    span_recorder: SpanRecorder,
+) -> None:
+    """Default `reranker_version=None` should not emit the attribute —
+    keeps the span attribute set tight when callers don't stamp the
+    score-space token."""
+    hits = [_hit("p", 0, 0.5)]
+
+    def fake_scorer(q: str, ps: list[str]) -> list[float]:
+        return [0.5]
+
+    rerank(query="q", hits=hits, top_k=1, scorer=fake_scorer)
+    attrs = span_recorder.attrs("extract.rerank")
+    assert "rerank.reranker_version" not in attrs
+
+
+def test_score_emits_extract_reranker_score_span(
+    span_recorder: SpanRecorder,
+) -> None:
+    """`Qwen3Reranker.score` emits a nested `extract.reranker.score` span
+    carrying tier / model / device / dtype / batch_size so model
+    inference latency can be observed independently of the orchestration
+    overhead."""
+    fake_model = _FakeModel(score_sequence=[(1.0, 0.0), (0.5, 0.5)])
+    fake_tokenizer = _FakeTokenizer()
+    with patch(
+        "auto_research.extract.rerank._ensure_qwen3_reranker_warmup",
+        return_value=(fake_model, fake_tokenizer),
+    ):
+        Qwen3Reranker(tier="ci-cpu").score(query="q", passages=["a", "b"])
+    attrs = span_recorder.attrs("extract.reranker.score")
+    assert attrs["extract.worker"] == "reranker"
+    assert attrs["reranker.tier"] == "ci-cpu"
+    assert attrs["reranker.model"] == "Qwen3-Reranker-0.6B"
+    assert attrs["reranker.device"] == "cpu"
+    assert attrs["reranker.dtype"] == "fp32"
+    assert attrs["reranker.batch_size"] == 2
+    assert attrs["extract.outcome"] == "success"
 
 
 def test_score_runs_one_forward_per_batch_not_per_passage() -> None:

@@ -30,10 +30,16 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Any, Literal
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
 from auto_research.extract.chunking import ParentChunk
 from auto_research.extract.rag_retrieval import HybridHit
+from auto_research.telemetry import truncate_status_description as _truncate
 
 _log = logging.getLogger(__name__)
+_tracer = trace.get_tracer(__name__)
+_WORKER = "reranker"
 
 ALLOWED_TIERS: frozenset[str] = frozenset({"dev", "deployment", "ci-cpu"})
 
@@ -326,54 +332,73 @@ class Qwen3Reranker:
             return []
         import torch
 
-        model, tokenizer = self._model_and_tokenizer
-        yes_id, no_id = self._yes_no_token_ids
-        prefix_ids = self._prefix_token_ids
-        suffix_ids = self._suffix_token_ids
+        with _tracer.start_as_current_span("extract.reranker.score") as span:
+            span.set_attribute("extract.worker", _WORKER)
+            span.set_attribute("reranker.tier", self._tier)
+            span.set_attribute("reranker.model", self._model_id)
+            span.set_attribute("reranker.device", self._device)
+            span.set_attribute("reranker.dtype", self._dtype)
+            span.set_attribute("reranker.batch_size", len(passages))
+            try:
+                model, tokenizer = self._model_and_tokenizer
+                yes_id, no_id = self._yes_no_token_ids
+                prefix_ids = self._prefix_token_ids
+                suffix_ids = self._suffix_token_ids
 
-        # Body fields. The model card uses "<Instruct>: ... <Query>:
-        # ... <Document>: ..." between the system prefix and the
-        # assistant suffix. Per-pair body is the only variable portion
-        # of the prompt, so it gets the budget left over after prefix
-        # + suffix.
-        bodies = [
-            f"<Instruct>: {_RERANKER_INSTRUCTION}\n"
-            f"<Query>: {query}\n"
-            f"<Document>: {passage}"
-            for passage in passages
-        ]
-        body_budget = max(
-            16, _RERANKER_MAX_LENGTH - len(prefix_ids) - len(suffix_ids)
-        )
-        encoded = tokenizer(
-            bodies,
-            add_special_tokens=False,
-            truncation=True,
-            max_length=body_budget,
-            return_attention_mask=False,
-        )
-        full_rows = [prefix_ids + list(body) + suffix_ids for body in encoded["input_ids"]]
+                # Body fields. The model card uses "<Instruct>: ...
+                # <Query>: ... <Document>: ..." between the system
+                # prefix and the assistant suffix. Per-pair body is the
+                # only variable portion of the prompt, so it gets the
+                # budget left over after prefix + suffix.
+                bodies = [
+                    f"<Instruct>: {_RERANKER_INSTRUCTION}\n"
+                    f"<Query>: {query}\n"
+                    f"<Document>: {passage}"
+                    for passage in passages
+                ]
+                body_budget = max(
+                    16, _RERANKER_MAX_LENGTH - len(prefix_ids) - len(suffix_ids)
+                )
+                span.set_attribute("reranker.body_budget", body_budget)
+                encoded = tokenizer(
+                    bodies,
+                    add_special_tokens=False,
+                    truncation=True,
+                    max_length=body_budget,
+                    return_attention_mask=False,
+                )
+                full_rows = [
+                    prefix_ids + list(body) + suffix_ids
+                    for body in encoded["input_ids"]
+                ]
 
-        # Left-pad each row to the batch's longest sequence so
-        # `logits[:, -1, :]` reads each row's true last token rather
-        # than a pad. `pad_token_id` is usually set on Qwen tokenizers;
-        # fall back to `eos_token_id` defensively.
-        pad_id = tokenizer.pad_token_id
-        if pad_id is None:
-            pad_id = tokenizer.eos_token_id
-        max_len = max(len(r) for r in full_rows)
-        input_ids = [[pad_id] * (max_len - len(r)) + r for r in full_rows]
-        attention_mask = [[0] * (max_len - len(r)) + [1] * len(r) for r in full_rows]
-        input_ids_t = torch.tensor(input_ids, device=self._device)
-        attention_mask_t = torch.tensor(attention_mask, device=self._device)
+                # Left-pad each row to the batch's longest sequence so
+                # `logits[:, -1, :]` reads each row's true last token
+                # rather than a pad. `pad_token_id` is usually set on
+                # Qwen tokenizers; fall back to `eos_token_id` defensively.
+                pad_id = tokenizer.pad_token_id
+                if pad_id is None:
+                    pad_id = tokenizer.eos_token_id
+                max_len = max(len(r) for r in full_rows)
+                input_ids = [[pad_id] * (max_len - len(r)) + r for r in full_rows]
+                attention_mask = [
+                    [0] * (max_len - len(r)) + [1] * len(r) for r in full_rows
+                ]
+                input_ids_t = torch.tensor(input_ids, device=self._device)
+                attention_mask_t = torch.tensor(attention_mask, device=self._device)
 
-        with torch.no_grad():
-            out = model(input_ids=input_ids_t, attention_mask=attention_mask_t)
-        last_logits = out.logits[:, -1, :]
-        yes_col = last_logits[:, yes_id]
-        no_col = last_logits[:, no_id]
-        probs = torch.softmax(torch.stack([yes_col, no_col], dim=1), dim=1)
-        return [float(p) for p in probs[:, 0].tolist()]
+                with torch.no_grad():
+                    out = model(input_ids=input_ids_t, attention_mask=attention_mask_t)
+                last_logits = out.logits[:, -1, :]
+                yes_col = last_logits[:, yes_id]
+                no_col = last_logits[:, no_id]
+                probs = torch.softmax(torch.stack([yes_col, no_col], dim=1), dim=1)
+                span.set_attribute("extract.outcome", "success")
+                return [float(p) for p in probs[:, 0].tolist()]
+            except Exception as exc:
+                span.set_attribute("extract.outcome", "error")
+                span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+                raise
 
 
 @dataclass(frozen=True)
@@ -435,30 +460,44 @@ def rerank(
         raise ValueError(f"top_k must be positive; got {top_k}")
     if not hits:
         return []
-    passages = [h.parent.text for h in hits]
-    scores = scorer(query, passages)
-    if len(scores) != len(passages):
-        raise ValueError(
-            f"scorer returned {len(scores)} scores for {len(passages)} passages"
-        )
-    indexed = list(enumerate(zip(hits, scores, strict=True)))
-    indexed.sort(
-        key=lambda item: (
-            -item[1][1],
-            -item[1][0].score,
-            item[1][0].parent.metadata.doc_id,
-        )
-    )
-    return [
-        RerankHit(
-            parent=h.parent,
-            score=s,
-            prev_rrf_score=h.score,
-            prev_rank=orig_idx + 1,
-            reranker_version=reranker_version,
-        )
-        for orig_idx, (h, s) in indexed[:top_k]
-    ]
+    with _tracer.start_as_current_span("extract.rerank") as span:
+        span.set_attribute("extract.worker", _WORKER)
+        span.set_attribute("rerank.candidate_count", len(hits))
+        span.set_attribute("rerank.top_k", top_k)
+        if reranker_version is not None:
+            span.set_attribute("rerank.reranker_version", reranker_version)
+        try:
+            passages = [h.parent.text for h in hits]
+            scores = scorer(query, passages)
+            if len(scores) != len(passages):
+                raise ValueError(
+                    f"scorer returned {len(scores)} scores for {len(passages)} passages"
+                )
+            indexed = list(enumerate(zip(hits, scores, strict=True)))
+            indexed.sort(
+                key=lambda item: (
+                    -item[1][1],
+                    -item[1][0].score,
+                    item[1][0].parent.metadata.doc_id,
+                )
+            )
+            result = [
+                RerankHit(
+                    parent=h.parent,
+                    score=s,
+                    prev_rrf_score=h.score,
+                    prev_rank=orig_idx + 1,
+                    reranker_version=reranker_version,
+                )
+                for orig_idx, (h, s) in indexed[:top_k]
+            ]
+            span.set_attribute("rerank.hits_count", len(result))
+            span.set_attribute("extract.outcome", "success")
+            return result
+        except Exception as exc:
+            span.set_attribute("extract.outcome", "error")
+            span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+            raise
 
 
 __all__ = [
