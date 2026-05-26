@@ -1553,3 +1553,117 @@ def test_gc_materialization_continues_after_rmtree_failure(
     # cccccc (active) kept.
     assert (tmp_path / "doc-RM__cccccccc.lance").exists()
     assert "simulated locked directory" in result.output
+
+
+# ---- Codex P1: gc refuses without active pointer ------------------------
+
+
+def test_gc_materialization_refuses_when_no_active_pointer(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """A fresh-install or built-but-not-yet-promoted namespace has no
+    active pointer. Running gc-materialization in that state used to
+    silently wipe every materialization on disk (empty keep set + non-
+    empty to_remove set = data loss). The CLI must refuse with a
+    UsageError pointing at `promote` as the next step."""
+    # Build two materializations on disk but write NO active pointer.
+    (tmp_path / "doc-FRESH__aaaaaaaa.lance").mkdir(parents=True)
+    (tmp_path / "doc-FRESH__bbbbbbbb.lance").mkdir(parents=True)
+
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "gc-materialization",
+            "--keep-last", "1",
+            "--rag-root", str(tmp_path),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "no active materialization" in result.output
+    assert "promote" in result.output.lower()
+    # Both directories untouched.
+    assert (tmp_path / "doc-FRESH__aaaaaaaa.lance").exists()
+    assert (tmp_path / "doc-FRESH__bbbbbbbb.lance").exists()
+
+
+# ---- Codex P2: promote validates embed_model_version across all rows ----
+
+
+def test_promote_materialization_refuses_internally_mixed_embed_model_versions(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """If a single table contains rows from MULTIPLE distinct
+    embed_model_version stamps (a build-path bug or manual LanceDB
+    ops), promotion must refuse — landing one stamp in the active
+    pointer while the table actually serves two vector spaces would
+    defeat the read-path mismatch guard for half the corpus."""
+    import lancedb
+    import pyarrow as pa
+
+    from auto_research.extract.embeddings import _schema
+    from auto_research.extract.materialization import versioned_table_name
+
+    manifest = tmp_path / "manifest.parquet"
+    _write_manifest(manifest, ["doc-MIXED"])
+
+    version = "feedface"
+    schema = _schema(384)
+    # Two rows with different embed_model_version stamps in the SAME table.
+    rows = [
+        {
+            "text": "voyage-stamped row",
+            "vector": [0.0] * 384,
+            "ticker": "NVDA",
+            "filing_date": "2025-03-15",
+            "fiscal_period": "FY2025",
+            "doc_type": "10-K",
+            "doc_id": "doc-MIXED",
+            "parent_id": "doc-MIXED:0:20",
+            "section_name": "Item 7",
+            "chunker_version": "v1",
+            "contextual_prompt_version": "v1",
+            "embed_model_version": "voyage:voyage-finance-2:v1",
+        },
+        {
+            "text": "bge-stamped row in same table",
+            "vector": [1.0] * 384,
+            "ticker": "NVDA",
+            "filing_date": "2025-03-15",
+            "fiscal_period": "FY2025",
+            "doc_type": "10-K",
+            "doc_id": "doc-MIXED",
+            "parent_id": "doc-MIXED:0:29",
+            "section_name": "Item 7",
+            "chunker_version": "v1",
+            "contextual_prompt_version": "v1",
+            "embed_model_version": "bge:bge-small-en-v1.5:v1",
+        },
+    ]
+    db = lancedb.connect(tmp_path)
+    db.create_table(
+        versioned_table_name("doc-MIXED", version),
+        data=pa.Table.from_pylist(rows, schema=schema),
+        schema=schema,
+    )
+    # Also create an empty corpus table so the narrative-corpus guard
+    # doesn't trip first — the test is about INTERNAL stamp consistency.
+    db.create_table(
+        versioned_table_name("_corpus_narrative", version),
+        data=pa.Table.from_pylist(rows, schema=schema),
+        schema=schema,
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "promote-materialization",
+            "--version", version,
+            "--rag-root", str(tmp_path),
+            "--manifest-path", str(manifest),
+        ],
+    )
+    assert result.exit_code != 0
+    msg = result.output
+    assert "NOT uniform" in msg or "internally mixed" in msg.lower()
+    assert "voyage:voyage-finance-2:v1" in msg
+    assert "bge:bge-small-en-v1.5:v1" in msg

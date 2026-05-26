@@ -711,10 +711,26 @@ def _validate_promotion_candidate(
                 f"{dim_seen}-dim. Refusing to promote a mixed-vector-space "
                 "namespace."
             )
-        df_head = tbl.head(1).to_pandas()
-        if len(df_head) == 0:
+        # Load just the two columns we validate against — full table
+        # to_pandas would be wasteful at backfill scope. The stamp check
+        # is intentionally row-level (Codex review, PR #73): head(1)
+        # would let a single table with internally-mixed
+        # `embed_model_version` stamps (a build-path bug or manual
+        # LanceDB ops) pass validation, and the resulting active pointer
+        # would advertise one vector space while queries silently read
+        # from two.
+        df = tbl.to_pandas()
+        if len(df) == 0:
             continue
-        emv = str(df_head["embed_model_version"].iloc[0])
+        emv_unique = set(df["embed_model_version"].unique())
+        if len(emv_unique) > 1:
+            raise click.UsageError(
+                f"embed_model_version stamp NOT uniform within {name!r}: "
+                f"{sorted(emv_unique)!r}. A single table must contain rows "
+                "from exactly one vector space — refusing to promote a "
+                "namespace where any table is internally mixed."
+            )
+        emv = next(iter(emv_unique))
         if embed_model_version_seen is None:
             embed_model_version_seen = emv
         elif emv != embed_model_version_seen:
@@ -725,7 +741,7 @@ def _validate_promotion_candidate(
             )
         if (
             base != _PER_CORPUS_STORE
-            and str(df_head["doc_type"].iloc[0]) in _NARRATIVE_DOC_TYPES
+            and str(df["doc_type"].iloc[0]) in _NARRATIVE_DOC_TYPES
         ):
             narrative_doc_present = True
 
@@ -849,11 +865,21 @@ def extract_gc_materialization(
 
     active = read_active_materialization(rag_root)
     history = read_promotion_history(rag_root)
+    # Refuse to GC when no active pointer exists: otherwise the keep
+    # list could be empty (fresh install + built materialization but
+    # not yet promoted) and the removal pass would wipe every table on
+    # disk. The fix is operator-explicit: promote first, then GC.
+    # Codex review (PR #73): "destructive default for a common setup".
+    if active is None:
+        raise click.UsageError(
+            f"no active materialization under {rag_root}; refusing to "
+            "GC without an anchor — a fresh-install or not-yet-promoted "
+            "namespace would lose every table. Promote a version first, "
+            "then re-run gc-materialization."
+        )
     # Walk history newest-to-oldest, dedup repeated versions (an operator
     # may promote-then-demote-then-repromote), keep up to N distinct.
-    keep: list[str] = []
-    if active is not None:
-        keep.append(active.version)
+    keep: list[str] = [active.version]
     for record in reversed(history):
         if record.version in keep:
             continue
