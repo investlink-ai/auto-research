@@ -1767,3 +1767,58 @@ def test_reembed_doc_emits_precondition_error_span_when_no_active_pointer(
     attrs = reembed_spans[0].attributes or {}
     assert attrs["extract.outcome"] == "error"
     assert "embedding.materialization_version" in attrs
+
+
+# ---- Pydantic LanceModel schema --------------------------------------------
+
+
+def test_row_model_schema_has_all_required_columns() -> None:
+    """The Pydantic `LanceModel` factory derives an Arrow schema with the
+    full set of row columns the writer in `_rows()` produces. Pins the
+    row contract so a Pydantic field rename or drop fails loudly here
+    rather than silently producing a missing-column write error
+    downstream."""
+    from auto_research.extract.embeddings import _row_model, _schema
+
+    expected = {
+        "text",
+        "vector",
+        "ticker",
+        "filing_date",
+        "fiscal_period",
+        "doc_type",
+        "doc_id",
+        "parent_id",
+        "section_name",
+        "chunker_version",
+        "contextual_prompt_version",
+        "embed_model_version",
+    }
+    schema = _schema(384)
+    assert set(schema.names) == expected
+    # Same schema regardless of entry point.
+    assert _row_model(384).to_arrow_schema().equals(schema)
+
+
+def test_row_model_vector_dim_pins_column_width() -> None:
+    """`Vector(N)` must produce a fixed-size list of width N in the
+    derived schema — the dim is a load-bearing part of the embedding
+    contract (different backends emit different dims) and a silent
+    width drift would break LanceDB inserts."""
+    from auto_research.extract.embeddings import _schema
+
+    for dim in (384, 1024, 2560):
+        vector_field = _schema(dim).field("vector")
+        assert vector_field.type.list_size == dim, (
+            f"expected fixed-size list of width {dim}; got {vector_field.type}"
+        )
+
+
+def test_row_model_class_identity_cached_per_dim() -> None:
+    """`_row_model` is `lru_cache`-d so downstream code can compare
+    class identity (e.g., `isinstance(row, _row_model(384))`). Different
+    dims must produce different classes."""
+    from auto_research.extract.embeddings import _row_model
+
+    assert _row_model(384) is _row_model(384)
+    assert _row_model(384) is not _row_model(1024)
