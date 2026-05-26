@@ -24,7 +24,7 @@ This per-issue plan is disposable; it survives only until PR merge.
 | `reembed_doc()` source | Reads source rows from `{doc_id}__{active.version}` (active pointer required to exist), writes destination to `{doc_id}__{self.materialization_version}`. Raises if `active.version == self.materialization_version` (nothing to do — the build path already produces this materialization). |
 | Read path (query / bm25_query) | If `active_materialization.json` exists: open `{name}__{active.version}`; assert `active.embed_model_version == self.embed_model_version` and raise loudly on mismatch (feedback-embedding-vector-space-consistency). If pointer missing: fall back to `{name}__{self.materialization_version}` (lets fresh installs + tests work without a manual promote step). |
 | OTel | Add `embedding.materialization_version` to `extract.embed`, `extract.reembed`, `extract.embed_query`, `extract.bm25_query` spans. |
-| Migration | Sentinel `materialization_version = "v0"` for legacy tables. Script renames `{name}.lance` → `{name}__v0.lance` and writes the initial active pointer. Samples one existing row to fill `embed_model_version` accurately. Idempotent. |
+| Migration | Not needed. Project is in pre-data development scope; any legacy `{name}.lance` tables are rebuilt by re-running the embed sweep under the versioned layout. |
 | GC ordering | Promotion-history-ordered ("last N versions promoted"), NOT lexicographic on the hash (hashes are random). Active version is always preserved regardless of where it sits in history. |
 
 ### Out of scope (matches the issue body)
@@ -42,7 +42,6 @@ This per-issue plan is disposable; it survives only until PR merge.
 src/auto_research/extract/materialization.py          (new)
 src/auto_research/extract/embeddings.py               (table-naming + read-path routing)
 src/auto_research/cli.py                              (3 new subcommands)
-scripts/migrate_materialization_to_v0.py              (new)
 docs/decisions/2026-05-24-rag-enhancements.md         (D11 amendment + rollback row)
 tests/unit/test_materialization.py                    (new)
 tests/unit/test_embeddings.py                         (additions, ~6 new tests)
@@ -113,8 +112,8 @@ Closes #69.
   embed-model version triple).
 - New `auto-research extract` subcommands: `list-materializations`,
   `promote-materialization`, `gc-materialization`.
-- `scripts/migrate_materialization_to_v0.py` is the one-shot migration off the
-  legacy write-in-place layout.
+- Migration script removed from scope: pre-data development, legacy
+  tables are rebuilt by re-running the embed sweep.
 - ADR D11 amended; rollback documented.
 
 ## AC mapping
@@ -123,7 +122,7 @@ Closes #69.
 - 3 CLI subcommands — `cli.py::extract_{list,promote,gc}_materialization`
 - Promote completeness/dim validation — `cli.py::extract_promote_materialization` + `tests/unit/test_cli.py::test_promote_materialization_*`
 - Atomic flip — `extract/materialization.py::write_active_materialization` + `tests/unit/test_materialization.py::test_atomic_flip_*`
-- Migration script — `scripts/migrate_materialization_to_v0.py` + `tests/unit/test_migrate_materialization_to_v0.py`
+- Migration script — N/A (dropped from scope; rebuild rather than migrate)
 - "embed-to-inactive doesn't perturb active query" — `tests/unit/test_embeddings.py::test_embed_to_inactive_namespace_does_not_perturb_active_query`
 - "full embed → promote → query loop" — `tests/integration/test_embeddings_vcr.py::test_embed_promote_query_loop`
 - ADR amendment — `docs/decisions/2026-05-24-rag-enhancements.md` D11 section

@@ -27,12 +27,6 @@ enough to embed in table names, long enough to collision-resist across
 the dozen-or-so versions a project will ever produce. The pipe separator
 makes the hash function injective over the three independent contract
 strings (no ambiguity from "ab" + "cd" vs "abc" + "d").
-
-`LEGACY_VERSION = "v0"` is reserved for tables produced by the pre-
-versioning code path. The one-shot migration script renames legacy
-tables into this namespace and seeds the initial pointer; this version
-string is the sentinel the read path recognizes when no current-shape
-materialization is yet promoted.
 """
 
 from __future__ import annotations
@@ -47,12 +41,6 @@ from auto_research._io import atomic_write_text
 
 ACTIVE_FILE_NAME: str = "active_materialization.json"
 PROMOTION_HISTORY_FILE_NAME: str = "promotion_history.json"
-
-# Sentinel for the pre-versioning materialization. The migration script
-# renames every legacy `{base}.lance` table to `{base}__v0.lance`; queries
-# resolved against this version go through the same code path as any
-# other version.
-LEGACY_VERSION: str = "v0"
 
 # Separator between the table's base name and its materialization version.
 # Double-underscore is unambiguous against any character we ever see in a
@@ -309,7 +297,6 @@ def list_materializations(rag_root: Path) -> list[MaterializationInfo]:
 
 __all__ = [
     "ACTIVE_FILE_NAME",
-    "LEGACY_VERSION",
     "PROMOTION_HISTORY_FILE_NAME",
     "ActiveMaterialization",
     "MaterializationInfo",

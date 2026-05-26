@@ -17,7 +17,6 @@ import pytest
 
 from auto_research.extract.materialization import (
     ACTIVE_FILE_NAME,
-    LEGACY_VERSION,
     PROMOTION_HISTORY_FILE_NAME,
     ActiveMaterialization,
     append_promotion_history,
@@ -216,36 +215,37 @@ def _touch_lance_dir(rag_root: Path, name: str) -> None:
 
 
 def test_list_materializations_groups_by_version_suffix(tmp_path: Path) -> None:
-    _touch_lance_dir(tmp_path, "doc-A__v0")
-    _touch_lance_dir(tmp_path, "doc-B__v0")
-    _touch_lance_dir(tmp_path, "_corpus_narrative__v0")
+    _touch_lance_dir(tmp_path, "doc-A__aaaaaaaa")
+    _touch_lance_dir(tmp_path, "doc-B__aaaaaaaa")
+    _touch_lance_dir(tmp_path, "_corpus_narrative__aaaaaaaa")
     _touch_lance_dir(tmp_path, "doc-A__a3f1c8b2")
     _touch_lance_dir(tmp_path, "_corpus_narrative__a3f1c8b2")
     materializations = list_materializations(tmp_path)
     by_version = {m.version: m for m in materializations}
-    assert set(by_version) == {LEGACY_VERSION, "a3f1c8b2"}
-    assert by_version[LEGACY_VERSION].table_count == 3
+    assert set(by_version) == {"aaaaaaaa", "a3f1c8b2"}
+    assert by_version["aaaaaaaa"].table_count == 3
     assert by_version["a3f1c8b2"].table_count == 2
 
 
 def test_list_materializations_marks_active(tmp_path: Path) -> None:
-    _touch_lance_dir(tmp_path, "doc-A__v0")
+    _touch_lance_dir(tmp_path, "doc-A__aaaaaaaa")
     _touch_lance_dir(tmp_path, "doc-A__a3f1c8b2")
     write_active_materialization(tmp_path, _sample("a3f1c8b2"))
     materializations = list_materializations(tmp_path)
     by_version = {m.version: m for m in materializations}
     assert by_version["a3f1c8b2"].is_active is True
-    assert by_version[LEGACY_VERSION].is_active is False
+    assert by_version["aaaaaaaa"].is_active is False
 
 
 def test_list_materializations_skips_unrecognized_dirs(tmp_path: Path) -> None:
-    """Stray `.lance` directories without a `__version` suffix (the pre-
-    migration legacy layout, scratch files) must NOT trip the enumerator —
-    callers should be able to introspect a partly-migrated rag_root."""
-    _touch_lance_dir(tmp_path, "doc-A__v0")
-    _touch_lance_dir(tmp_path, "unversioned-legacy")  # no __
+    """Stray `.lance` directories without a `__version` suffix (partial
+    scratch directories, hand-created tables) must NOT trip the
+    enumerator — callers should be able to introspect a partly-built
+    rag_root without crashing."""
+    _touch_lance_dir(tmp_path, "doc-A__aaaaaaaa")
+    _touch_lance_dir(tmp_path, "unversioned-stray")  # no __
     materializations = list_materializations(tmp_path)
-    assert [m.version for m in materializations] == [LEGACY_VERSION]
+    assert [m.version for m in materializations] == ["aaaaaaaa"]
 
 
 def test_list_materializations_empty_rag_root(tmp_path: Path) -> None:

@@ -331,8 +331,7 @@ def _resolve_reembed_targets(
         raise click.UsageError(
             f"no active materialization under {rag_root}; --all has nothing "
             "to enumerate. Build an initial materialization via the embed "
-            "path or run scripts/migrate_materialization_to_v0.py on a "
-            "legacy layout, then promote the result."
+            "path, then promote it before re-running --all."
         )
     per_doc: list[str] = []
     for entry in sorted(rag_root.iterdir()):

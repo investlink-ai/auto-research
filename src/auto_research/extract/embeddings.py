@@ -1000,10 +1000,8 @@ class EmbeddingAdapter:
         if active is None:
             raise RuntimeError(
                 "no active materialization to re-embed from. Build the "
-                "initial materialization with `embed()` (or migrate the "
-                "legacy layout via "
-                "`scripts/migrate_materialization_to_v0.py`) and promote "
-                "it before re-embedding."
+                "initial materialization with `embed()` and promote it "
+                "before re-embedding."
             )
         if active.version == self.materialization_version:
             raise RuntimeError(

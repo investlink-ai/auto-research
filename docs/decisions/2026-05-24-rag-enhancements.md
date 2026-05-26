@@ -378,9 +378,10 @@ The new layout:
   `gc-materialization --keep-last N` (drops old non-active versions
   ordered by promotion history; default `--keep-last 2` keeps current
   + 1 previous for rollback).
-- **Migration.** `scripts/migrate_materialization_to_v0.py` renames
-  legacy `{name}.lance` → `{name}__v0.lance` and seeds the initial
-  active pointer; idempotent.
+- **Migration.** None required: the project is in pre-data development
+  scope, so any legacy `{name}.lance` tables are simply rebuilt under
+  the versioned layout by re-running the embed sweep. The active
+  pointer is seeded by the first promotion after rebuild.
 - **OTel.** `embedding.materialization_version` is attached to
   `extract.embed`, `extract.reembed`, `extract.embed_query`, and
   `extract.bm25_query` spans so dashboards can route by version.
