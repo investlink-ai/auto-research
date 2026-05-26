@@ -99,6 +99,38 @@ and are encoded here so those issues inherit the right starting state.
 `extract/rag_retrieval.py`, `extract/entity_resolution.py`,
 `agents/memo_retrieval.py`.
 
+> *Considered but deferred (2026-05-26):* Voyage's `voyage-4` /
+> `voyage-4-large` (released 2026-01) and earlier `voyage-3-large`
+> reportedly beat `voyage-finance-2` on FinMTEB in third-party reports,
+> but no public head-to-head exists on SEC-filing retrieval. Adapter
+> exposes the model name as a config knob (`VOYAGE_MODEL`, default
+> `voyage-finance-2`) so the choice can be flipped without code change.
+> The bake-off itself is tracked separately and gates any default change
+> on Issue #20/#21 eval numbers, not vendor copy.
+
+> *Invariant (2026-05-26):* The embedding backend is selected ONCE at
+> adapter init and locked for the adapter's lifetime. The init decision
+> is one of `voyage_used | no_key | explicit_override`. On
+> `voyageai.error.RateLimitError` (or any other Voyage runtime error)
+> the call propagates — the adapter does NOT silently switch to BGE.
+> Voyage's 1024-dim and BGE's 384-dim outputs live in different vector
+> spaces; mixing them in a single corpus produces incoherent dense
+> retrieval (and is INV-6-adjacent — a "pure function of (raw_doc,
+> prompt_version, model_id, …)" cannot depend on quota timing).
+> Operational quota handling — retry-with-backoff, circuit breaker,
+> alerting — lives at the worker layer. The original Issue #15 AC
+> wording ("fallback when `VOYAGE_API_KEY` absent or quota exceeded")
+> is superseded: only the "absent" half is in scope.
+>
+> *Retry policy (2026-05-26):* The adapter applies tenacity exponential-
+> with-jitter backoff (`initial=20s, max=120s, attempts=6`) on
+> `RateLimitError` from Voyage. This project's Voyage tier is **3 RPM /
+> 10K TPM**, much tighter than the doc-page Tier-1 baseline, so the
+> initial wait aligns with the RPM window. Sustained throughput at this
+> tier requires *proactive* pacing at the orchestrator layer (one call
+> every ~20s); reactive retries alone will not keep a parallel backfill
+> from 429-ing immediately. Tracked separately as a follow-up issue.
+
 **D2. Reranker → `bge-reranker-v2-m3`.** Replace `bge-reranker-base` in
 `design.md:212` and `ARCHITECTURE.md:101`. Used by
 `extract/rag_retrieval.py` and `agents/memo_retrieval.py`.

@@ -337,8 +337,13 @@ controls"*) via cached LLM call and prepend to chunk text before embedding.
 ### Issue 15 — `feat(extract): LanceDB + Voyage embeddings adapter (BGE local fallback)`
 
 **Objective.** Embedding adapter wraps Voyage `voyage-finance-2` (primary,
-ADR D1) with `bge-small-en-v1.5` local fallback when `VOYAGE_API_KEY` absent
-or quota exceeded. Persist per-doc LanceDB store at `data/rag/{doc_id}.lance`
+ADR D1) with `bge-small-en-v1.5` available as a whole-run alternative
+when `VOYAGE_API_KEY` is absent (or `force_local=True`). Backend is
+selected once at adapter init and locked for its lifetime —
+`voyageai.error.RateLimitError` propagates, with no live switch to BGE
+(a mixed 1024/384-dim corpus is incoherent for dense retrieval, and a
+mid-run swap is INV-6-adjacent; quota handling lives at the worker
+layer). Persist per-doc LanceDB store at `data/rag/{doc_id}.lance`
 **and** a per-corpus narrative index at
 `data/rag/_corpus_narrative.lance` (ADR D11) for Signal A1's cross-doc
 retrieval. LanceDB schema columns: `(text, vector, ticker, filing_date,
@@ -347,7 +352,8 @@ fiscal_period, doc_type, doc_id, parent_id, section_name)`.
 **Acceptance criteria.**
 - Adapter unit tests cover both backends (Voyage VCR + BGE in-process).
 - Same query against the same store returns deterministic top-k order.
-- Fallback decision logged with reason (no key / quota / explicit override).
+- Init-time backend decision logged with reason (`no_key` / `explicit_override` / `voyage_used`); decision is immutable for the adapter's lifetime.
+- `voyageai.error.RateLimitError` propagates from `embed()` / `query()`; no silent switch to BGE mid-run.
 - Both per-doc and per-corpus stores written from the same `embed(chunks)` call (atomicity test).
 - Index-time filter test: `filter="ticker='NVDA' AND filing_date >= '2025-01-01'"` returns only matching chunks.
 

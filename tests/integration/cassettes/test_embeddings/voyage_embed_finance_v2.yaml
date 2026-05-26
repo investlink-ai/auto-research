@@ -1,0 +1,53 @@
+interactions:
+- request:
+    body: '{"input": ["NVDA China export controls Q4 commentary"], "model": "voyage-finance-2",
+      "input_type": "document", "truncation": true, "output_dtype": null, "output_dimension":
+      null, "encoding_format": "base64"}'
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '207'
+      Content-Type:
+      - application/json
+      User-Agent:
+      - python-requests/2.34.2
+      authorization:
+      - REDACTED
+    method: POST
+    uri: https://api.voyageai.com/v1/embeddings
+  response:
+    body:
+      string: '{"object":"list","data":[{"object":"embedding","embedding":"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","index":0,"text":null}],"model":"voyage-finance-2","usage":{"total_tokens":10}}'
+    headers:
+      Alt-Svc:
+      - h3=":443"; ma=2592000
+      Content-Length:
+      - '5605'
+      Via:
+      - 1.1 google
+      content-type:
+      - application/json
+      date:
+      - Mon, 25 May 2026 17:14:57 GMT
+      server:
+      - uvicorn
+      x-api-warning:
+      - You have not yet added your payment method in the billing page and will have
+        reduced rate limits of 3 RPM and 10K TPM. To unlock our standard rate limits,
+        please add a payment method in the billing page for the appropriate organization
+        in the user dashboard (https://dashboard.voyageai.com/). Even with payment
+        methods entered, the free tokens (200M tokens for Voyage series 3) will still
+        apply. After adding a payment method, you should see your rate limits increase
+        after several minutes. See our pricing docs (https://docs.voyageai.com/docs/pricing)
+        for the free tokens for your model.
+      x-request-id:
+      - b473ea1a8d68d33276a66781c620001b
+    status:
+      code: 200
+      message: OK
+version: 1
