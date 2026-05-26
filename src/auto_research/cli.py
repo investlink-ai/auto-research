@@ -33,6 +33,12 @@ from auto_research.extract.workers.s_filings import extract_s_filing
 from auto_research.ingest.edgar import EdgarConfigError, fetch_filings_for_cik
 from auto_research.telemetry import try_init_telemetry
 
+_DEFAULT_RAG_ROOT = Path("data/rag")
+# Per-corpus narrative table name (mirrors `extract.embeddings._PER_CORPUS_STORE`).
+# Surfaced in the CLI so `--all` can exclude it from the per-doc walk and so
+# `--corpus` has a single source of truth for the table name.
+_PER_CORPUS_STORE = "_corpus_narrative"
+
 _ENV_VAR_EPILOG = """
 \b
 Required environment variables (see .env.example):
@@ -251,6 +257,223 @@ def extract_s_filings(
         f"persisted={persisted} quarantined={quarantined} "
         f"skipped={skipped} failed={failed}"
     )
+
+
+def _resolve_reembed_targets(
+    rag_root: Path,
+    *,
+    doc_id: str | None,
+    corpus: bool,
+    all_: bool,
+) -> tuple[list[str], bool]:
+    """Translate the mutually-exclusive CLI flags into a per-doc list +
+    a corpus flag.
+
+    `--doc-id X` → (["X"], False); `--corpus` → ([], True); `--all` →
+    (every `<rag_root>/*.lance` directory minus `_corpus_narrative`,
+    True). Raises `click.UsageError` if zero or multiple were passed.
+    """
+    chosen = [name for name, val in (
+        ("--doc-id", doc_id),
+        ("--corpus", corpus),
+        ("--all", all_),
+    ) if val]
+    if len(chosen) != 1:
+        raise click.UsageError(
+            f"exactly one of --doc-id, --corpus, --all is required; got "
+            f"{chosen if chosen else 'none'}"
+        )
+    if doc_id is not None:
+        return ([doc_id], False)
+    if corpus:
+        return ([], True)
+    # --all: enumerate per-doc tables on disk, treating _corpus_narrative as
+    # the shared store. LanceDB writes each table as a `<name>.lance/` dir
+    # under `rag_root` (see `extract.embeddings.embed()`).
+    per_doc: list[str] = []
+    if rag_root.exists():
+        for entry in sorted(rag_root.iterdir()):
+            if entry.is_dir() and entry.suffix == ".lance":
+                name = entry.stem
+                if name != _PER_CORPUS_STORE:
+                    per_doc.append(name)
+    return (per_doc, True)
+
+
+@extract.command(
+    "reembed",
+    help=(
+        "Re-encode already-embedded LanceDB tables against a new embed model "
+        "without re-running contextual chunking. Encoder-only path."
+    ),
+)
+@click.option(
+    "--backend",
+    type=click.Choice(["voyage", "bge", "qwen3-mlx"]),
+    default="qwen3-mlx",
+    show_default=True,
+    help=(
+        "Embedding backend. Defaults to qwen3-mlx (in-process, $0 marginal "
+        "cost). EMBEDDING_BACKEND env var is NOT consulted — selection is "
+        "explicit on the reembed surface."
+    ),
+)
+@click.option("--doc-id", default=None, help="Single per-doc LanceDB table to re-embed.")
+@click.option(
+    "--corpus", is_flag=True, default=False, help="Re-embed the _corpus_narrative table only.",
+)
+@click.option(
+    "--all",
+    "all_",
+    is_flag=True,
+    default=False,
+    help="Re-embed every per-doc table plus the corpus narrative table.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Report expected token volume + Voyage USD cost; perform no encoder calls.",
+)
+@click.option(
+    "--rag-root",
+    type=click.Path(file_okay=False, path_type=Path, resolve_path=True),
+    default=_DEFAULT_RAG_ROOT,
+    show_default=True,
+    help="LanceDB root directory containing per-doc and corpus tables.",
+)
+@click.option(
+    "--voyage-model",
+    default=None,
+    help="Voyage model id (only valid with --backend voyage).",
+)
+@click.option(
+    "--mlx-qwen3-model",
+    default=None,
+    help="Qwen3-MLX model id (only valid with --backend qwen3-mlx).",
+)
+def extract_reembed(
+    backend: str,
+    doc_id: str | None,
+    corpus: bool,
+    all_: bool,
+    dry_run: bool,
+    rag_root: Path,
+    voyage_model: str | None,
+    mlx_qwen3_model: str | None,
+) -> None:
+    try_init_telemetry()
+    from typing import Literal, cast
+
+    from auto_research.extract.embeddings import (
+        _MODEL_DIM,
+        _PER_CORPUS_STORE,
+        _VOYAGE_USD_PER_MTOK,
+        EmbeddingAdapter,
+        embed_model_version,
+    )
+
+    per_doc_targets, include_corpus = _resolve_reembed_targets(
+        rag_root, doc_id=doc_id, corpus=corpus, all_=all_,
+    )
+
+    # Construct the adapter once. Adapter init validates that the
+    # backend/model kwargs are coherent (e.g., voyage_model with
+    # backend=bge is rejected by the adapter, not silently dropped here).
+    backend_lit = cast(Literal["voyage", "bge", "qwen3-mlx"], backend)
+    adapter = EmbeddingAdapter(
+        backend=backend_lit,
+        rag_root=rag_root,
+        voyage_model=voyage_model,
+        mlx_qwen3_model=mlx_qwen3_model,
+    )
+
+    version_token = embed_model_version(backend_lit, adapter.model)
+    new_dim = _MODEL_DIM[adapter.model]
+
+    if dry_run:
+        # Token + USD estimate WITHOUT touching the encoder. Read the
+        # `text` column from every target table and sum tokens via the
+        # chunker's `count_tokens` (cl100k_base) — same tokenizer used
+        # for chunk-budget arithmetic upstream, so the numbers are
+        # comparable to ingestion-time bookkeeping. USD only applies
+        # to Voyage; BGE / Qwen3-MLX are in-process.
+        import lancedb
+
+        from auto_research.extract.chunking import count_tokens
+
+        if not rag_root.exists():
+            raise click.UsageError(f"--rag-root {rag_root} does not exist")
+        db = lancedb.connect(rag_root)
+        tables_seen = 0
+        total_rows = 0
+        total_tokens = 0
+        target_table_names = list(per_doc_targets)
+        if include_corpus:
+            target_table_names.append(_PER_CORPUS_STORE)
+        for name in target_table_names:
+            if name not in db.table_names():
+                click.echo(f"warn: table {name!r} not found under {rag_root}", err=True)
+                continue
+            tbl = db.open_table(name)
+            df = tbl.to_pandas()
+            tables_seen += 1
+            total_rows += len(df)
+            total_tokens += sum(count_tokens(t) for t in df["text"].tolist())
+        rate = _VOYAGE_USD_PER_MTOK.get(adapter.model)
+        if backend_lit in ("bge", "qwen3-mlx"):
+            cost_str = "$0.00 (in-process)"
+        elif rate is None:
+            cost_str = "unknown (no rate in _VOYAGE_USD_PER_MTOK)"
+        else:
+            usd = (total_tokens / 1_000_000) * rate
+            cost_str = f"~${usd:.2f} @ ${rate:.4f}/MTok"
+        click.echo(
+            f"reembed dry-run: backend={backend_lit} model={adapter.model} "
+            f"version={version_token} dim={new_dim} tables={tables_seen} "
+            f"rows={total_rows} tokens~{total_tokens} cost~{cost_str}"
+        )
+        return
+
+    # Live path: per-doc tables one by one, then the corpus narrative.
+    # Each call is atomic per-table (LanceDB `create_table mode="overwrite"`);
+    # a crash mid-iteration leaves earlier tables consistent and later ones
+    # untouched, and a re-run is the recovery primitive.
+    per_doc_ok = 0
+    per_doc_rows = 0
+    per_doc_failed: list[str] = []
+    for name in per_doc_targets:
+        try:
+            n = adapter.reembed_doc(name)
+        except Exception as exc:
+            click.echo(
+                f"warn: reembed_doc({name!r}) failed: {exc.__class__.__name__}: {exc}",
+                err=True,
+            )
+            per_doc_failed.append(name)
+            continue
+        per_doc_ok += 1
+        per_doc_rows += n
+
+    corpus_rows: int | None = None
+    if include_corpus:
+        try:
+            corpus_rows = adapter.reembed_corpus()
+        except Exception as exc:
+            click.echo(
+                f"warn: reembed_corpus() failed: {exc.__class__.__name__}: {exc}",
+                err=True,
+            )
+
+    click.echo(
+        f"reembed: backend={backend_lit} model={adapter.model} "
+        f"version={version_token} "
+        f"per_doc_ok={per_doc_ok} per_doc_rows={per_doc_rows} "
+        f"per_doc_failed={len(per_doc_failed)} "
+        f"corpus_rows={corpus_rows if corpus_rows is not None else 'skipped'}"
+    )
+    if per_doc_failed or (include_corpus and corpus_rows is None):
+        raise SystemExit(1)
 
 
 @cli.group(name="feast", help="Wrap the Feast CLI against feast_repo/.")

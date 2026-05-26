@@ -914,3 +914,205 @@ def test_qwen3_mlx_0_6b_real_inference_end_to_end(tmp_path: Path) -> None:
     )
     assert len(hits) == 3
     assert all(h.doc_id == "doc-QE2E" for h in hits)
+
+
+# ---- reembed_doc / reembed_corpus (encoder-only re-encode) ----------------
+
+
+def test_reembed_doc_preserves_metadata_byte_for_byte(tmp_path: Path) -> None:
+    """Encoder-only: every metadata column survives reembed unchanged.
+
+    The vector column is re-encoded (and may differ depending on
+    encoder determinism), but `text` + `ticker` + `filing_date` + ... +
+    `chunker_version` + `contextual_prompt_version` MUST round-trip
+    byte-for-byte. Only `embed_model_version` re-stamps to the current
+    adapter's identity — but in this test we reembed against the same
+    backend/model so that string is unchanged too.
+    """
+    import lancedb
+
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    chunks = [
+        _wrap(_make_child(f"reembed passage {i}", doc_id="doc-REE"))
+        for i in range(3)
+    ]
+    adapter.embed(chunks)
+
+    before = lancedb.connect(tmp_path).open_table("doc-REE").to_pandas()
+    before_sorted = before.sort_values("parent_id").reset_index(drop=True)
+
+    n = adapter.reembed_doc("doc-REE")
+    assert n == 3
+
+    after = lancedb.connect(tmp_path).open_table("doc-REE").to_pandas()
+    after_sorted = after.sort_values("parent_id").reset_index(drop=True)
+
+    for col in (
+        "text",
+        "ticker",
+        "filing_date",
+        "fiscal_period",
+        "doc_type",
+        "doc_id",
+        "parent_id",
+        "section_name",
+        "chunker_version",
+        "contextual_prompt_version",
+        "embed_model_version",
+    ):
+        assert list(before_sorted[col]) == list(after_sorted[col]), (
+            f"reembed clobbered column {col!r}"
+        )
+
+
+def test_reembed_doc_preserves_upstream_version_stamps_when_module_constants_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the module-level `CHUNKER_VERSION` or `CONTEXTUAL_CHUNK_PROMPT_VERSION`
+    advances between original embed and reembed (e.g., another PR bumped them
+    but the chunker output for this doc has NOT been regenerated), the reembed
+    must NOT silently re-stamp rows to the new versions — that would lie about
+    which chunker / prompt contract actually produced the underlying text.
+    Encoder-only path preserves the original stamps verbatim.
+    """
+    import lancedb
+
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter.embed([_wrap(_make_child("first-version passage", doc_id="doc-STAMPED"))])
+
+    monkeypatch.setattr(
+        "auto_research.extract.embeddings.CHUNKER_VERSION", "v999",
+    )
+    monkeypatch.setattr(
+        "auto_research.extract.embeddings.CONTEXTUAL_CHUNK_PROMPT_VERSION", "v999",
+    )
+
+    adapter.reembed_doc("doc-STAMPED")
+    df = lancedb.connect(tmp_path).open_table("doc-STAMPED").to_pandas()
+    assert df["chunker_version"].iloc[0] == "v1"
+    assert df["contextual_prompt_version"].iloc[0] == "v1"
+
+
+def test_reembed_doc_makes_no_anthropic_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reembed path is encoder-only — by definition it must not invoke
+    contextual-chunking. Monkeypatching `contextualize_chunks` to raise
+    `AssertionError` proves it's never imported / called by reembed.
+    """
+    import auto_research.extract.chunking_contextual as cc
+
+    def _exploding(**kwargs: object) -> object:
+        raise AssertionError(
+            "reembed must not invoke contextualize_chunks (Anthropic call)"
+        )
+
+    monkeypatch.setattr(cc, "contextualize_chunks", _exploding)
+
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter.embed([_wrap(_make_child("no anthropic here", doc_id="doc-NOAN"))])
+    # If reembed touched contextualize_chunks at all, this would AssertionError.
+    n = adapter.reembed_doc("doc-NOAN")
+    assert n == 1
+
+
+def test_reembed_doc_dim_mismatch_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing 1024-dim table re-embedded by a 2560-dim encoder is a new
+    vector space — refuse loudly. The error message must name both dims so
+    the operator can diagnose without reading the adapter source.
+    """
+    _install_fake_mlx(monkeypatch, dim=1024)
+    write_adapter = EmbeddingAdapter(backend="qwen3-mlx", rag_root=tmp_path)
+    write_adapter.embed([_wrap(_make_child("dim-mismatch source", doc_id="doc-DIM"))])
+
+    _install_fake_mlx(monkeypatch, dim=2560)
+    swap_adapter = EmbeddingAdapter(
+        backend="qwen3-mlx",
+        rag_root=tmp_path,
+        mlx_qwen3_model="Qwen3-Embedding-4B",
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        swap_adapter.reembed_doc("doc-DIM")
+    msg = str(excinfo.value)
+    assert "1024" in msg and "2560" in msg
+
+
+def test_reembed_doc_rebuilds_fts_index(tmp_path: Path) -> None:
+    """The reembed path overwrites the per-doc table, which drops any
+    existing FTS index. The implementation MUST rebuild it with the same
+    `_FTS_INDEX_KWARGS` so BM25 query parity is preserved end-to-end.
+    """
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter.embed([
+        _wrap(_make_child("export controls passage", doc_id="doc-FTSRE")),
+        _wrap(_make_child("dividend declaration", doc_id="doc-FTSRE")),
+    ])
+    adapter.reembed_doc("doc-FTSRE")
+
+    hits = adapter.bm25_query(
+        "export controls", k=2, store="per_doc", doc_id="doc-FTSRE"
+    )
+    assert hits, "BM25 query returned no hits — FTS index was not rebuilt"
+    assert hits[0].text.startswith("export controls")
+
+
+def test_reembed_corpus_processes_corpus_table(tmp_path: Path) -> None:
+    """`reembed_corpus()` re-encodes the `_corpus_narrative` table in place;
+    row count preserved, embed_model_version preserved when reembedding
+    against the same backend/model.
+    """
+    import lancedb
+
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter.embed([
+        _wrap(_make_child("nvda passage", doc_id="doc-CR1", doc_type="10-K"))
+    ])
+    adapter.embed([
+        _wrap(_make_child("amd passage", doc_id="doc-CR2", doc_type="10-K"))
+    ])
+
+    before_n = len(
+        lancedb.connect(tmp_path).open_table("_corpus_narrative").to_pandas()
+    )
+    assert before_n == 2
+
+    n = adapter.reembed_corpus()
+    assert n == 2
+
+    after = lancedb.connect(tmp_path).open_table("_corpus_narrative").to_pandas()
+    assert len(after) == 2
+    assert set(after["doc_id"]) == {"doc-CR1", "doc-CR2"}
+
+
+def test_reembed_doc_empty_table_short_circuits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty per-doc table must not invoke the encoder (`self._encode`
+    against zero texts is wasted work and a few backends crash on empty
+    batch). Returns 0 instead.
+    """
+    import lancedb
+    import pyarrow as pa
+
+    from auto_research.extract.embeddings import _schema
+
+    db = lancedb.connect(tmp_path)
+    schema = _schema(384)
+    db.create_table("doc-EMPTY", data=pa.Table.from_pylist([], schema=schema))
+
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+
+    encode_calls: list[object] = []
+    original_encode = adapter._encode
+
+    def _track(texts: list[str], *, input_type: str = "document") -> object:
+        encode_calls.append(texts)
+        return original_encode(texts, input_type=input_type)
+
+    monkeypatch.setattr(adapter, "_encode", _track)
+
+    n = adapter.reembed_doc("doc-EMPTY")
+    assert n == 0
+    assert encode_calls == [], "encoder must not be called for an empty table"

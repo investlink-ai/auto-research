@@ -82,3 +82,48 @@ def test_voyage_embed_round_trip_against_recorded_response(
         adapter.embed(chunks)
     assert (tmp_path / "doc-vcr.lance").exists()
     assert (tmp_path / "_corpus_narrative.lance").exists()
+
+
+REEMBED_CASSETTE_PATH = (
+    Path(__file__).parent / "cassettes" / "test_embeddings"
+    / "voyage_reembed_finance_v2.yaml"
+)
+
+
+def test_voyage_reembed_doc_round_trip_against_recorded_response(
+    tmp_path: Path, voyage_env: None
+) -> None:
+    """Reembed against Voyage produces a per-doc table with the expected
+    1024-dim vector column and the original row count, having made exactly
+    two POST /v1/embeddings calls (the initial embed + the reembed).
+
+    Skip policy is stricter than the sibling embed round-trip: this test
+    skips whenever the cassette is missing, regardless of `VOYAGE_API_KEY`
+    presence. The auto-record-on-key path is opt-in via
+    `VOYAGE_RECORD_CASSETTES=1`. A `.env`-loaded but stale / invalid key
+    must not silently trigger a 401-burning live call when an operator
+    runs the integration suite from a checkout.
+    """
+    if not REEMBED_CASSETTE_PATH.exists() and not os.environ.get(
+        "VOYAGE_RECORD_CASSETTES"
+    ):
+        pytest.skip(
+            f"VCR cassette missing at {REEMBED_CASSETTE_PATH}. Record with "
+            "a valid VOYAGE_API_KEY and `VOYAGE_RECORD_CASSETTES=1`: "
+            "`VOYAGE_RECORD_CASSETTES=1 pytest "
+            "tests/integration/test_embeddings_vcr.py "
+            "-k voyage_reembed_doc_round_trip`."
+        )
+    import lancedb
+
+    adapter = EmbeddingAdapter(backend="voyage", rag_root=tmp_path)
+    chunks = [_chunk("Reembed round-trip text against voyage-finance-2")]
+    with _build_vcr().use_cassette(REEMBED_CASSETTE_PATH.name):
+        adapter.embed(chunks)
+        n = adapter.reembed_doc("doc-vcr")
+
+    assert n == 1
+    df = lancedb.connect(tmp_path).open_table("doc-vcr").to_pandas()
+    assert len(df) == 1
+    assert len(df["vector"].iloc[0]) == 1024  # voyage-finance-2 native dim
+    assert df["text"].iloc[0] == "Reembed round-trip text against voyage-finance-2"

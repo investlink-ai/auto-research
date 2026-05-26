@@ -753,3 +753,231 @@ def test_extract_s_filings_initializes_telemetry(
         )
     assert result.exit_code == 0, result.output
     mock_init.assert_called_once()
+
+
+# ---- extract reembed -----------------------------------------------------
+
+
+def _write_doc(rag_root: Path, doc_id: str, text: str, doc_type: str = "10-K") -> None:
+    """Embed one chunk under `doc_id` via BGE so `extract reembed` has a
+    real LanceDB table to operate on. Kept tiny — these tests exercise CLI
+    wiring, not adapter mechanics (those are covered in test_embeddings.py).
+    """
+    from datetime import date
+
+    from auto_research.extract.chunking import ChildChunk, ChunkMetadata
+    from auto_research.extract.chunking_contextual import ContextualChildChunk
+    from auto_research.extract.embeddings import EmbeddingAdapter
+
+    md = ChunkMetadata(
+        ticker="NVDA",
+        filing_date=date(2025, 3, 15),
+        fiscal_period="FY2025",
+        doc_type=doc_type,
+        doc_id=doc_id,
+    )
+    child = ChildChunk(
+        text=text,
+        char_span=(0, len(text)),
+        token_count=len(text.split()),
+        parent_id=f"{doc_id}:0:{len(text)}",
+        section_name="Item 7",
+        from_table=False,
+        metadata=md,
+    )
+    adapter = EmbeddingAdapter(backend="bge", rag_root=rag_root)
+    adapter.embed([ContextualChildChunk(child=child, context="")])
+
+
+def test_extract_reembed_help_advertises_qwen3_default(runner: CliRunner) -> None:
+    """`extract reembed --help` must show qwen3-mlx as the default and list
+    all three backends; the docstring claim about the default must match
+    Click's actual `default=` behavior.
+    """
+    result = runner.invoke(cli, ["extract", "reembed", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "[voyage|bge|qwen3-mlx]" in result.output
+    # Click line-wraps "[default: qwen3-mlx]" — check both halves independently.
+    assert "[default:" in result.output
+    assert "qwen3-mlx]" in result.output
+
+
+def test_extract_reembed_requires_exactly_one_target(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Zero of --doc-id/--corpus/--all => UsageError; two of them => UsageError."""
+    none_result = runner.invoke(
+        cli, ["extract", "reembed", "--backend", "bge", "--rag-root", str(tmp_path)]
+    )
+    assert none_result.exit_code != 0
+    assert "exactly one of --doc-id, --corpus, --all" in none_result.output
+
+    two_result = runner.invoke(
+        cli,
+        [
+            "extract", "reembed", "--backend", "bge",
+            "--rag-root", str(tmp_path),
+            "--doc-id", "doc-X",
+            "--corpus",
+        ],
+    )
+    assert two_result.exit_code != 0
+    assert "exactly one of --doc-id, --corpus, --all" in two_result.output
+
+
+def test_extract_reembed_dry_run_reports_tokens_and_zero_cost_for_bge(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Dry-run must NOT call the encoder. For BGE it reports $0 (in-process)
+    and a token count > 0. Asserts the output line format the operator sees.
+    """
+    _write_doc(tmp_path, "doc-DR", "a few words of dry run text")
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "reembed", "--backend", "bge",
+            "--rag-root", str(tmp_path),
+            "--doc-id", "doc-DR",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "reembed dry-run:" in out
+    assert "backend=bge" in out
+    assert "tables=1" in out
+    assert "rows=1" in out
+    assert "in-process" in out
+
+
+def test_extract_reembed_dry_run_voyage_reports_usd_estimate(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Voyage dry-run prints a $X.XX estimate derived from the rate dict.
+    No `VOYAGE_API_KEY` needed because dry-run never instantiates the
+    Voyage client (encoder not called).
+    """
+    _write_doc(tmp_path, "doc-DVY", "voyage cost estimation text")
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    result = runner.invoke(
+        cli,
+        [
+            "extract", "reembed", "--backend", "voyage",
+            "--rag-root", str(tmp_path),
+            "--doc-id", "doc-DVY",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "backend=voyage" in out
+    assert "/MTok" in out
+    assert "$" in out  # USD cost rendered
+
+
+def test_extract_reembed_doc_id_invokes_reembed_doc(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """--doc-id X forwards to adapter.reembed_doc('X'); --corpus is not called."""
+    _write_doc(tmp_path, "doc-RDX", "live path text")
+    with patch(
+        "auto_research.extract.embeddings.EmbeddingAdapter.reembed_doc",
+        autospec=True,
+        return_value=1,
+    ) as mock_doc, patch(
+        "auto_research.extract.embeddings.EmbeddingAdapter.reembed_corpus",
+        autospec=True,
+    ) as mock_corpus:
+        result = runner.invoke(
+            cli,
+            [
+                "extract", "reembed", "--backend", "bge",
+                "--rag-root", str(tmp_path),
+                "--doc-id", "doc-RDX",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    assert mock_doc.call_count == 1
+    assert mock_doc.call_args.args[1] == "doc-RDX"
+    mock_corpus.assert_not_called()
+
+
+def test_extract_reembed_all_walks_rag_root_excluding_corpus(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """--all enumerates `<rag_root>/*.lance` directories minus the corpus
+    store, then reembeds every per-doc table + the corpus once.
+    """
+    _write_doc(tmp_path, "doc-A1", "alpha text", doc_type="10-K")
+    _write_doc(tmp_path, "doc-A2", "beta text", doc_type="10-K")
+    with patch(
+        "auto_research.extract.embeddings.EmbeddingAdapter.reembed_doc",
+        autospec=True,
+        return_value=1,
+    ) as mock_doc, patch(
+        "auto_research.extract.embeddings.EmbeddingAdapter.reembed_corpus",
+        autospec=True,
+        return_value=2,
+    ) as mock_corpus:
+        result = runner.invoke(
+            cli,
+            [
+                "extract", "reembed", "--backend", "bge",
+                "--rag-root", str(tmp_path),
+                "--all",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    called_doc_ids = sorted(c.args[1] for c in mock_doc.call_args_list)
+    assert called_doc_ids == ["doc-A1", "doc-A2"]
+    assert mock_corpus.call_count == 1
+
+
+def test_extract_reembed_corpus_only_skips_per_doc_tables(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    _write_doc(tmp_path, "doc-CX", "corpus only text")
+    with patch(
+        "auto_research.extract.embeddings.EmbeddingAdapter.reembed_doc",
+        autospec=True,
+    ) as mock_doc, patch(
+        "auto_research.extract.embeddings.EmbeddingAdapter.reembed_corpus",
+        autospec=True,
+        return_value=1,
+    ) as mock_corpus:
+        result = runner.invoke(
+            cli,
+            [
+                "extract", "reembed", "--backend", "bge",
+                "--rag-root", str(tmp_path),
+                "--corpus",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    mock_doc.assert_not_called()
+    assert mock_corpus.call_count == 1
+
+
+def test_extract_reembed_failure_returns_nonzero_exit(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """If reembed_doc raises (e.g., dim mismatch), the CLI catches, logs,
+    and exits non-zero so operators wiring this into make targets see the
+    failure.
+    """
+    _write_doc(tmp_path, "doc-FAIL", "boom")
+    with patch(
+        "auto_research.extract.embeddings.EmbeddingAdapter.reembed_doc",
+        autospec=True,
+        side_effect=RuntimeError("simulated dim mismatch"),
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "extract", "reembed", "--backend", "bge",
+                "--rag-root", str(tmp_path),
+                "--doc-id", "doc-FAIL",
+            ],
+        )
+    assert result.exit_code != 0
+    assert "simulated dim mismatch" in result.output
