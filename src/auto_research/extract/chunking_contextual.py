@@ -198,7 +198,7 @@ def _cache_payload_key(
     `prompt_version` slot of `cache_key`) so a chunker bump
     invalidates the contextual cache transitively even when the
     contextual prompt version stays put — and vice versa. This is the
-    orthogonality the issue's design proposal calls out (#67).
+    orthogonality property the AGENTS.md INV-6 amendment requires.
 
     `EMBED_MODEL_VERSION` is deliberately NOT in this key: the embed
     model is a downstream consumer of `ContextualChildChunk` output,

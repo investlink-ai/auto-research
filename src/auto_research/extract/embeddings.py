@@ -338,13 +338,13 @@ def _ensure_bge_warmup() -> Any:
 
 def _schema(vector_dim: int) -> pa.Schema:
     # `chunker_version` / `contextual_prompt_version` / `embed_model_version`
-    # stamp each row with the three pure-function contracts that produced it
-    # (issue #67). At backfill scope these enable point-in-time provenance
-    # queries ("which rows came from chunker v3?") and back the
-    # materialization-versioned tables follow-up; at present they are
-    # write-only audit metadata. Same-name string values use `pa.string()`
-    # rather than dictionary-encoding — cardinality is tiny but per-row
-    # cost stays negligible at the corpus sizes LanceDB handles here.
+    # stamp each row with the three pure-function contracts that produced
+    # it. At backfill scope these enable point-in-time provenance queries
+    # ("which rows came from chunker v3?") and back the materialization-
+    # versioned tables follow-up; at present they are write-only audit
+    # metadata. Same-name string values use `pa.string()` rather than
+    # dictionary-encoding — cardinality is tiny but per-row cost stays
+    # negligible at the corpus sizes LanceDB handles here.
     return pa.schema([
         ("text", pa.string()),
         ("vector", pa.list_(pa.float32(), vector_dim)),

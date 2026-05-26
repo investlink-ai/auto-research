@@ -201,7 +201,7 @@ def test_contextualize_chunks_prompt_version_bump_invalidates_cache(
 def test_contextualize_chunks_chunker_version_bump_invalidates_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Issue #67 evidence: bumping `CHUNKER_VERSION` forces a fresh SDK call
+    """INV-6 generalized: bumping `CHUNKER_VERSION` forces a fresh SDK call
     even though the chunk text and contextual prompt version are unchanged.
 
     The silent-reuse mode this prevents: a chunker change that keeps a
@@ -236,7 +236,7 @@ def test_contextualize_chunks_chunker_version_bump_invalidates_cache(
 def test_contextualize_chunks_embed_model_version_bump_does_not_invalidate_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Issue #67 orthogonality: `EMBED_MODEL_VERSION_TAG` must NOT feed the
+    """Orthogonality: `EMBED_MODEL_VERSION_TAG` must NOT feed the
     contextual cache key — the embed model is a downstream consumer of
     `ContextualChildChunk`, not an input. Bumping it must re-embed, not
     re-call the LLM for contextual text.

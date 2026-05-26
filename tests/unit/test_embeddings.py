@@ -167,10 +167,10 @@ def test_embed_bge_writes_both_stores_atomically(tmp_path: Path) -> None:
 
 
 def test_embed_stamps_version_columns_in_rows(tmp_path: Path) -> None:
-    """Issue #67: each LanceDB row carries the three pure-function-contract
-    versions that produced it (chunker_version, contextual_prompt_version,
-    embed_model_version). Write-only audit metadata at present; backs the
-    materialization-versioned-tables follow-up.
+    """Each LanceDB row carries the three pure-function-contract versions
+    that produced it (chunker_version, contextual_prompt_version,
+    embed_model_version). Write-only audit metadata at present; backs
+    the materialization-versioned-tables follow-up.
     """
     import lancedb
 
@@ -195,9 +195,9 @@ def test_embed_stamps_version_columns_in_rows(tmp_path: Path) -> None:
 
 def test_embed_model_version_helper_composes_backend_model_tag() -> None:
     """`embed_model_version(backend, model)` returns the stable token used
-    to invalidate downstream caches transitively per issue #67. Backend is
-    part of the token (different backends serving the same model id can
-    diverge on quantization)."""
+    to invalidate downstream caches transitively. Backend is part of the
+    token (different backends serving the same model id can diverge on
+    quantization)."""
     assert embed_model_version("bge", "bge-small-en-v1.5") == (
         f"bge:bge-small-en-v1.5:{EMBED_MODEL_VERSION_TAG}"
     )

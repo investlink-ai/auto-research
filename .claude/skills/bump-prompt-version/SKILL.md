@@ -56,12 +56,11 @@ Before claiming done on any change that touches:
   normalization policy, or evidence of a vendor opaquely re-uploading
   weights under the same model id. Bump `EMBED_MODEL_VERSION_TAG`.
 
-Issue #67 generalized this skill's coverage from prompts to all three
-pure-function contracts (prompts, chunker, embed model) because each
-feeds a downstream content-hash cache that silently reuses stale
-artifacts on unbumped changes. Exactly one upstream version is bumped
-per PR; downstream cache keys / row metadata stamp the resulting token
-transitively.
+This skill covers all three pure-function contracts (prompts, chunker,
+embed model) because each feeds a downstream content-hash cache that
+silently reuses stale artifacts on unbumped changes. Exactly one
+upstream version is bumped per PR; downstream cache keys / row
+metadata stamp the resulting token transitively.
 
 ## Where prompts and their versions live
 
