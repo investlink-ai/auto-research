@@ -62,15 +62,17 @@ _TIER_TO_DTYPE: dict[str, str] = {
 # without pinning the device to full 32K on every batch.
 _RERANKER_MAX_LENGTH = 2048
 
-# Prompt template per the Qwen3-Reranker model card. The instruction
-# is domain-tailored to this corpus (SEC filings + earnings transcripts
-# + analyst materials) — matches the embeddings module's Qwen3 query
-# instruction and is the natural-language analogue of the same domain
-# tailoring. Revisit when a Ragas / DeepEval baseline gives a tuning
-# handle.
+# Prompt template per the Qwen3-Reranker model card. The "Given X,
+# retrieve Y" framing matches the model's training distribution
+# (the model card's default instruction is "Given a web search query,
+# retrieve relevant passages that answer the query"), and the corpus
+# tail mirrors `embeddings._QWEN3_QUERY_INSTRUCTION` so dense + rerank
+# describe the same task. Output direction ("yes"/"no") is already
+# pinned by `_RERANKER_PROMPT_PREFIX`; not repeated here. Revisit when
+# a Ragas / DeepEval baseline gives a tuning handle.
 _RERANKER_INSTRUCTION = (
-    "Given a financial research query, judge whether the passage is "
-    "relevant. Answer yes or no."
+    "Given a financial research query, retrieve relevant passages "
+    "from SEC filings, earnings transcripts, and analyst materials."
 )
 _RERANKER_PROMPT_PREFIX = (
     "<|im_start|>system\n"
