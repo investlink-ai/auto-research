@@ -9,7 +9,9 @@ from auto_research.extract.embeddings import (
     ALLOWED_MLX_QWEN3_MODELS,
     BGE_MODEL_ID,
     DEFAULT_MLX_QWEN3_MODEL,
+    EMBED_MODEL_VERSION_TAG,
     EmbeddingAdapter,
+    embed_model_version,
     resolve_backend_from_env,
 )
 
@@ -162,6 +164,54 @@ def test_embed_bge_writes_both_stores_atomically(tmp_path: Path) -> None:
     hits_corpus = adapter.query("export controls", k=3, store="corpus_narrative")
     assert len(hits_doc) == 3
     assert len(hits_corpus) == 3
+
+
+def test_embed_stamps_version_columns_in_rows(tmp_path: Path) -> None:
+    """Each LanceDB row carries the three pure-function-contract versions
+    that produced it (chunker_version, contextual_prompt_version,
+    embed_model_version). Write-only audit metadata at present; backs
+    the materialization-versioned-tables follow-up.
+    """
+    import lancedb
+
+    from auto_research.extract.chunking import CHUNKER_VERSION
+    from auto_research.extract.prompts.contextual_chunk import (
+        CONTEXTUAL_CHUNK_PROMPT_VERSION,
+    )
+
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    adapter.embed([_wrap(_make_child("stamped row passage", doc_id="doc-STAMP"))])
+
+    df = lancedb.connect(tmp_path).open_table("doc-STAMP").to_pandas()
+    assert len(df) == 1
+    assert df["chunker_version"].iloc[0] == CHUNKER_VERSION
+    assert df["contextual_prompt_version"].iloc[0] == CONTEXTUAL_CHUNK_PROMPT_VERSION
+    assert df["embed_model_version"].iloc[0] == f"bge:{BGE_MODEL_ID}:{EMBED_MODEL_VERSION_TAG}"
+
+    # And the per-corpus narrative store carries the same stamps.
+    corpus_df = lancedb.connect(tmp_path).open_table("_corpus_narrative").to_pandas()
+    assert corpus_df["chunker_version"].iloc[0] == CHUNKER_VERSION
+
+
+def test_embed_model_version_helper_composes_backend_model_tag() -> None:
+    """`embed_model_version(backend, model)` returns the stable token used
+    to invalidate downstream caches transitively. Backend is part of the
+    token (different backends serving the same model id can diverge on
+    quantization)."""
+    assert embed_model_version("bge", "bge-small-en-v1.5") == (
+        f"bge:bge-small-en-v1.5:{EMBED_MODEL_VERSION_TAG}"
+    )
+    assert embed_model_version("voyage", "voyage-finance-2") == (
+        f"voyage:voyage-finance-2:{EMBED_MODEL_VERSION_TAG}"
+    )
+
+
+def test_embed_model_version_property_matches_helper(tmp_path: Path) -> None:
+    """The adapter property delegates to the module-level helper so callers
+    that hold an adapter (workers, embed-once test scaffolding) and callers
+    that compose tokens for cache keys see the same value."""
+    adapter = EmbeddingAdapter(backend="bge", rag_root=tmp_path)
+    assert adapter.embed_model_version == embed_model_version("bge", adapter.model)
 
 
 def test_embed_query_is_deterministic_top_k(tmp_path: Path) -> None:

@@ -1,7 +1,7 @@
 ---
 name: bump-prompt-version
-description: Use when editing any prompt template (worker prompts, extraction prompts, research-agent node prompts, live-critic prompts). Enforces INV-6 — extraction is a pure function of (raw_doc, prompt_version); changing a prompt without bumping its version invalidates the content-hash cache contract and silently corrupts eval baselines. This is the bug interviewers probe for under "how do you handle prompt evolution."
-argument-hint: "[path to the prompt file you edited, if known]"
+description: Use when editing any prompt template (worker prompts, extraction prompts, research-agent node prompts, live-critic prompts), the chunker pure-function contract (boundary logic in extract/chunking/), or the embed-model contract (extract/embeddings.py). Enforces INV-6 — extraction / chunking / embedding are each pure functions of an explicit version-pinned contract; changing a contract without bumping its version invalidates the content-hash cache contract and silently corrupts eval baselines or downstream retrieval. This is the bug interviewers probe for under "how do you handle prompt evolution."
+argument-hint: "[path to the contract file you edited, if known]"
 allowed-tools: Read, Grep, Bash, Edit
 ---
 
@@ -44,6 +44,23 @@ Before claiming done on any change that touches:
 - `src/auto_research/agents/live_critic.py` Pydantic AI instructions.
 - Few-shot example files under `eval/gold_sets/` when they're referenced by
   prompt templates at runtime.
+- **Chunker pure-function contract** — anything under
+  `src/auto_research/extract/chunking/` that could shift `ParentChunk`
+  /`ChildChunk` `char_span` boundaries on the same input HTML (section
+  detector tweaks, packing heuristics, token-budget constants that move
+  splits, table-emission policy). Bump
+  `CHUNKER_VERSION` in `extract/chunking/_version.py`.
+- **Embed-model contract** — anything in `src/auto_research/extract/
+  embeddings.py` that changes the `(text, backend, model) → vector`
+  contract: query/document prefixing, tokenizer truncation budget,
+  normalization policy, or evidence of a vendor opaquely re-uploading
+  weights under the same model id. Bump `EMBED_MODEL_VERSION_TAG`.
+
+This skill covers all three pure-function contracts (prompts, chunker,
+embed model) because each feeds a downstream content-hash cache that
+silently reuses stale artifacts on unbumped changes. Exactly one
+upstream version is bumped per PR; downstream cache keys / row
+metadata stamp the resulting token transitively.
 
 ## Where prompts and their versions live
 
@@ -148,9 +165,36 @@ rg -nP '^[A-Z_]+_PROMPT_VERSION\s*=' src/auto_research/extract/prompts/ \
 **3. No runtime-derived version (must be a literal string, not a hash call):**
 
 ```bash
-rg -nP '_PROMPT_VERSION\s*=\s*(hashlib|hash\(|sha256|os\.environ)' \
+rg -nP '(_PROMPT_VERSION|CHUNKER_VERSION|EMBED_MODEL_VERSION_TAG)\s*=\s*(hashlib|hash\(|sha256|os\.environ)' \
    src/auto_research/
 # Expected: zero hits.
+```
+
+**3b. Chunker-contract edits bumped `CHUNKER_VERSION`:**
+
+```bash
+# If your diff touched extract/chunking/ in ways that could move boundaries,
+# the same diff must show a CHUNKER_VERSION bump.
+if git diff --name-only origin/main... | rg -q 'src/auto_research/extract/chunking/'; then
+  git diff origin/main... -- src/auto_research/extract/chunking/_version.py \
+    | rg -P '^[+-]\s*CHUNKER_VERSION\s*='
+  # Expected: one - line + one + line. Zero hits = STOP (or document why
+  # the diff is pure-refactor / non-boundary-affecting in the PR body).
+fi
+```
+
+**3c. Embed-model-contract edits bumped `EMBED_MODEL_VERSION_TAG`:**
+
+```bash
+# If your diff touched embeddings.py in ways that change the encoder
+# contract (prefixing, truncation, normalization), the same diff must
+# bump EMBED_MODEL_VERSION_TAG.
+if git diff --name-only origin/main... | rg -q 'src/auto_research/extract/embeddings.py'; then
+  git diff origin/main... -- src/auto_research/extract/embeddings.py \
+    | rg -P '^[+-]\s*EMBED_MODEL_VERSION_TAG\s*='
+  # Expected: one - line + one + line for contract-changing diffs. Zero
+  # hits is fine for pure refactors / adding new models / docstring edits.
+fi
 ```
 
 **4. Langfuse registry includes the new version** (run this after the
@@ -185,6 +229,14 @@ ls eval/baselines/ten_k_guidance__v5__*.json
       next materialization run was noted in the PR body (since cached
       outputs feed `data/extracted/` which feeds the materializer).
 - [ ] No `extract/cache/` was manually deleted under the unchanged version.
+- [ ] If the diff touched `src/auto_research/extract/chunking/` in ways
+      that could shift chunk boundaries, `CHUNKER_VERSION` bumped in
+      `extract/chunking/_version.py`. Pure refactors / boundary-stable
+      diffs noted as such in the PR body.
+- [ ] If the diff touched `extract/embeddings.py` in ways that change
+      the `(text, backend, model) → vector` contract (prefixing,
+      truncation, normalization, vendor opaque re-upload),
+      `EMBED_MODEL_VERSION_TAG` bumped.
 
 ## When NOT to bump
 
