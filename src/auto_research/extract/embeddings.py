@@ -85,6 +85,33 @@ _VOYAGE_RETRY_WAIT_INITIAL = 20.0
 _VOYAGE_RETRY_WAIT_MAX = 120.0
 _VOYAGE_RETRY_ATTEMPTS = 6
 
+# LanceDB FTS kwargs applied identically to the per-doc and per-corpus
+# narrative tables. Pulled to a module constant so the two `create_fts_
+# index` callsites stay in sync — diverging tokenizer / stopword / stem
+# settings across the two stores would make the same BM25 query produce
+# different rankings depending on which surface it hit.
+#
+# - `use_tantivy=False`: Lance native FTS, not the Tantivy backend.
+#   Native supports incremental updates via `table.add()` (needed for
+#   the corpus store, which appends per filing), avoids Tantivy's
+#   1 GB writer-heap allocation per index, and matches the BM25
+#   semantics we need (phrase / fuzzy / regex queries are out of scope).
+# - `replace=True`: idempotent against re-embeds — the per-doc table is
+#   recreated on every `embed()` (`mode="overwrite"`); defensive on the
+#   per-corpus path against future code paths that might re-invoke this.
+# - `remove_stop_words=True` and `stem=True`: empirically required for
+#   SEC English. Without stopword removal, chunks containing only
+#   common-word query overlap rank above lexically-disjoint relevant
+#   chunks. Without stemming, BM25 misses morphological variants
+#   ("change"/"changed"/"changes" don't collapse). Both calibrated
+#   during Issue #16's hybrid-retrieval micro-corpus tuning.
+_FTS_INDEX_KWARGS: dict[str, Any] = {
+    "use_tantivy": False,
+    "replace": True,
+    "remove_stop_words": True,
+    "stem": True,
+}
+
 _log = logging.getLogger(__name__)
 _tracer = trace.get_tracer(__name__)
 
@@ -248,18 +275,87 @@ class EmbeddingAdapter:
                 db = lancedb.connect(self._rag_root)
                 schema = _schema(self._vector_dim)
 
-                db.create_table(doc_id, data=rows, schema=schema, mode="overwrite")
+                per_doc_tbl = db.create_table(
+                    doc_id, data=rows, schema=schema, mode="overwrite"
+                )
+                per_doc_tbl.create_fts_index("text", **_FTS_INDEX_KWARGS)
 
                 narrative_rows = [r for r in rows if r["doc_type"] in NARRATIVE_DOC_TYPES]
                 if narrative_rows:
                     if _PER_CORPUS_STORE in db.table_names():
+                        # LanceDB updates the FTS index incrementally on `.add()`.
                         db.open_table(_PER_CORPUS_STORE).add(narrative_rows)
                     else:
-                        db.create_table(
+                        corpus_tbl = db.create_table(
                             _PER_CORPUS_STORE, data=narrative_rows, schema=schema
                         )
+                        corpus_tbl.create_fts_index("text", **_FTS_INDEX_KWARGS)
                 span.set_attribute("embedding.narrative_count", len(narrative_rows))
                 span.set_attribute("extract.outcome", "success")
+            except Exception as exc:
+                span.set_attribute("extract.outcome", "error")
+                span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+                raise
+
+    def bm25_query(
+        self,
+        text: str,
+        *,
+        k: int,
+        store: Literal["per_doc", "corpus_narrative"] = "per_doc",
+        doc_id: str | None = None,
+        where: str | None = None,
+    ) -> list[QueryHit]:
+        """Lexical BM25 search over the LanceDB FTS index on the `text` column.
+
+        Returned hits are ordered descending by `_score` (higher = more
+        relevant), packed into the same `QueryHit` shape `query` returns —
+        callers treat the list order as the canonical ranking and use
+        `score` only for surfacing the raw retriever number.
+
+        Sharing the adapter (and its tables) with `query` keeps BM25 and
+        dense over exactly the same corpus, the same metadata columns, and
+        the same `where` filter (ADR D7); the hybrid retriever in
+        `rag_retrieval.py` composes the two via RRF without orchestrating
+        any second source of truth.
+        """
+        if store == "per_doc" and doc_id is None:
+            raise ValueError("doc_id required when store='per_doc'")
+        with _tracer.start_as_current_span("extract.bm25_query") as span:
+            span.set_attribute("extract.worker", _WORKER)
+            # `embedding.backend`/`model` deliberately omitted: BM25 is
+            # purely lexical (Lance FTS over the `text` column) and is
+            # independent of which embedding backend produced the
+            # vector index alongside it.
+            span.set_attribute("embedding.store", store)
+            span.set_attribute("embedding.k", k)
+            span.set_attribute("embedding.has_filter", where is not None)
+            if doc_id is not None:
+                span.set_attribute("extract.doc_id", doc_id)
+            try:
+                db = lancedb.connect(self._rag_root)
+                table_name = doc_id if store == "per_doc" else _PER_CORPUS_STORE
+                tbl = db.open_table(table_name)
+                builder = tbl.search(text, query_type="fts").limit(k)
+                if where:
+                    builder = builder.where(where, prefilter=True)
+                df = builder.to_pandas()
+                hits = [
+                    QueryHit(
+                        text=row["text"],
+                        score=float(row["_score"]),
+                        parent_id=row["parent_id"],
+                        section_name=row["section_name"],
+                        ticker=row["ticker"],
+                        filing_date=date.fromisoformat(row["filing_date"]),
+                        doc_type=row["doc_type"],
+                        doc_id=row["doc_id"],
+                    )
+                    for _, row in df.iterrows()
+                ]
+                span.set_attribute("embedding.hits_count", len(hits))
+                span.set_attribute("extract.outcome", "success")
+                return hits
             except Exception as exc:
                 span.set_attribute("extract.outcome", "error")
                 span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))

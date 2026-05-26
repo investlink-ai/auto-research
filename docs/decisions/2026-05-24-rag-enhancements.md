@@ -231,6 +231,41 @@ on the hybrid-retrieve function. Default is symmetric (the standard
 RRF). Tuning is deferred to when there's eval data, but the surface is
 present so we don't need a function-signature change later.
 
+> *Amendment (2026-05-26):* The BM25 backing implementation chosen at
+> #16 pickup is **LanceDB native FTS** (built on a Lance FTS index
+> created at `embed()`-time on the `text` column, with `use_tantivy=
+> False, remove_stop_words=True, stem=True`), not `rank_bm25` as the
+> issue body originally suggested. Four reasons:
+>
+> 1. **One source of truth for BM25.** Signal A1's cross-doc retrieval
+>    (W3) will run BM25 against the per-corpus narrative index. A
+>    second BM25 implementation here would diverge in tokenizer and
+>    stopword behavior; consolidating now avoids the drift.
+> 2. **Index belongs with the data.** Building FTS in `embed()` makes
+>    BM25 and the vector index share the same lifecycle and atomicity
+>    contract — both are written from the same `embed(chunks)` call,
+>    same `where=` filter applies to both at query time (so this ADR's
+>    D7 metadata filters carry through to lexical retrieval too).
+> 3. **No per-query index rebuild.** `rank_bm25` reconstructs the
+>    corpus index on every retrieval call; LanceDB FTS is built once
+>    and queried in constant time, which is the right shape for both
+>    per-doc and corpus-wide retrieval.
+> 4. **Per-source scores stay surfaceable.** The hybrid retriever runs
+>    `bm25_query` and `query` separately, fuses with the existing pure
+>    `rrf_fuse`, and exposes `bm25_score` / `dense_score` on
+>    `HybridHit` from each retriever's raw score. ADR D8's weight hook
+>    lives in `rrf_fuse`; no `Reranker` subclass is required.
+>
+> The function signature `hybrid_retrieve(*, query, adapter, parents,
+> doc_id, k, candidate_k, bm25_weight, dense_weight, rrf_k, where)`
+> exposes the same RRF weight knob this ADR specified.
+>
+> Operational footprint: `EmbeddingAdapter.embed()` calls
+> `create_fts_index("text", use_tantivy=False, replace=True,
+> remove_stop_words=True, stem=True)` after writing per-doc rows, and
+> on first creation of the per-corpus narrative table. Incremental
+> `.add()` calls to the corpus table update the FTS index in place.
+
 **D10. Single-shot cutoff is a tunable constant (Issue #19).** Define
 `SINGLE_SHOT_TOKEN_CUTOFF = 100_000` in `extract/chunking.py` as a
 module-level constant with a docstring stating it's calibrated, not
