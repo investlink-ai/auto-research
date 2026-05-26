@@ -121,6 +121,15 @@ and are encoded here so those issues inherit the right starting state.
 > alerting — lives at the worker layer. The original Issue #15 AC
 > wording ("fallback when `VOYAGE_API_KEY` absent or quota exceeded")
 > is superseded: only the "absent" half is in scope.
+>
+> *Retry policy (2026-05-26):* The adapter applies tenacity exponential-
+> with-jitter backoff (`initial=20s, max=120s, attempts=6`) on
+> `RateLimitError` from Voyage. This project's Voyage tier is **3 RPM /
+> 10K TPM**, much tighter than the doc-page Tier-1 baseline, so the
+> initial wait aligns with the RPM window. Sustained throughput at this
+> tier requires *proactive* pacing at the orchestrator layer (one call
+> every ~20s); reactive retries alone will not keep a parallel backfill
+> from 429-ing immediately. Tracked separately as a follow-up issue.
 
 **D2. Reranker → `bge-reranker-v2-m3`.** Replace `bge-reranker-base` in
 `design.md:212` and `ARCHITECTURE.md:101`. Used by

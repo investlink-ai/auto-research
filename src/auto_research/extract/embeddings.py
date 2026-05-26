@@ -32,6 +32,13 @@ import pyarrow as pa
 from numpy.typing import NDArray
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
+from tenacity import (
+    Retrying,
+    before_sleep_log,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from auto_research.extract.chunking_contextual import ContextualChildChunk
 from auto_research.telemetry import truncate_status_description as _truncate
@@ -60,6 +67,23 @@ NARRATIVE_DOC_TYPES: frozenset[str] = frozenset({"10-K", "10-Q", "transcript"})
 _BGE_MODEL_NAME = "bge-small-en-v1.5"
 _PER_CORPUS_STORE = "_corpus_narrative"
 _WORKER = "embeddings"
+
+# Voyage rate-limit posture. This project's Voyage account is on the
+# constrained tier — **3 RPM / 10,000 TPM** — not the doc-page Tier 1
+# (2000 RPM / millions TPM). 429 is the documented signal across tiers
+# and Voyage recommends exponential-with-jitter backoff. The 20s initial
+# wait matches the 3-RPM window so the first retry lands at the start of
+# the next quota slot; the 120s cap allows a TPM-bound burst to settle.
+# Six attempts span ~3-4 minutes worst-case before the RateLimitError
+# propagates — at which point the orchestrator (not the adapter) decides
+# whether to wait longer, alert, or stop the backfill.
+#
+# These retries are REACTIVE only. At 3 RPM, sustained throughput needs
+# proactive pacing (one call every ~20s) at the orchestrator / backfill
+# layer; the adapter is too low-level to coordinate that across workers.
+_VOYAGE_RETRY_WAIT_INITIAL = 20.0
+_VOYAGE_RETRY_WAIT_MAX = 120.0
+_VOYAGE_RETRY_ATTEMPTS = 6
 
 _log = logging.getLogger(__name__)
 _tracer = trace.get_tracer(__name__)
@@ -149,12 +173,27 @@ class EmbeddingAdapter:
             )
             return arr.astype(np.float32)
 
-        # Voyage errors (including RateLimitError) propagate to the caller.
-        # A live switch to BGE here would corrupt the corpus vector space —
-        # 1024-dim Voyage and 384-dim BGE embeddings are not comparable in
-        # dense retrieval. Quota/retry handling is the worker layer's job.
-        resp = self._voyage_client.embed(
-            texts, model=self._decision.model, input_type=input_type
+        from voyageai.error import RateLimitError
+
+        # Retry the Voyage call on 429s with exponential backoff + jitter
+        # (matches Voyage's documented recommendation). After the budget is
+        # exhausted, RateLimitError propagates — the adapter never switches
+        # to BGE mid-run, since a mixed-vector-space corpus is incoherent.
+        retrying = Retrying(
+            retry=retry_if_exception_type(RateLimitError),
+            wait=wait_exponential_jitter(
+                initial=_VOYAGE_RETRY_WAIT_INITIAL,
+                max=_VOYAGE_RETRY_WAIT_MAX,
+            ),
+            stop=stop_after_attempt(_VOYAGE_RETRY_ATTEMPTS),
+            before_sleep=before_sleep_log(_log, logging.WARNING),
+            reraise=True,
+        )
+        resp = retrying(
+            self._voyage_client.embed,
+            texts,
+            model=self._decision.model,
+            input_type=input_type,
         )
         return np.asarray(resp.embeddings, dtype=np.float32)
 

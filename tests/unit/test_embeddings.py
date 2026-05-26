@@ -119,14 +119,69 @@ def test_embed_query_is_deterministic_top_k(
     assert [h.text for h in a] == [h.text for h in b]
 
 
-def test_voyage_rate_limit_error_propagates(
+def _shrink_voyage_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Override the module's retry waits to near-zero for fast tests.
+    Tenacity reads these at Retrying() construction inside _encode, so
+    monkeypatching before the embed call takes effect.
+    """
+    monkeypatch.setattr(
+        "auto_research.extract.embeddings._VOYAGE_RETRY_WAIT_INITIAL", 0.001
+    )
+    monkeypatch.setattr(
+        "auto_research.extract.embeddings._VOYAGE_RETRY_WAIT_MAX", 0.01
+    )
+
+
+def test_voyage_rate_limit_retries_then_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A live Voyage RateLimitError must propagate to the caller — the
-    adapter does NOT silently switch to BGE mid-run. Mixing Voyage and BGE
-    vectors in one corpus produces an incoherent vector space.
+    """Voyage 429s trigger tenacity exponential-jitter retries; the embed
+    completes if the endpoint recovers within the retry budget. Decision
+    stays on voyage — no silent BGE swap.
     """
     monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
+    _shrink_voyage_retry(monkeypatch)
+
+    from voyageai.error import RateLimitError
+
+    class _QuotaError(RateLimitError):
+        def __init__(self) -> None:
+            super().__init__("simulated 429")  # type: ignore[no-untyped-call]
+
+    class _FlakyVoyage:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def embed(self, texts: list[str], model: str, input_type: str) -> object:
+            self.calls += 1
+            if self.calls < 3:
+                raise _QuotaError()
+            return type(
+                "Resp", (), {"embeddings": [[0.0] * 1024 for _ in texts]}
+            )()
+
+    adapter = EmbeddingAdapter(rag_root=tmp_path)
+    fake = _FlakyVoyage()
+    adapter.__dict__["_voyage_client"] = fake
+
+    adapter.embed([_wrap(_make_child("retry me", doc_id="doc-R"))])
+
+    assert fake.calls == 3
+    assert adapter.decision.backend == "voyage"
+
+
+def test_voyage_rate_limit_error_propagates_after_retry_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Persistent 429s exhaust the retry budget; RateLimitError propagates
+    to the caller. The adapter does NOT silently switch to BGE — mixing
+    Voyage and BGE vectors in one corpus produces an incoherent space.
+    """
+    monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
+    _shrink_voyage_retry(monkeypatch)
+    monkeypatch.setattr(
+        "auto_research.extract.embeddings._VOYAGE_RETRY_ATTEMPTS", 2
+    )
 
     from voyageai.error import RateLimitError
 
@@ -135,17 +190,23 @@ def test_voyage_rate_limit_error_propagates(
             super().__init__("simulated 429")  # type: ignore[no-untyped-call]
 
     class _AlwaysQuota:
+        def __init__(self) -> None:
+            self.calls = 0
+
         def embed(self, texts: list[str], model: str, input_type: str) -> object:
+            self.calls += 1
             raise _QuotaError()
 
     adapter = EmbeddingAdapter(rag_root=tmp_path)
     assert adapter.decision.reason == "voyage_used"
-    adapter.__dict__["_voyage_client"] = _AlwaysQuota()
+    fake = _AlwaysQuota()
+    adapter.__dict__["_voyage_client"] = fake
 
     with pytest.raises(RateLimitError):
         adapter.embed([_wrap(_make_child("data center revenue", doc_id="doc-Q"))])
 
-    # Decision unchanged after the error — no silent backend swap.
+    # All attempts consumed; decision unchanged.
+    assert fake.calls == 2
     assert adapter.decision == FallbackDecision(
         "voyage", "voyage-finance-2", "voyage_used"
     )
