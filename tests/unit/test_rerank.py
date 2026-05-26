@@ -8,12 +8,10 @@ in tests/live/.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
 from datetime import date
 from typing import Any
 from unittest.mock import patch
 
-import numpy as np
 import pytest
 
 from auto_research.extract.chunking import ChunkMetadata, ParentChunk
@@ -190,20 +188,27 @@ _YES_TOKEN_ID = 10
 _NO_TOKEN_ID = 20
 
 
-class _FakeModelOutput:
-    """Mimics `transformers` CausalLM output: `.logits` is a tensor of
-    shape (batch, seq, vocab). Only the last-position slice is read by
-    `Qwen3Reranker.score`, so the other positions are zero-filled."""
-
-    def __init__(self, yes_logit: float, no_logit: float, vocab_size: int = 100) -> None:
-        last = np.full(vocab_size, -1e4, dtype=np.float32)
-        last[_YES_TOKEN_ID] = yes_logit
-        last[_NO_TOKEN_ID] = no_logit
-        self.logits = np.zeros((1, 4, vocab_size), dtype=np.float32)
-        self.logits[0, -1, :] = last
-
-
 class _FakeTokenizer:
+    """Stand-in for a HuggingFace tokenizer.
+
+    Supports the surface `Qwen3Reranker.score` actually touches:
+    `convert_tokens_to_ids`, `encode` (single-string, for prefix/suffix
+    pre-tokenization + single-token assertion), and call-form on a list
+    of bodies returning `{"input_ids": list[list[int]]}`. Exposes
+    `pad_token_id` / `eos_token_id` so the padding path inside
+    `score()` can look them up.
+    """
+
+    pad_token_id = 0
+    eos_token_id = 99
+
+    def convert_tokens_to_ids(self, text: str) -> int:
+        if text == "yes":
+            return _YES_TOKEN_ID
+        if text == "no":
+            return _NO_TOKEN_ID
+        return 1
+
     def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
         if text == "yes":
             return [_YES_TOKEN_ID]
@@ -213,27 +218,50 @@ class _FakeTokenizer:
 
     def __call__(
         self,
-        prompt: str,
-        return_tensors: str = "pt",
+        text_input: list[str] | str,
+        *,
+        add_special_tokens: bool = False,
         truncation: bool = True,
         max_length: int = 2048,
-    ) -> dict[str, Any]:
-        class _Inputs(dict[str, Any]):
-            def to(self, device: str) -> _Inputs:
-                return self
-
-        return _Inputs(input_ids=[[1, 2, 3, 4]])
+        return_attention_mask: bool = True,
+    ) -> dict[str, list[list[int]]]:
+        if isinstance(text_input, str):
+            text_input = [text_input]
+        # One body row per input; content is irrelevant — the fake model
+        # reads the configured logit table by row index, not by ids.
+        return {"input_ids": [[5, 6, 7, 8] for _ in text_input]}
 
 
 class _FakeModel:
-    """Yields the next pre-canned (yes_logit, no_logit) pair per call."""
+    """Returns logits with caller-specified (yes, no) values at the last
+    position of each row. One row per batch input."""
 
     def __init__(self, score_sequence: list[tuple[float, float]]) -> None:
-        self._iter: Iterator[tuple[float, float]] = iter(score_sequence)
+        self._score_sequence = list(score_sequence)
 
-    def __call__(self, **inputs: object) -> _FakeModelOutput:
-        yes, no = next(self._iter)
-        return _FakeModelOutput(yes, no)
+    def __call__(
+        self,
+        *,
+        input_ids: Any,
+        attention_mask: Any = None,
+        **_: Any,
+    ) -> Any:
+        import torch
+
+        batch = input_ids.shape[0]
+        seq = input_ids.shape[1]
+        vocab = 100
+        logits = torch.full((batch, seq, vocab), -1e4, dtype=torch.float32)
+        for i in range(batch):
+            yes_logit, no_logit = self._score_sequence[i]
+            logits[i, -1, _YES_TOKEN_ID] = yes_logit
+            logits[i, -1, _NO_TOKEN_ID] = no_logit
+
+        class _Out:
+            def __init__(self, logits: Any) -> None:
+                self.logits = logits
+
+        return _Out(logits)
 
     def eval(self) -> _FakeModel:
         return self
@@ -268,7 +296,7 @@ def test_score_returns_yes_probability_per_passage() -> None:
 def test_score_is_deterministic_for_same_inputs() -> None:
     """Two calls with the same model fixtures and inputs produce
     bit-identical scores (no sampling, eval mode)."""
-    fixed_seq = [(2.0, -1.0)] * 2
+    fixed_seq = [(2.0, -1.0)]
 
     def make() -> tuple[_FakeModel, _FakeTokenizer]:
         return _FakeModel(score_sequence=list(fixed_seq)), _FakeTokenizer()
@@ -291,6 +319,41 @@ def test_score_empty_passages_returns_empty_list() -> None:
     ):
         scores = Qwen3Reranker(tier="ci-cpu").score(query="q", passages=[])
     assert scores == []
+
+
+def test_score_runs_one_forward_per_batch_not_per_passage() -> None:
+    """All N passages must be scored in a single model forward pass —
+    the batching optimization is the headline perf win. If `score()`
+    loops, this fake will record N>1 calls."""
+    call_count = 0
+
+    class _CountingFakeModel(_FakeModel):
+        def __call__(
+            self,
+            *,
+            input_ids: Any,
+            attention_mask: Any = None,
+            **kwargs: Any,
+        ) -> Any:
+            nonlocal call_count
+            call_count += 1
+            return super().__call__(
+                input_ids=input_ids, attention_mask=attention_mask, **kwargs
+            )
+
+    fake_model = _CountingFakeModel(
+        score_sequence=[(1.0, 0.0), (1.0, 0.0), (1.0, 0.0), (1.0, 0.0)]
+    )
+    fake_tokenizer = _FakeTokenizer()
+    with patch(
+        "auto_research.extract.rerank._ensure_qwen3_reranker_warmup",
+        return_value=(fake_model, fake_tokenizer),
+    ):
+        scores = Qwen3Reranker(tier="ci-cpu").score(
+            query="q", passages=["a", "b", "c", "d"]
+        )
+    assert len(scores) == 4
+    assert call_count == 1, f"expected single batched forward; got {call_count}"
 
 
 # ---------------------------------------------------------------------
@@ -379,42 +442,44 @@ def test_assert_single_token_raises_on_multi_token_yes() -> None:
         _assert_yes_no_single_token(_MultiTokTokenizer())
 
 
-def test_truncate_passage_preserves_suffix_on_overlong_input() -> None:
-    """`_truncate_passage_to_budget` shrinks the passage so the assembled
-    prompt fits in `max_length`, leaving the assistant suffix intact at
-    the end of the encoded sequence."""
-    from auto_research.extract.rerank import _truncate_passage_to_budget
+def test_truncation_is_handled_inside_batched_tokenizer_call() -> None:
+    """Truncation moves into the batched `tokenizer(...)` call with
+    `max_length=body_budget`; no separate `_truncate_passage_to_budget`
+    helper is needed. This test pins the contract that the tokenizer is
+    invoked with `truncation=True` and a finite `max_length`."""
+    captured: dict[str, object] = {}
 
-    # A tokenizer where each space-separated word becomes one token id.
-    class _WordTokenizer:
-        def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
-            return list(range(1, len(text.split()) + 1))
+    class _RecordingTokenizer(_FakeTokenizer):
+        def __call__(
+            self,
+            text_input: list[str] | str,
+            *,
+            add_special_tokens: bool = False,
+            truncation: bool = True,
+            max_length: int = 2048,
+            return_attention_mask: bool = True,
+        ) -> dict[str, list[list[int]]]:
+            # Only the batched-bodies call records — the prefix/suffix
+            # pre-tokenization uses `encode()`, a different code path.
+            if isinstance(text_input, list):
+                captured["truncation"] = truncation
+                captured["max_length"] = max_length
+                captured["batch_size"] = len(text_input)
+            return super().__call__(
+                text_input,
+                add_special_tokens=add_special_tokens,
+                truncation=truncation,
+                max_length=max_length,
+                return_attention_mask=return_attention_mask,
+            )
 
-        def decode(self, ids: list[int], skip_special_tokens: bool = False) -> str:
-            return " ".join(f"w{i}" for i in ids)
-
-    long_passage = " ".join(["word"] * 5000)
-    truncated = _truncate_passage_to_budget(
-        passage=long_passage,
-        tokenizer=_WordTokenizer(),
-        budget=100,
-    )
-    # The returned string tokenizes to ≤ budget tokens.
-    assert len(_WordTokenizer().encode(truncated, add_special_tokens=False)) <= 100
-    # And it is shorter than the input.
-    assert len(truncated.split()) < len(long_passage.split())
-
-
-def test_truncate_passage_passthrough_when_under_budget() -> None:
-    """Short passages return unchanged — no decode round-trip cost."""
-    from auto_research.extract.rerank import _truncate_passage_to_budget
-
-    class _WordTokenizer:
-        def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
-            return list(range(1, len(text.split()) + 1))
-
-        def decode(self, ids: list[int], skip_special_tokens: bool = False) -> str:
-            raise AssertionError("decode should not be called for short passages")
-
-    short = "five short words here please"
-    assert _truncate_passage_to_budget(passage=short, tokenizer=_WordTokenizer(), budget=100) == short
+    fake_model = _FakeModel(score_sequence=[(1.0, 0.0), (0.5, 0.5)])
+    with patch(
+        "auto_research.extract.rerank._ensure_qwen3_reranker_warmup",
+        return_value=(fake_model, _RecordingTokenizer()),
+    ):
+        Qwen3Reranker(tier="ci-cpu").score(query="q", passages=["a", "b"])
+    assert captured["truncation"] is True
+    assert isinstance(captured["max_length"], int)
+    assert captured["max_length"] > 0
+    assert captured["batch_size"] == 2

@@ -24,7 +24,6 @@ worker persists reranked output.
 from __future__ import annotations
 
 import logging
-import math
 import platform
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -202,27 +201,6 @@ def _ensure_qwen3_reranker_warmup(
     return _RERANKER_MODELS[key]
 
 
-def _truncate_passage_to_budget(
-    *, passage: str, tokenizer: Any, budget: int
-) -> str:
-    """Truncate `passage` so its tokenization is at most `budget` tokens.
-
-    Returns the input unchanged when it already fits — saves a decode
-    round-trip on the common path. The Qwen3-Reranker prompt is
-    assembled around a fixed prefix + suffix (the chat template);
-    right-truncating the WHOLE prompt would drop the assistant suffix
-    that carries the yes/no decision token, silently making scores
-    uninformative. Pre-truncating only the passage preserves the
-    suffix and keeps the model's last-token logits meaningful.
-    """
-    ids = tokenizer.encode(passage, add_special_tokens=False)
-    if len(ids) <= budget:
-        return passage
-    truncated_ids = ids[:budget]
-    decoded: str = tokenizer.decode(truncated_ids, skip_special_tokens=False)
-    return decoded
-
-
 RERANKER_VERSION_TAG: str = "v1"
 """Bump when the reranker scoring contract changes.
 
@@ -293,31 +271,29 @@ class Qwen3Reranker:
 
     @cached_property
     def _yes_no_token_ids(self) -> tuple[int, int]:
-        # Resolved once per instance — the warmup helper has already
-        # asserted single-token encoding.
+        # Resolved once per instance via `convert_tokens_to_ids` — the
+        # warmup has already asserted these are single-token. The
+        # `convert_tokens_to_ids` API is definitionally a single id
+        # (returns `unk_token_id` for an unknown token); using it makes
+        # the intent explicit vs slicing `[0]` off an `encode` result.
         _, tokenizer = self._model_and_tokenizer
         return (
-            int(tokenizer.encode("yes", add_special_tokens=False)[0]),
-            int(tokenizer.encode("no", add_special_tokens=False)[0]),
+            int(tokenizer.convert_tokens_to_ids("yes")),
+            int(tokenizer.convert_tokens_to_ids("no")),
         )
 
     @cached_property
-    def _non_passage_token_count(self) -> int:
-        # Count the tokens consumed by the prompt scaffold (prefix +
-        # instruction + query placeholder + "<Document>: " + suffix) so
-        # `_truncate_passage_to_budget` can size the remaining budget
-        # for the passage portion. `query` varies per call so the
-        # budget is recomputed per `score()` — this property only
-        # caches the QUERY-INDEPENDENT scaffold cost.
+    def _prefix_token_ids(self) -> list[int]:
+        # Prefix is a constant string per process. Tokenize once at
+        # first use so `score()` doesn't re-tokenize ~50 tokens worth
+        # of system prompt + chat template on every batch.
         _, tokenizer = self._model_and_tokenizer
-        scaffold = (
-            _RERANKER_PROMPT_PREFIX
-            + f"<Instruct>: {_RERANKER_INSTRUCTION}\n"
-            + "<Query>: \n"
-            + "<Document>: "
-            + _RERANKER_PROMPT_SUFFIX
-        )
-        return len(tokenizer.encode(scaffold, add_special_tokens=False))
+        return list(tokenizer.encode(_RERANKER_PROMPT_PREFIX, add_special_tokens=False))
+
+    @cached_property
+    def _suffix_token_ids(self) -> list[int]:
+        _, tokenizer = self._model_and_tokenizer
+        return list(tokenizer.encode(_RERANKER_PROMPT_SUFFIX, add_special_tokens=False))
 
     def score(self, query: str, passages: list[str]) -> list[float]:
         """Score `(query, passage)` pairs with the Qwen3-Reranker yes/no
@@ -326,14 +302,25 @@ class Qwen3Reranker:
         Positional-friendly so `scorer=reranker.score` binds directly
         when passed to `rerank()` — no lambda wrapper required.
 
+        Single batched forward pass per call. The Qwen3-Reranker
+        model-card pattern: pre-tokenize the constant prefix + suffix
+        once per process, tokenize all bodies in batch with
+        `truncation="longest_first"` to a body budget that reserves
+        room for prefix + suffix, concatenate prefix + body + suffix
+        per row, left-pad to the batch's longest sequence with the
+        tokenizer's pad token, then read `logits[:, -1, :]` — left
+        padding guarantees position `-1` is each row's last real
+        token (the assistant suffix terminator). Softmax over
+        `(yes, no)` columns happens on-device.
+
         Deterministic on CPU fp32; eval() mode, no sampling, no
-        dropout. MPS fp16 is deterministic in practice for the relevant
-        kernels but `torch.use_deterministic_algorithms` is NOT set
-        (the flag is process-global and would spill into unrelated
-        tests). Score magnitudes are only comparable within a single
-        `(tier, model, dtype, device)` — cross-tier comparison is
-        forbidden and the `reranker_version` token records the score
-        space for downstream guards.
+        dropout. MPS fp16 is deterministic in practice for the
+        relevant kernels but `torch.use_deterministic_algorithms`
+        is NOT set (the flag is process-global and would spill into
+        unrelated tests). Score magnitudes are only comparable within
+        a single `(tier, model, dtype, device)`; cross-tier comparison
+        is forbidden and the `reranker_version` token records the
+        score space for downstream guards.
         """
         if not passages:
             return []
@@ -341,40 +328,52 @@ class Qwen3Reranker:
 
         model, tokenizer = self._model_and_tokenizer
         yes_id, no_id = self._yes_no_token_ids
-        # Reserve scaffold + query tokens; rest is the per-passage budget.
-        # Keep an 8-token safety margin against tokenizer joining edge
-        # cases (e.g., a passage that joins with a preceding token on
-        # the prompt seam).
-        query_tokens = len(tokenizer.encode(query, add_special_tokens=False))
-        passage_budget = max(
-            16, _RERANKER_MAX_LENGTH - self._non_passage_token_count - query_tokens - 8
+        prefix_ids = self._prefix_token_ids
+        suffix_ids = self._suffix_token_ids
+
+        # Body fields. The model card uses "<Instruct>: ... <Query>:
+        # ... <Document>: ..." between the system prefix and the
+        # assistant suffix. Per-pair body is the only variable portion
+        # of the prompt, so it gets the budget left over after prefix
+        # + suffix.
+        bodies = [
+            f"<Instruct>: {_RERANKER_INSTRUCTION}\n"
+            f"<Query>: {query}\n"
+            f"<Document>: {passage}"
+            for passage in passages
+        ]
+        body_budget = max(
+            16, _RERANKER_MAX_LENGTH - len(prefix_ids) - len(suffix_ids)
         )
-        scores: list[float] = []
+        encoded = tokenizer(
+            bodies,
+            add_special_tokens=False,
+            truncation=True,
+            max_length=body_budget,
+            return_attention_mask=False,
+        )
+        full_rows = [prefix_ids + list(body) + suffix_ids for body in encoded["input_ids"]]
+
+        # Left-pad each row to the batch's longest sequence so
+        # `logits[:, -1, :]` reads each row's true last token rather
+        # than a pad. `pad_token_id` is usually set on Qwen tokenizers;
+        # fall back to `eos_token_id` defensively.
+        pad_id = tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = tokenizer.eos_token_id
+        max_len = max(len(r) for r in full_rows)
+        input_ids = [[pad_id] * (max_len - len(r)) + r for r in full_rows]
+        attention_mask = [[0] * (max_len - len(r)) + [1] * len(r) for r in full_rows]
+        input_ids_t = torch.tensor(input_ids, device=self._device)
+        attention_mask_t = torch.tensor(attention_mask, device=self._device)
+
         with torch.no_grad():
-            for passage in passages:
-                fitted_passage = _truncate_passage_to_budget(
-                    passage=passage, tokenizer=tokenizer, budget=passage_budget
-                )
-                prompt = (
-                    _RERANKER_PROMPT_PREFIX
-                    + f"<Instruct>: {_RERANKER_INSTRUCTION}\n"
-                    + f"<Query>: {query}\n"
-                    + f"<Document>: {fitted_passage}"
-                    + _RERANKER_PROMPT_SUFFIX
-                )
-                inputs = tokenizer(
-                    prompt,
-                    return_tensors="pt",
-                ).to(self._device)
-                out = model(**inputs)
-                last_logits = out.logits[0, -1, :]
-                yes_logit = float(last_logits[yes_id])
-                no_logit = float(last_logits[no_id])
-                m = max(yes_logit, no_logit)
-                ey = math.exp(yes_logit - m)
-                en = math.exp(no_logit - m)
-                scores.append(ey / (ey + en))
-        return scores
+            out = model(input_ids=input_ids_t, attention_mask=attention_mask_t)
+        last_logits = out.logits[:, -1, :]
+        yes_col = last_logits[:, yes_id]
+        no_col = last_logits[:, no_id]
+        probs = torch.softmax(torch.stack([yes_col, no_col], dim=1), dim=1)
+        return [float(p) for p in probs[:, 0].tolist()]
 
 
 @dataclass(frozen=True)
@@ -470,7 +469,6 @@ __all__ = [
     "ScorerFn",
     "_assert_yes_no_single_token",
     "_ensure_qwen3_reranker_warmup",
-    "_truncate_passage_to_budget",
     "rerank",
     "reranker_version",
 ]
