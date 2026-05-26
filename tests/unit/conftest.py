@@ -51,3 +51,45 @@ def _warm_bge_embeddings() -> None:
     from auto_research.extract.embeddings import _ensure_bge_warmup
 
     _ensure_bge_warmup()
+
+
+def _is_apple_silicon() -> bool:
+    import platform
+
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _warm_qwen3_mlx_embeddings() -> None:
+    """Warm the Qwen3-Embedding-0.6B MLX model once per session on
+    Apple Silicon.
+
+    Same lazy-load-then-socket-monkey-patch concern as BGE: the first
+    real-inference Mac unit test would otherwise pull ~600 MB of
+    Qwen3-0.6B weights from HuggingFace under a socket-blocked
+    environment. Pre-warming at session start lands the weights in HF
+    cache via `make setup-mlx`; the in-process singleton in
+    `_QWEN3_MODELS` then serves every Qwen3-MLX adapter for the
+    remainder of the session at zero further network cost.
+
+    No-op on non-Apple-Silicon hosts — the `mlx-embeddings` extra
+    isn't installed there and `_ensure_qwen3_warmup` would raise with
+    the platform-check remediation; the Mac-only tests using this
+    backend are individually marked `skipif` on the same predicate.
+    """
+    if not _is_apple_silicon():
+        return
+    from auto_research.extract.embeddings import _ensure_qwen3_warmup
+
+    try:
+        _ensure_qwen3_warmup("Qwen3-Embedding-0.6B")
+    except RuntimeError as exc:
+        # Only swallow the "mlx-embeddings extra not installed" case —
+        # that's a legitimate Mac-dev environment where unit tests
+        # should still run (qwen3-mlx tests will skip individually
+        # via the skipif gate). All other exceptions (HF cache miss,
+        # platform-check polarity bug, repo-name typo, API drift)
+        # must propagate so the session start fails loudly with the
+        # actionable remediation, per the explicit-config-loud rule.
+        if "uv sync --extra mlx" not in str(exc):
+            raise

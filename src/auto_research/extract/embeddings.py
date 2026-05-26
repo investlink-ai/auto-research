@@ -1,21 +1,32 @@
 """Embedding adapter for the RAG retrieval layer.
 
-Backend selection is **explicit** — the caller passes
-`backend="voyage"` (production default, `voyage-finance-2` per ADR D1)
-or `backend="bge"` (in-process `bge-small-en-v1.5`, used by tests and
-airgapped dev). There is no env-var-driven implicit fallback: a
-missing `VOYAGE_API_KEY` does NOT silently switch the adapter to BGE
-— it raises when the Voyage client is first constructed, surfacing
-the misconfiguration loudly. Workers / CLI entry points read
+Backend selection is **explicit** — the caller passes one of:
+
+- `backend="voyage"` — production cloud (`voyage-finance-2` per ADR D1).
+- `backend="bge"` — cross-platform in-process `bge-small-en-v1.5`,
+  used by Linux CI and airgapped dev.
+- `backend="qwen3-mlx"` — Apple-Silicon-only in-process Qwen3-Embedding
+  via `mlx_embeddings` (`Qwen3-Embedding-0.6B` for dev, `-4B` as a
+  credible offline alternative to Voyage at backfill scope on
+  dedicated Apple-Silicon hardware).
+
+There is no env-var-driven implicit fallback: a missing
+`VOYAGE_API_KEY` does NOT silently switch the adapter to BGE — it
+raises when the Voyage client is first constructed, surfacing the
+misconfiguration loudly. The Qwen3-MLX path raises a clear
+`RuntimeError` on non-Apple-Silicon hosts pointing at the
+cross-platform backends. Workers / CLI entry points read
 `EMBEDDING_BACKEND` themselves and pass the choice in.
 
 The backend is locked for the adapter's lifetime. There is no
 mid-run switch on quota or any other Voyage error — a single corpus
-must live in a single vector space, since Voyage's 1024-dim and BGE's
-384-dim outputs are not comparable under cosine similarity (dense
-retrieval would silently degrade). On `voyageai.error.RateLimitError`
-the call propagates; operational handling (retry-with-backoff,
-circuit breaking, quota alerting) lives at the worker layer.
+must live in a single vector space; same-dim does not imply same
+space (Voyage and Qwen3-0.6B both emit 1024-dim vectors but in
+incompatible coordinate systems), so dense retrieval over a
+mixed-backend corpus silently degrades. On
+`voyageai.error.RateLimitError` the call propagates; operational
+handling (retry-with-backoff, circuit breaking, quota alerting)
+lives at the worker layer.
 """
 
 from __future__ import annotations
@@ -56,6 +67,17 @@ ALLOWED_VOYAGE_MODELS: frozenset[str] = frozenset({
 })
 DEFAULT_VOYAGE_MODEL = "voyage-finance-2"
 
+# Qwen3-Embedding MLX backend — Apple-Silicon-only, in-process. Two
+# variants: 0.6B (1024-dim, ~600 MB, dev/test default) and 4B (2560-dim,
+# ~8 GB, dedicated-hardware deployment alternative to Voyage at backfill
+# scope). Same vector space ≠ same dim; treat each (backend, model) as
+# its own corpus per the embedding-vector-space-consistency rule.
+ALLOWED_MLX_QWEN3_MODELS: frozenset[str] = frozenset({
+    "Qwen3-Embedding-0.6B",
+    "Qwen3-Embedding-4B",
+})
+DEFAULT_MLX_QWEN3_MODEL = "Qwen3-Embedding-0.6B"
+
 _MODEL_DIM: dict[str, int] = {
     "voyage-finance-2": 1024,
     "voyage-3": 1024,
@@ -64,6 +86,8 @@ _MODEL_DIM: dict[str, int] = {
     "voyage-4": 1024,
     "voyage-4-large": 1024,
     "bge-small-en-v1.5": 384,
+    "Qwen3-Embedding-0.6B": 1024,
+    "Qwen3-Embedding-4B": 2560,
 }
 
 NARRATIVE_DOC_TYPES: frozenset[str] = frozenset({"10-K", "10-Q", "transcript"})
@@ -85,6 +109,46 @@ _WORKER = "embeddings"
 # same singleton so multiple adapter instances in a single process
 # share one loaded model rather than each paying the ~1-2s reload cost.
 _BGE_MODEL: Any = None
+
+# One-shot Qwen3-MLX warmup, same singleton pattern as BGE but keyed
+# by model id so 0.6B and 4B can both be cached if both are exercised
+# in the same process. Each cache value is the `(model, tokenizer)`
+# pair `mlx_embeddings.load(...)` returns. Apple-Silicon-only; the
+# platform check inside `_ensure_qwen3_warmup` raises on Linux /
+# Intel-Mac with a clear remediation pointing at the cross-platform
+# backends.
+_QWEN3_MODELS: dict[str, Any] = {}
+
+# Map allowlist names → HuggingFace repo ids for the MLX-converted
+# weights. The mlx-community org publishes quantized variants only;
+# `mxfp8` (microscaled 8-bit float) is the best-quality 8-bit
+# quantization and matches the published native dims (1024 / 2560)
+# observed end-to-end.
+_QWEN3_MLX_HF_REPOS: dict[str, str] = {
+    "Qwen3-Embedding-0.6B": "mlx-community/Qwen3-Embedding-0.6B-mxfp8",
+    "Qwen3-Embedding-4B": "mlx-community/Qwen3-Embedding-4B-mxfp8",
+}
+
+# Asymmetric-encoder instruction prefix applied on the query side only,
+# per the Qwen3-Embedding model card. Document-side text is encoded
+# unprefixed. The task description is part of the embedding signal —
+# the model card explicitly recommends domain-tailoring it. This value
+# matches the corpus the adapter actually serves (SEC filings + earnings
+# transcripts + analyst materials); revisit when a Ragas / DeepEval
+# baseline gives a measurable handle for tuning.
+_QWEN3_QUERY_INSTRUCTION = (
+    "Instruct: Given a financial research query, retrieve relevant "
+    "passages from SEC filings, earnings transcripts, and analyst "
+    "materials\nQuery: "
+)
+
+# Tokenizer truncation budget for `mlx_embeddings.generate`. The upstream
+# default is 512, which silently truncates long passages even though
+# Qwen3-Embedding's native context is 32K. 2048 is generous enough for
+# the contextual-chunking pattern (LLM-generated context prefix + child
+# text) without paying the memory cost of pinning to full 32K on every
+# batch.
+_QWEN3_MAX_LENGTH = 2048
 
 # Voyage rate-limit posture. This project's Voyage account is on the
 # constrained tier — **3 RPM / 10,000 TPM** — not the doc-page Tier 1
@@ -132,6 +196,63 @@ _FTS_INDEX_KWARGS: dict[str, Any] = {
 
 _log = logging.getLogger(__name__)
 _tracer = trace.get_tracer(__name__)
+
+
+def _ensure_qwen3_warmup(model_id: str) -> Any:
+    """Load a Qwen3-Embedding MLX model once and return `(model, tokenizer)`.
+
+    Idempotent via the module-level `_QWEN3_MODELS` dict keyed by
+    `model_id`, so multiple adapters in the same process — and the
+    0.6B / 4B variants — each pay the load cost at most once.
+
+    Raises `RuntimeError` up front on non-Apple-Silicon hosts with a
+    remediation pointing at the cross-platform backends. Mirrors the
+    `_ensure_bge_warmup` HF-cache-miss error: when MLX is reachable but
+    the weights aren't yet cached, the first call downloads them; a
+    network-blocked cache miss surfaces `RuntimeError` naming
+    `make setup-mlx` (which pre-pulls the 0.6B weights, and the 4B
+    weights when `QWEN3_FULL=1`) as the fix.
+    """
+    import platform
+
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        raise RuntimeError(
+            "Qwen3-MLX embedding backend requires Apple Silicon "
+            f"(Darwin/arm64); detected system={platform.system()!r} "
+            f"machine={platform.machine()!r}. Construct the adapter "
+            "with backend='voyage' or backend='bge' on this host."
+        )
+
+    cached = _QWEN3_MODELS.get(model_id)
+    if cached is not None:
+        return cached
+
+    repo = _QWEN3_MLX_HF_REPOS.get(model_id)
+    if repo is None:
+        raise ValueError(
+            f"No HF repo mapping for Qwen3-MLX model {model_id!r}; "
+            f"known: {sorted(_QWEN3_MLX_HF_REPOS)}"
+        )
+
+    try:
+        from mlx_embeddings import load as _mlx_load
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Qwen3-MLX model {model_id!r} requested but the "
+            "`mlx-embeddings` extra is not installed. Install it with:\n"
+            "    uv sync --extra mlx\n"
+            "On non-Apple-Silicon hosts use backend='voyage' or "
+            "backend='bge' instead."
+        ) from exc
+
+    # Network / cache failures during `_mlx_load` propagate with their
+    # own message so operators don't get pointed at the wrong fix. The
+    # `make setup-mlx` target populates the HF cache one-shot; the
+    # underlying HF/MLX error already names the failing repo.
+    loaded = _mlx_load(repo)
+
+    _QWEN3_MODELS[model_id] = loaded
+    return loaded
 
 
 def _ensure_bge_warmup() -> Any:
@@ -197,7 +318,7 @@ class QueryHit:
 BGE_MODEL_ID = "bge-small-en-v1.5"
 
 
-def resolve_backend_from_env() -> Literal["voyage", "bge"]:
+def resolve_backend_from_env() -> Literal["voyage", "bge", "qwen3-mlx"]:
     """Read `EMBEDDING_BACKEND` from the environment and validate.
 
     Workers / CLI entry points call this once at startup and pass the
@@ -207,10 +328,11 @@ def resolve_backend_from_env() -> Literal["voyage", "bge"]:
     fallback.
     """
     raw = os.environ.get("EMBEDDING_BACKEND")
-    if raw not in {"voyage", "bge"}:
+    if raw not in {"voyage", "bge", "qwen3-mlx"}:
         raise RuntimeError(
-            "EMBEDDING_BACKEND env var must be set to 'voyage' or 'bge'; "
-            f"got {raw!r}. Set explicitly — there is no default fallback."
+            "EMBEDDING_BACKEND env var must be set to 'voyage', 'bge', "
+            f"or 'qwen3-mlx'; got {raw!r}. Set explicitly — there is "
+            "no default fallback."
         )
     return raw  # type: ignore[return-value]
 
@@ -219,22 +341,34 @@ class EmbeddingAdapter:
     def __init__(
         self,
         *,
-        backend: Literal["voyage", "bge"],
+        backend: Literal["voyage", "bge", "qwen3-mlx"],
         rag_root: Path = Path("data/rag"),
         voyage_model: str | None = None,
+        mlx_qwen3_model: str | None = None,
     ) -> None:
         """Construct an adapter bound to an explicitly-chosen backend.
 
         `backend` is required — no env-var inference, no default. Pass
         `"voyage"` for production (`voyage-finance-2` by default, or
-        the model named in `voyage_model` / `$VOYAGE_MODEL`) or
-        `"bge"` for the in-process `bge-small-en-v1.5` fallback.
+        the model named in `voyage_model` / `$VOYAGE_MODEL`),
+        `"bge"` for the cross-platform in-process `bge-small-en-v1.5`
+        fallback, or `"qwen3-mlx"` for the Apple-Silicon-only
+        Qwen3-Embedding MLX backend (`Qwen3-Embedding-0.6B` by default
+        or the variant named in `mlx_qwen3_model`).
 
-        `voyage_model` is only honored when `backend="voyage"`; passing
-        it alongside `backend="bge"` is rejected so the caller's intent
-        stays unambiguous.
+        Model kwargs are mutually exclusive with non-matching backends:
+        `voyage_model` is only valid with `backend="voyage"` and
+        `mlx_qwen3_model` only with `backend="qwen3-mlx"`. Passing the
+        wrong pairing is rejected so the caller's intent stays
+        unambiguous.
         """
         if backend == "voyage":
+            if mlx_qwen3_model is not None:
+                raise ValueError(
+                    "mlx_qwen3_model is only valid when "
+                    "backend='qwen3-mlx'; got backend='voyage' with "
+                    f"mlx_qwen3_model={mlx_qwen3_model!r}"
+                )
             resolved = (
                 voyage_model
                 or os.environ.get("VOYAGE_MODEL")
@@ -245,7 +379,7 @@ class EmbeddingAdapter:
                     f"VOYAGE_MODEL={resolved!r} not in "
                     f"{sorted(ALLOWED_VOYAGE_MODELS)}"
                 )
-            self._backend: Literal["voyage", "bge"] = "voyage"
+            self._backend: Literal["voyage", "bge", "qwen3-mlx"] = "voyage"
             self._model = resolved
         elif backend == "bge":
             if voyage_model is not None:
@@ -253,11 +387,33 @@ class EmbeddingAdapter:
                     "voyage_model is only valid when backend='voyage'; "
                     f"got backend='bge' with voyage_model={voyage_model!r}"
                 )
+            if mlx_qwen3_model is not None:
+                raise ValueError(
+                    "mlx_qwen3_model is only valid when "
+                    "backend='qwen3-mlx'; got backend='bge' with "
+                    f"mlx_qwen3_model={mlx_qwen3_model!r}"
+                )
             self._backend = "bge"
             self._model = BGE_MODEL_ID
+        elif backend == "qwen3-mlx":
+            if voyage_model is not None:
+                raise ValueError(
+                    "voyage_model is only valid when backend='voyage'; "
+                    f"got backend='qwen3-mlx' with "
+                    f"voyage_model={voyage_model!r}"
+                )
+            mlx_resolved = mlx_qwen3_model or DEFAULT_MLX_QWEN3_MODEL
+            if mlx_resolved not in ALLOWED_MLX_QWEN3_MODELS:
+                raise ValueError(
+                    f"mlx_qwen3_model={mlx_resolved!r} not in "
+                    f"{sorted(ALLOWED_MLX_QWEN3_MODELS)}"
+                )
+            self._backend = "qwen3-mlx"
+            self._model = mlx_resolved
         else:
             raise ValueError(
-                f"backend must be 'voyage' or 'bge'; got {backend!r}"
+                f"backend must be 'voyage', 'bge', or 'qwen3-mlx'; "
+                f"got {backend!r}"
             )
         self._rag_root = rag_root
         _log.info(
@@ -267,7 +423,7 @@ class EmbeddingAdapter:
         )
 
     @property
-    def backend(self) -> Literal["voyage", "bge"]:
+    def backend(self) -> Literal["voyage", "bge", "qwen3-mlx"]:
         return self._backend
 
     @property
@@ -285,6 +441,14 @@ class EmbeddingAdapter:
         # error when the HF cache is empty and the network is blocked.
         return _ensure_bge_warmup()
 
+    @cached_property
+    def _qwen3(self) -> Any:
+        # Same singleton routing as `_bge`, but the cache key is the
+        # model id — 0.6B and 4B live in different namespaces, both
+        # entered through `_ensure_qwen3_warmup`. Returns the
+        # `(model, tokenizer)` pair from `mlx_embeddings.load`.
+        return _ensure_qwen3_warmup(self._model)
+
     def _encode(
         self, texts: list[str], *, input_type: str = "document"
     ) -> NDArray[np.float32]:
@@ -295,6 +459,33 @@ class EmbeddingAdapter:
                 texts, normalize_embeddings=True, convert_to_numpy=True
             )
             return arr.astype(np.float32)
+
+        if self._backend == "qwen3-mlx":
+            # Qwen3-Embedding is asymmetric: the query side wants an
+            # instruction prefix per the model card; the document side
+            # is unprefixed. Mirrors the Voyage `input_type` semantics
+            # from the same call site below. `text_embeds` from the
+            # MLX `generate` call is already L2-normalized.
+            #
+            # Resolve `self._qwen3` FIRST so the platform check inside
+            # `_ensure_qwen3_warmup` raises with its friendly remediation
+            # before the `mlx_embeddings` import runs — otherwise a
+            # Linux host without the `[mlx]` extra installed would leak
+            # a cryptic `ModuleNotFoundError` instead.
+            model, tokenizer = self._qwen3
+            from mlx_embeddings import generate as _mlx_generate
+
+            if input_type == "query":
+                prepared = [_QWEN3_QUERY_INSTRUCTION + t for t in texts]
+            else:
+                prepared = list(texts)
+            out = _mlx_generate(
+                model, tokenizer, prepared, max_length=_QWEN3_MAX_LENGTH
+            )
+            # `out.text_embeds` is an `mx.array` of shape (batch, dim);
+            # numpy conversion via `np.asarray` triggers materialization
+            # off the MLX device.
+            return np.asarray(out.text_embeds, dtype=np.float32)
 
         from voyageai.error import RateLimitError
 
@@ -492,8 +683,10 @@ class EmbeddingAdapter:
                 db = lancedb.connect(self._rag_root)
                 table_name = doc_id if store == "per_doc" else _PER_CORPUS_STORE
                 tbl = db.open_table(table_name)
-                # Voyage benefits from input_type="query" on the query side
-                # of the asymmetric encoder; BGE ignores input_type.
+                # Voyage and Qwen3-MLX both consume input_type as the
+                # asymmetric-encoder switch on the query side (Voyage
+                # via its `input_type` kwarg, Qwen3 via the model-card
+                # instruction prefix). BGE ignores input_type.
                 qvec = self._encode([text], input_type="query")[0].tolist()
                 builder = tbl.search(qvec).limit(k)
                 if where:

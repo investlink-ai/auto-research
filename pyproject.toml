@@ -23,7 +23,7 @@ dependencies = [
     "pandas>=2.2",
     "pyarrow>=23.0.1",
     "pydantic>=2.13.4",
-    "sentence-transformers>=3,<4",
+    "sentence-transformers>=3,<6",
     "tenacity>=8.5,<9",
     "tiktoken==0.13.0",
     "traceloop-sdk>=0.30",
@@ -38,6 +38,12 @@ dev = [
     "ruff>=0.7",
     "mypy>=1.13",
     "vcrpy>=8.1.1",
+]
+# Apple-Silicon-only embedding backend. Kept off the base dependency
+# list so `uv sync` on Linux CI doesn't try to install MLX wheels it
+# can't use; opt in on Mac with `uv sync --extra mlx`.
+mlx = [
+    "mlx-embeddings>=0.1.0",
 ]
 
 [project.scripts]
@@ -162,6 +168,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "voyageai.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "mlx_embeddings.*"
 ignore_missing_imports = true
 
 [dependency-groups]

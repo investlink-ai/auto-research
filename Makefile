@@ -1,4 +1,4 @@
-.PHONY: quick check check-full test test-broad integration eval live-smoke lint typecheck setup-nlp smoke
+.PHONY: quick check check-full test test-broad integration eval live-smoke lint typecheck setup-nlp setup-mlx smoke
 
 # Fast pre-commit gate — run constantly during development.
 quick: lint typecheck
@@ -24,6 +24,24 @@ check: quick test
 setup-nlp:
 	uv run python -m spacy download en_core_web_sm
 	uv run python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"
+
+# Apple-Silicon-only Qwen3-Embedding MLX warmup. Pre-pulls the dev
+# default (0.6B, ~600 MB) into the HuggingFace cache so the
+# conftest's session-autouse fixture serves hermetic Mac unit tests
+# without network access. The 4B variant (~8 GB) is opt-in via
+# `QWEN3_FULL=1` — it's deployment-grade weight, not a default
+# developer-machine download. Idempotent; re-running with a populated
+# HF cache is a no-op. Skips gracefully on non-Apple-Silicon hosts
+# (the `mlx-embeddings` extra isn't installed there).
+setup-mlx:
+	@if [ "$$(uname -s)" = "Darwin" ] && [ "$$(uname -m)" = "arm64" ]; then \
+		uv run --extra mlx python -c "from auto_research.extract.embeddings import _ensure_qwen3_warmup; _ensure_qwen3_warmup('Qwen3-Embedding-0.6B')"; \
+		if [ "$$QWEN3_FULL" = "1" ]; then \
+			uv run --extra mlx python -c "from auto_research.extract.embeddings import _ensure_qwen3_warmup; _ensure_qwen3_warmup('Qwen3-Embedding-4B')"; \
+		fi; \
+	else \
+		echo "setup-mlx: skipped (non-Apple-Silicon host); MLX backend is Mac-only."; \
+	fi
 
 # Full local gate: + integration. Requires `docker compose up -d` first.
 check-full: quick test integration
