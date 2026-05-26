@@ -252,6 +252,66 @@ def test_query_filter_ticker_and_filing_date(
     assert all(h.filing_date >= date(2025, 1, 1) for h in hits)
 
 
+def test_bm25_query_ranks_lexical_match_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The FTS index built at embed-time backs `bm25_query`; the
+    lexical-strongest doc out-ranks distractors. Verifies the BM25 half
+    of the hybrid contract — the dense half is exercised by the existing
+    `test_embed_query_is_deterministic_top_k`.
+    """
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    adapter = EmbeddingAdapter(rag_root=tmp_path)
+    chunks = [
+        _wrap(_make_child("export controls limit GPU shipments", doc_id="doc-FTS")),
+        _wrap(_make_child("quarterly dividend declaration", doc_id="doc-FTS")),
+        _wrap(_make_child("free cash flow disclosure", doc_id="doc-FTS")),
+    ]
+    adapter.embed(chunks)
+    hits = adapter.bm25_query("export controls", k=3, store="per_doc", doc_id="doc-FTS")
+    assert hits, "bm25_query must return at least one hit"
+    assert hits[0].text.startswith("export controls"), (
+        f"top hit should be the lexical match; got {hits[0].text!r}"
+    )
+    # FTS scores are positive; the top score is strictly highest.
+    assert hits[0].score > 0
+    if len(hits) > 1:
+        assert hits[0].score >= hits[1].score
+
+
+def test_bm25_query_filter_composes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR D7: the same `where` filter that scopes dense retrieval also
+    scopes BM25, so callers don't have to filter twice.
+    """
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    adapter = EmbeddingAdapter(rag_root=tmp_path)
+    adapter.embed([
+        _wrap(_make_child(
+            "NVDA export controls passage",
+            ticker="NVDA",
+            doc_id="doc-NVDA-FTS",
+            filing_date=date(2025, 3, 15),
+        )),
+    ])
+    adapter.embed([
+        _wrap(_make_child(
+            "AMD export controls passage",
+            ticker="AMD",
+            doc_id="doc-AMD-FTS",
+            filing_date=date(2025, 3, 15),
+        )),
+    ])
+    hits = adapter.bm25_query(
+        "export controls",
+        k=5,
+        store="corpus_narrative",
+        where="ticker = 'NVDA'",
+    )
+    assert {h.ticker for h in hits} == {"NVDA"}
+
+
 def test_query_uses_query_input_type_for_voyage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
