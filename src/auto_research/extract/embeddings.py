@@ -20,8 +20,11 @@ import lancedb
 import numpy as np
 import pyarrow as pa
 from numpy.typing import NDArray
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 
 from auto_research.extract.chunking_contextual import ContextualChildChunk
+from auto_research.telemetry import truncate_status_description as _truncate
 
 ALLOWED_VOYAGE_MODELS: frozenset[str] = frozenset({
     "voyage-finance-2",
@@ -46,8 +49,21 @@ _MODEL_DIM: dict[str, int] = {
 NARRATIVE_DOC_TYPES: frozenset[str] = frozenset({"10-K", "10-Q", "transcript"})
 _BGE_MODEL_NAME = "bge-small-en-v1.5"
 _PER_CORPUS_STORE = "_corpus_narrative"
+_WORKER = "embeddings"
 
 _log = logging.getLogger(__name__)
+_tracer = trace.get_tracer(__name__)
+
+
+def _corpus_vector_dim(tbl: Any) -> int:
+    """Read the existing LanceDB table's vector-column fixed-list size.
+
+    Used to detect a backend switch between embed() calls so the corpus
+    narrative index is dropped+recreated (rather than .add()ing rows of a
+    different dim, which raises pyarrow ArrowInvalid).
+    """
+    vector_field = tbl.schema.field("vector")
+    return int(vector_field.type.list_size)
 
 
 def _schema(vector_dim: int) -> pa.Schema:
@@ -114,8 +130,12 @@ class EmbeddingAdapter:
     def decision(self) -> FallbackDecision:
         return self._decision
 
-    @cached_property
+    @property
     def _vector_dim(self) -> int:
+        # Read from current decision every call: a quota-driven switch from
+        # voyage(1024) to bge(384) must not leave the schema at the
+        # pre-switch dimension on subsequent embeds. Plain dict lookup, no
+        # cost to recomputing.
         return _MODEL_DIM[self._decision.model]
 
     @cached_property
@@ -123,8 +143,12 @@ class EmbeddingAdapter:
         from sentence_transformers import SentenceTransformer
         return SentenceTransformer(f"BAAI/{_BGE_MODEL_NAME}")
 
-    def _encode(self, texts: list[str]) -> NDArray[np.float32]:
+    def _encode(
+        self, texts: list[str], *, input_type: str = "document"
+    ) -> NDArray[np.float32]:
         if self._decision.backend == "bge":
+            # BGE-small doesn't take an input_type prompt; same encoder for
+            # both corpus and query sides.
             arr: NDArray[np.float32] = self._bge.encode(
                 texts, normalize_embeddings=True, convert_to_numpy=True
             )
@@ -134,7 +158,7 @@ class EmbeddingAdapter:
 
         try:
             resp = self._voyage_client.embed(
-                texts, model=self._decision.model, input_type="document"
+                texts, model=self._decision.model, input_type=input_type
             )
         except RateLimitError:
             self._decision = FallbackDecision("bge", "bge-small-en-v1.5", "quota")
@@ -142,7 +166,7 @@ class EmbeddingAdapter:
                 "embedding_quota_switch backend=bge model=%s reason=quota",
                 _BGE_MODEL_NAME,
             )
-            return self._encode(texts)
+            return self._encode(texts, input_type=input_type)
         return np.asarray(resp.embeddings, dtype=np.float32)
 
     @cached_property
@@ -179,22 +203,66 @@ class EmbeddingAdapter:
                 f"embed() requires single doc_id per call; got {sorted(doc_ids)}"
             )
         doc_id = next(iter(doc_ids))
-        texts = [c.embedding_text for c in chunks]
-        vectors = self._encode(texts)
-        rows = self._rows(chunks, vectors)
 
-        self._rag_root.mkdir(parents=True, exist_ok=True)
-        db = lancedb.connect(self._rag_root)
-        schema = _schema(self._vector_dim)
+        with _tracer.start_as_current_span("extract.embed") as span:
+            span.set_attribute("extract.worker", _WORKER)
+            span.set_attribute("extract.doc_id", doc_id)
+            span.set_attribute("embedding.chunks_count", len(chunks))
+            pre_reason = self._decision.reason
+            try:
+                texts = [c.embedding_text for c in chunks]
+                vectors = self._encode(texts)
+                rows = self._rows(chunks, vectors)
 
-        db.create_table(doc_id, data=rows, schema=schema, mode="overwrite")
+                self._rag_root.mkdir(parents=True, exist_ok=True)
+                db = lancedb.connect(self._rag_root)
+                schema = _schema(self._vector_dim)
 
-        narrative_rows = [r for r in rows if r["doc_type"] in NARRATIVE_DOC_TYPES]
-        if narrative_rows:
-            if _PER_CORPUS_STORE in db.table_names():
-                db.open_table(_PER_CORPUS_STORE).add(narrative_rows)
-            else:
-                db.create_table(_PER_CORPUS_STORE, data=narrative_rows, schema=schema)
+                db.create_table(doc_id, data=rows, schema=schema, mode="overwrite")
+
+                narrative_rows = [r for r in rows if r["doc_type"] in NARRATIVE_DOC_TYPES]
+                if narrative_rows:
+                    if _PER_CORPUS_STORE in db.table_names():
+                        existing = db.open_table(_PER_CORPUS_STORE)
+                        if _corpus_vector_dim(existing) == self._vector_dim:
+                            existing.add(narrative_rows)
+                        else:
+                            # Backend switch (e.g., voyage 1024 → bge 384 after
+                            # quota) means the existing corpus narrative index
+                            # is dim-incompatible with the new rows. Cross-
+                            # backend dense retrieval is incoherent, so we drop
+                            # the prior table and start fresh on the new dim.
+                            # WARN, not raise — backfill should keep moving.
+                            _log.warning(
+                                "embedding_corpus_dim_mismatch dropping=%s "
+                                "old_dim=%d new_dim=%d new_backend=%s",
+                                _PER_CORPUS_STORE,
+                                _corpus_vector_dim(existing),
+                                self._vector_dim,
+                                self._decision.backend,
+                            )
+                            db.drop_table(_PER_CORPUS_STORE)
+                            db.create_table(
+                                _PER_CORPUS_STORE, data=narrative_rows, schema=schema
+                            )
+                    else:
+                        db.create_table(
+                            _PER_CORPUS_STORE, data=narrative_rows, schema=schema
+                        )
+                span.set_attribute("embedding.backend", self._decision.backend)
+                span.set_attribute("embedding.model", self._decision.model)
+                span.set_attribute("embedding.fallback_reason", self._decision.reason)
+                span.set_attribute("embedding.narrative_count", len(narrative_rows))
+                # quota_fallback = the embed completed, but switched mid-call.
+                # success = ran end-to-end on the original backend.
+                if pre_reason == "voyage_used" and self._decision.reason == "quota":
+                    span.set_attribute("extract.outcome", "quota_fallback")
+                else:
+                    span.set_attribute("extract.outcome", "success")
+            except Exception as exc:
+                span.set_attribute("extract.outcome", "error")
+                span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+                raise
 
     def query(
         self,
@@ -207,24 +275,43 @@ class EmbeddingAdapter:
     ) -> list[QueryHit]:
         if store == "per_doc" and doc_id is None:
             raise ValueError("doc_id required when store='per_doc'")
-        db = lancedb.connect(self._rag_root)
-        table_name = doc_id if store == "per_doc" else _PER_CORPUS_STORE
-        tbl = db.open_table(table_name)
-        qvec = self._encode([text])[0].tolist()
-        builder = tbl.search(qvec).limit(k)
-        if where:
-            builder = builder.where(where, prefilter=True)
-        df = builder.to_pandas()
-        return [
-            QueryHit(
-                text=row["text"],
-                score=float(row["_distance"]),
-                parent_id=row["parent_id"],
-                section_name=row["section_name"],
-                ticker=row["ticker"],
-                filing_date=date.fromisoformat(row["filing_date"]),
-                doc_type=row["doc_type"],
-                doc_id=row["doc_id"],
-            )
-            for _, row in df.iterrows()
-        ]
+        with _tracer.start_as_current_span("extract.embed_query") as span:
+            span.set_attribute("extract.worker", _WORKER)
+            span.set_attribute("embedding.backend", self._decision.backend)
+            span.set_attribute("embedding.model", self._decision.model)
+            span.set_attribute("embedding.store", store)
+            span.set_attribute("embedding.k", k)
+            span.set_attribute("embedding.has_filter", where is not None)
+            if doc_id is not None:
+                span.set_attribute("extract.doc_id", doc_id)
+            try:
+                db = lancedb.connect(self._rag_root)
+                table_name = doc_id if store == "per_doc" else _PER_CORPUS_STORE
+                tbl = db.open_table(table_name)
+                # Voyage benefits from input_type="query" on the query side
+                # of the asymmetric encoder; BGE ignores input_type.
+                qvec = self._encode([text], input_type="query")[0].tolist()
+                builder = tbl.search(qvec).limit(k)
+                if where:
+                    builder = builder.where(where, prefilter=True)
+                df = builder.to_pandas()
+                hits = [
+                    QueryHit(
+                        text=row["text"],
+                        score=float(row["_distance"]),
+                        parent_id=row["parent_id"],
+                        section_name=row["section_name"],
+                        ticker=row["ticker"],
+                        filing_date=date.fromisoformat(row["filing_date"]),
+                        doc_type=row["doc_type"],
+                        doc_id=row["doc_id"],
+                    )
+                    for _, row in df.iterrows()
+                ]
+                span.set_attribute("embedding.hits_count", len(hits))
+                span.set_attribute("extract.outcome", "success")
+                return hits
+            except Exception as exc:
+                span.set_attribute("extract.outcome", "error")
+                span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
+                raise

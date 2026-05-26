@@ -183,3 +183,79 @@ def test_query_filter_ticker_and_filing_date(
     assert {h.doc_id for h in hits} == {"doc-NVDA-2025"}
     assert all(h.ticker == "NVDA" for h in hits)
     assert all(h.filing_date >= date(2025, 1, 1) for h in hits)
+
+
+def test_voyage_quota_after_successful_call_uses_fresh_bge_dim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: voyage 1024-dim writes followed by a 429 must not leave
+    a stale vector_dim cached — the post-switch BGE 384-dim write would
+    otherwise fail with a LanceDB schema mismatch.
+    """
+    monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
+
+    from voyageai.error import RateLimitError
+
+    class _QuotaError(RateLimitError):
+        def __init__(self) -> None:
+            super().__init__("simulated 429")  # type: ignore[no-untyped-call]
+
+    class _VoyageThenQuota:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def embed(self, texts: list[str], model: str, input_type: str) -> object:
+            self.calls += 1
+            if self.calls == 1:
+                # First call: succeed with 1024-dim vectors (voyage-finance-2 shape).
+                return type(
+                    "Resp", (), {"embeddings": [[0.0] * 1024 for _ in texts]}
+                )()
+            raise _QuotaError()
+
+    adapter = EmbeddingAdapter(rag_root=tmp_path)
+    fake = _VoyageThenQuota()
+    adapter.__dict__["_voyage_client"] = fake
+
+    # Call 1: voyage succeeds; with the bug, _vector_dim would cache at 1024.
+    adapter.embed([_wrap(_make_child("first voyage batch", doc_id="doc-V1"))])
+    assert adapter.decision.backend == "voyage"
+
+    # Call 2: voyage 429 → switches to BGE → bge encode returns 384-dim.
+    # The fixed code re-reads _vector_dim from the (now bge) decision; the
+    # old cached_property would have returned a stale 1024 → schema fail.
+    adapter.embed([_wrap(_make_child("second batch after 429", doc_id="doc-V2"))])
+    assert adapter.decision == FallbackDecision("bge", "bge-small-en-v1.5", "quota")
+
+    # And the resulting store is queryable end-to-end (catches any silent
+    # half-write under a schema mismatch).
+    hits = adapter.query("batch", k=1, store="per_doc", doc_id="doc-V2")
+    assert len(hits) == 1
+
+
+def test_query_uses_query_input_type_for_voyage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Voyage's asymmetric encoder expects input_type='query' on the query
+    side and 'document' on the corpus side. Mixing them weakens ranking.
+    """
+    monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
+
+    class _CapturingVoyage:
+        def __init__(self) -> None:
+            self.input_types: list[str] = []
+
+        def embed(self, texts: list[str], model: str, input_type: str) -> object:
+            self.input_types.append(input_type)
+            return type(
+                "Resp", (), {"embeddings": [[0.0] * 1024 for _ in texts]}
+            )()
+
+    adapter = EmbeddingAdapter(rag_root=tmp_path)
+    fake = _CapturingVoyage()
+    adapter.__dict__["_voyage_client"] = fake
+
+    adapter.embed([_wrap(_make_child("corpus passage", doc_id="doc-IT"))])
+    adapter.query("user search text", k=1, store="per_doc", doc_id="doc-IT")
+
+    assert fake.input_types == ["document", "query"]
