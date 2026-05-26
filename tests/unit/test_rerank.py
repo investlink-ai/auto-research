@@ -8,15 +8,48 @@ in tests/live/.
 from __future__ import annotations
 
 import logging
+from datetime import date
 
 import pytest
 
+from auto_research.extract.chunking import ChunkMetadata, ParentChunk
+from auto_research.extract.rag_retrieval import HybridHit
 from auto_research.extract.rerank import (
     ALLOWED_TIERS,
     RERANKER_VERSION_TAG,
     Qwen3Reranker,
+    RerankHit,
+    rerank,
     reranker_version,
 )
+
+
+def _parent(text: str, idx: int) -> ParentChunk:
+    return ParentChunk(
+        text=text,
+        section_name="Item 1",
+        char_span=(0, len(text)),
+        token_count=max(1, len(text) // 4),
+        table_html=None,
+        metadata=ChunkMetadata(
+            ticker="NVDA",
+            filing_date=date(2025, 3, 15),
+            fiscal_period="FY2025",
+            doc_type="10-K",
+            doc_id=f"doc-{idx}",
+        ),
+    )
+
+
+def _hit(text: str, idx: int, rrf_score: float) -> HybridHit:
+    return HybridHit(
+        parent=_parent(text, idx),
+        score=rrf_score,
+        bm25_rank=idx + 1,
+        dense_rank=idx + 1,
+        bm25_score=1.0 / (idx + 1),
+        dense_score=1.0 / (idx + 1),
+    )
 
 
 def test_tier_allowlist_is_frozen_and_complete() -> None:
@@ -66,3 +99,81 @@ def test_reranker_version_distinguishes_tiers() -> None:
     dev = Qwen3Reranker(tier="dev").reranker_version
     cpu = Qwen3Reranker(tier="ci-cpu").reranker_version
     assert dev != cpu
+
+
+def test_rerank_reorders_by_scorer_descending() -> None:
+    # Five hits in RRF order; scorer assigns higher score to later
+    # items so rerank should reverse them.
+    hits = [_hit(f"passage {i}", i, rrf_score=1.0 - i * 0.1) for i in range(5)]
+
+    def fake_scorer(query: str, passages: list[str]) -> list[float]:
+        return [float(i) for i in range(len(passages))]
+
+    out = rerank(query="q", hits=hits, top_k=3, scorer=fake_scorer)
+
+    assert [h.parent.metadata.doc_id for h in out] == ["doc-4", "doc-3", "doc-2"]
+    assert [h.score for h in out] == [4.0, 3.0, 2.0]
+    assert [h.prev_rank for h in out] == [5, 4, 3]
+    assert out[0].prev_rrf_score == pytest.approx(1.0 - 4 * 0.1)
+    assert isinstance(out[0], RerankHit)
+
+
+def test_rerank_top_k_clamps_to_input_length() -> None:
+    hits = [_hit(f"p{i}", i, rrf_score=1.0 - i * 0.1) for i in range(3)]
+
+    def fake_scorer(query: str, passages: list[str]) -> list[float]:
+        return [1.0, 2.0, 3.0]
+
+    out = rerank(query="q", hits=hits, top_k=10, scorer=fake_scorer)
+    assert len(out) == 3
+
+
+def test_rerank_deterministic_tie_break() -> None:
+    # Three hits, two tied on score. Tie-break: higher prev_rrf_score wins;
+    # if still tied, lexicographic by doc_id.
+    hits = [
+        _hit("a", 0, rrf_score=0.5),
+        _hit("b", 1, rrf_score=0.9),
+        _hit("c", 2, rrf_score=0.7),
+    ]
+
+    def fake_scorer(query: str, passages: list[str]) -> list[float]:
+        return [0.8, 0.8, 0.8]
+
+    out1 = rerank(query="q", hits=hits, top_k=3, scorer=fake_scorer)
+    out2 = rerank(query="q", hits=hits, top_k=3, scorer=fake_scorer)
+    assert [h.parent.metadata.doc_id for h in out1] == [
+        h.parent.metadata.doc_id for h in out2
+    ]
+    # Higher prev_rrf_score first.
+    assert out1[0].parent.metadata.doc_id == "doc-1"  # rrf=0.9
+    assert out1[1].parent.metadata.doc_id == "doc-2"  # rrf=0.7
+    assert out1[2].parent.metadata.doc_id == "doc-0"  # rrf=0.5
+
+
+def test_rerank_invalid_top_k_raises() -> None:
+    hits = [_hit("a", 0, 0.5)]
+
+    def fake_scorer(q: str, p: list[str]) -> list[float]:
+        return [0.1] * len(p)
+
+    with pytest.raises(ValueError, match="top_k must be positive"):
+        rerank(query="q", hits=hits, top_k=0, scorer=fake_scorer)
+
+
+def test_rerank_empty_input_returns_empty() -> None:
+    def fake_scorer(q: str, p: list[str]) -> list[float]:
+        return []
+
+    out = rerank(query="q", hits=[], top_k=5, scorer=fake_scorer)
+    assert out == []
+
+
+def test_rerank_scorer_length_mismatch_raises() -> None:
+    hits = [_hit("a", 0, 0.5), _hit("b", 1, 0.4)]
+
+    def bad_scorer(q: str, p: list[str]) -> list[float]:
+        return [0.1]  # one short
+
+    with pytest.raises(ValueError, match="scorer returned 1 scores for 2 passages"):
+        rerank(query="q", hits=hits, top_k=2, scorer=bad_scorer)

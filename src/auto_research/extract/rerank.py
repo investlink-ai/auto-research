@@ -24,8 +24,13 @@ worker persists reranked output.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from functools import cached_property
 from typing import Literal
+
+from auto_research.extract.chunking import ParentChunk
+from auto_research.extract.rag_retrieval import HybridHit
 
 _log = logging.getLogger(__name__)
 
@@ -114,9 +119,78 @@ class Qwen3Reranker:
         return reranker_version(self._tier, self._model_id)
 
 
+@dataclass(frozen=True)
+class RerankHit:
+    """One reranked hit, carrying both the reranker score and the prior
+    RRF context so a caller can diagnose how the reranker moved each
+    item (or persist both columns).
+    """
+
+    parent: ParentChunk
+    score: float
+    prev_rrf_score: float
+    prev_rank: int
+
+
+# A scorer maps `(query, passages)` to a per-passage relevance score
+# (larger = more relevant). The protocol lives at the module level so
+# the unit tests can substitute a deterministic stub for the real
+# Qwen3-Reranker model. The real implementation is `Qwen3Reranker.score`.
+ScorerFn = Callable[[str, list[str]], list[float]]
+
+
+def rerank(
+    *,
+    query: str,
+    hits: Sequence[HybridHit],
+    top_k: int,
+    scorer: ScorerFn,
+) -> list[RerankHit]:
+    """Reorder `hits` by `scorer(query, [h.parent.text for h in hits])` and
+    return the top `top_k`.
+
+    Tie-break for deterministic output: descending reranker score, then
+    descending prior RRF score, then ascending `doc_id`. The reranker's
+    yes-probability is dense-floating-point and ties are statistically
+    rare, but they DO happen on identical passages (e.g., two filings
+    that quote the same boilerplate); the fixed tie-break makes the
+    output order reproducible across runs.
+    """
+    if top_k <= 0:
+        raise ValueError(f"top_k must be positive; got {top_k}")
+    if not hits:
+        return []
+    passages = [h.parent.text for h in hits]
+    scores = scorer(query, passages)
+    if len(scores) != len(passages):
+        raise ValueError(
+            f"scorer returned {len(scores)} scores for {len(passages)} passages"
+        )
+    indexed = list(enumerate(zip(hits, scores, strict=True)))
+    indexed.sort(
+        key=lambda item: (
+            -item[1][1],
+            -item[1][0].score,
+            item[1][0].parent.metadata.doc_id,
+        )
+    )
+    return [
+        RerankHit(
+            parent=h.parent,
+            score=s,
+            prev_rrf_score=h.score,
+            prev_rank=orig_idx + 1,
+        )
+        for orig_idx, (h, s) in indexed[:top_k]
+    ]
+
+
 __all__ = [
     "ALLOWED_TIERS",
     "RERANKER_VERSION_TAG",
     "Qwen3Reranker",
+    "RerankHit",
+    "ScorerFn",
+    "rerank",
     "reranker_version",
 ]
