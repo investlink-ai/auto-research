@@ -17,8 +17,8 @@ ENTITY_RESOLUTION_PROMPT_VERSION = "v1"
 ENTITY_RESOLUTION_PROMPT = """\
 You are disambiguating a supplier or customer mention extracted from a U.S.
 SEC filing or earnings transcript. The mention text and a short list of
-candidate tickers (retrieved by dense similarity from a curated tradeable
-universe) will be supplied in the next user message.
+candidate tickers (retrieved by dense similarity from a curated universe)
+will be supplied in the next user message.
 
 Pick the single candidate ticker the mention refers to, OR return null
 when:

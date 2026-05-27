@@ -1,4 +1,4 @@
-"""Entity resolution — fuzzy supplier/customer mention -> tradeable ticker.
+"""Entity resolution — fuzzy supplier/customer mention -> universe ticker.
 
 Flow 3 of `docs/specs/2026-05-22-design.md` §8.3:
 

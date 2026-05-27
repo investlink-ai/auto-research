@@ -4,12 +4,13 @@ Reads `config/universe/universe_v1.json` (~90 names from spec §5) and returns
 a tuple of frozen `TickerEntry` models. The universe is versioned by
 filename; v1 covers AI infrastructure (~70) + frontier tech (~20).
 
-Two orthogonal flags carve the universe into operational roles:
+The universe lists every name the research pipeline cares about.
+Whether to take a position on any given name is a portfolio-construction
+output — derived from liquidity, signal strength, sector caps, risk
+limits — NOT a static field here. The "narrative source vs tradeable
+supplier" split that drives signal A1 lives in signal/portfolio code.
 
-  - `tradeable`: do we take direct positions in this name? Narrative-
-    source names (AAPL, MSFT, GOOGL, NVDA, …) are `tradeable=False` —
-    we *read* their filings to populate forward-demand signals on the
-    tradeable book, but never trade them.
+One structural flag remains:
 
   - `feature_source`: does the chunker/extractor pipeline process this
     name's own filings? `False` for foreign filers (ASML, TSM, ARM,
@@ -19,9 +20,8 @@ Two orthogonal flags carve the universe into operational roles:
     filings to a ticker (e.g., NVDA's 10-K naming "TSMC" → TSM). See
     `docs/decisions/2026-05-25-foreign-filers-deferred.md`.
 
-Use `load_universe(tradeable_only=True)` for the tradeable book and
-`load_universe(feature_source_only=True)` for names the extraction
-pipeline should ingest. Filters compose (both can be set).
+Use `load_universe(feature_source_only=True)` for names the extraction
+pipeline should ingest.
 
 Each entry also carries `aliases: tuple[str, ...]` — the surface forms
 (canonical company name, common short forms, legacy names) that
@@ -52,7 +52,6 @@ class TickerEntry(BaseModel):
     sub_universe: SubUniverse
     sector: str = Field(min_length=1)
     market_cap_tier: MarketCapTier
-    tradeable: bool
     # Below default to "U.S. 10-K filer that we ingest" so all
     # existing entries validate without per-row changes. Only the
     # 7 foreign filers carry non-default values explicitly.
@@ -91,7 +90,6 @@ def _default_path() -> Path:
 def load_universe(
     path: Path | None = None,
     *,
-    tradeable_only: bool = False,
     feature_source_only: bool = False,
 ) -> tuple[TickerEntry, ...]:
     """Load the universe from JSON and return a tuple of frozen entries.
@@ -100,9 +98,8 @@ def load_universe(
     `ValidationError` for unknown sub-universe / market-cap tier values
     or malformed rows.
 
-    Filters compose: `load_universe(tradeable_only=True,
-    feature_source_only=True)` returns names we both trade AND extract
-    features from (the standard "v1 pilot" set).
+    Pass `feature_source_only=True` to skip foreign filers (20-F / 40-F)
+    that the v1 chunker can't ingest.
     """
     target = path if path is not None else _default_path()
     raw = json.loads(target.read_text())
@@ -118,8 +115,6 @@ def load_universe(
             raise ValueError(f"Universe at {target} contains duplicate ticker: {entry.ticker}")
         seen.add(entry.ticker)
 
-    if tradeable_only:
-        entries = tuple(e for e in entries if e.tradeable)
     if feature_source_only:
         entries = tuple(e for e in entries if e.feature_source)
     return entries

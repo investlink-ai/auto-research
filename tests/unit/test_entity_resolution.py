@@ -32,7 +32,6 @@ def _entry(ticker: str, sector: str, aliases: tuple[str, ...]) -> TickerEntry:
         sub_universe="ai_infra",
         sector=sector,
         market_cap_tier="large",
-        tradeable=True,
         aliases=aliases,
     )
 
