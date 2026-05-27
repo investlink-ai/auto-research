@@ -14,13 +14,11 @@ from auto_research.universe import TickerEntry, load_universe
 def _entry(
     ticker: str = "NVDA",
     sub_universe: str = "ai_infra",
-    sector: str = "semiconductors",
     market_cap_tier: str = "mega",
 ) -> dict[str, object]:
     return {
         "ticker": ticker,
         "sub_universe": sub_universe,
-        "sector": sector,
         "market_cap_tier": market_cap_tier,
     }
 

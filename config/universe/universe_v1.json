@@ -2,7 +2,6 @@
   {
     "ticker": "AAPL",
     "sub_universe": "ai_infra",
-    "sector": "consumer_electronics",
     "market_cap_tier": "mega",
     "aliases": [
       "Apple",
@@ -12,7 +11,6 @@
   {
     "ticker": "MSFT",
     "sub_universe": "ai_infra",
-    "sector": "software_hyperscaler",
     "market_cap_tier": "mega",
     "aliases": [
       "Microsoft",
@@ -24,7 +22,6 @@
   {
     "ticker": "GOOGL",
     "sub_universe": "ai_infra",
-    "sector": "internet_hyperscaler",
     "market_cap_tier": "mega",
     "aliases": [
       "Google",
@@ -37,7 +34,6 @@
   {
     "ticker": "AMZN",
     "sub_universe": "ai_infra",
-    "sector": "internet_hyperscaler",
     "market_cap_tier": "mega",
     "aliases": [
       "Amazon",
@@ -49,7 +45,6 @@
   {
     "ticker": "META",
     "sub_universe": "ai_infra",
-    "sector": "internet_hyperscaler",
     "market_cap_tier": "mega",
     "aliases": [
       "Meta",
@@ -60,7 +55,6 @@
   {
     "ticker": "NVDA",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "mega",
     "aliases": [
       "NVIDIA",
@@ -71,7 +65,6 @@
   {
     "ticker": "TSLA",
     "sub_universe": "ai_infra",
-    "sector": "auto_ev",
     "market_cap_tier": "mega",
     "aliases": [
       "Tesla",
@@ -82,7 +75,6 @@
   {
     "ticker": "AVGO",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "mega",
     "aliases": [
       "Broadcom",
@@ -92,7 +84,6 @@
   {
     "ticker": "AMD",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "large",
     "aliases": [
       "AMD",
@@ -102,7 +93,6 @@
   {
     "ticker": "ORCL",
     "sub_universe": "ai_infra",
-    "sector": "software_hyperscaler",
     "market_cap_tier": "large",
     "aliases": [
       "Oracle",
@@ -114,7 +104,6 @@
   {
     "ticker": "PLTR",
     "sub_universe": "ai_infra",
-    "sector": "software_platform",
     "market_cap_tier": "large",
     "aliases": [
       "Palantir",
@@ -124,7 +113,6 @@
   {
     "ticker": "CRM",
     "sub_universe": "ai_infra",
-    "sector": "software_platform",
     "market_cap_tier": "large",
     "aliases": [
       "Salesforce",
@@ -134,7 +122,6 @@
   {
     "ticker": "NOW",
     "sub_universe": "ai_infra",
-    "sector": "software_platform",
     "market_cap_tier": "large",
     "aliases": [
       "ServiceNow"
@@ -143,7 +130,6 @@
   {
     "ticker": "ARM",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "large",
     "filing_form": "20-F",
     "feature_source": false,
@@ -157,7 +143,6 @@
   {
     "ticker": "DLR",
     "sub_universe": "ai_infra",
-    "sector": "datacenter_reit",
     "market_cap_tier": "mid",
     "aliases": [
       "Digital Realty",
@@ -167,7 +152,6 @@
   {
     "ticker": "EQIX",
     "sub_universe": "ai_infra",
-    "sector": "datacenter_reit",
     "market_cap_tier": "mid",
     "aliases": [
       "Equinix"
@@ -176,7 +160,6 @@
   {
     "ticker": "CRDO",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "mid",
     "aliases": [
       "Credo",
@@ -188,7 +171,6 @@
   {
     "ticker": "ALAB",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "mid",
     "aliases": [
       "Astera Labs",
@@ -198,7 +180,6 @@
   {
     "ticker": "COHR",
     "sub_universe": "ai_infra",
-    "sector": "optical",
     "market_cap_tier": "mid",
     "aliases": [
       "Coherent",
@@ -210,7 +191,6 @@
   {
     "ticker": "AAOI",
     "sub_universe": "ai_infra",
-    "sector": "optical",
     "market_cap_tier": "small",
     "aliases": [
       "Applied Optoelectronics",
@@ -220,7 +200,6 @@
   {
     "ticker": "LITE",
     "sub_universe": "ai_infra",
-    "sector": "optical",
     "market_cap_tier": "mid",
     "aliases": [
       "Lumentum",
@@ -230,7 +209,6 @@
   {
     "ticker": "ANET",
     "sub_universe": "ai_infra",
-    "sector": "networking_hardware",
     "market_cap_tier": "large",
     "aliases": [
       "Arista",
@@ -240,7 +218,6 @@
   {
     "ticker": "CIEN",
     "sub_universe": "ai_infra",
-    "sector": "networking_hardware",
     "market_cap_tier": "mid",
     "aliases": [
       "Ciena",
@@ -250,7 +227,6 @@
   {
     "ticker": "MU",
     "sub_universe": "ai_infra",
-    "sector": "memory_storage",
     "market_cap_tier": "large",
     "aliases": [
       "Micron",
@@ -260,7 +236,6 @@
   {
     "ticker": "SNDK",
     "sub_universe": "ai_infra",
-    "sector": "memory_storage",
     "market_cap_tier": "mid",
     "aliases": [
       "SanDisk",
@@ -270,7 +245,6 @@
   {
     "ticker": "WDC",
     "sub_universe": "ai_infra",
-    "sector": "memory_storage",
     "market_cap_tier": "mid",
     "aliases": [
       "Western Digital",
@@ -280,7 +254,6 @@
   {
     "ticker": "MRVL",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "mid",
     "aliases": [
       "Marvell",
@@ -290,7 +263,6 @@
   {
     "ticker": "MTSI",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "mid",
     "aliases": [
       "MACOM",
@@ -301,7 +273,6 @@
   {
     "ticker": "MPWR",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "mid",
     "aliases": [
       "Monolithic Power",
@@ -311,7 +282,6 @@
   {
     "ticker": "ASML",
     "sub_universe": "ai_infra",
-    "sector": "semicap",
     "market_cap_tier": "large",
     "filing_form": "20-F",
     "feature_source": false,
@@ -323,7 +293,6 @@
   {
     "ticker": "AMAT",
     "sub_universe": "ai_infra",
-    "sector": "semicap",
     "market_cap_tier": "large",
     "aliases": [
       "Applied Materials"
@@ -332,7 +301,6 @@
   {
     "ticker": "LRCX",
     "sub_universe": "ai_infra",
-    "sector": "semicap",
     "market_cap_tier": "large",
     "aliases": [
       "Lam Research",
@@ -342,7 +310,6 @@
   {
     "ticker": "KLAC",
     "sub_universe": "ai_infra",
-    "sector": "semicap",
     "market_cap_tier": "large",
     "aliases": [
       "KLA",
@@ -353,7 +320,6 @@
   {
     "ticker": "TER",
     "sub_universe": "ai_infra",
-    "sector": "semicap",
     "market_cap_tier": "mid",
     "aliases": [
       "Teradyne"
@@ -362,7 +328,6 @@
   {
     "ticker": "ACMR",
     "sub_universe": "ai_infra",
-    "sector": "semicap",
     "market_cap_tier": "small",
     "aliases": [
       "ACM Research",
@@ -372,7 +337,6 @@
   {
     "ticker": "AEHR",
     "sub_universe": "ai_infra",
-    "sector": "semicap",
     "market_cap_tier": "small",
     "aliases": [
       "Aehr Test Systems",
@@ -382,7 +346,6 @@
   {
     "ticker": "NVMI",
     "sub_universe": "ai_infra",
-    "sector": "semicap",
     "market_cap_tier": "mid",
     "filing_form": "20-F",
     "feature_source": false,
@@ -395,7 +358,6 @@
   {
     "ticker": "FORM",
     "sub_universe": "ai_infra",
-    "sector": "semicap",
     "market_cap_tier": "small",
     "aliases": [
       "FormFactor"
@@ -404,7 +366,6 @@
   {
     "ticker": "LSCC",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "mid",
     "aliases": [
       "Lattice Semiconductor",
@@ -414,7 +375,6 @@
   {
     "ticker": "RMBS",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "mid",
     "aliases": [
       "Rambus"
@@ -423,7 +383,6 @@
   {
     "ticker": "SIMO",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "small",
     "filing_form": "20-F",
     "feature_source": false,
@@ -435,7 +394,6 @@
   {
     "ticker": "AMBA",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "small",
     "aliases": [
       "Ambarella"
@@ -444,7 +402,6 @@
   {
     "ticker": "ALGM",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "small",
     "aliases": [
       "Allegro MicroSystems",
@@ -454,7 +411,6 @@
   {
     "ticker": "SWKS",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "mid",
     "aliases": [
       "Skyworks",
@@ -464,7 +420,6 @@
   {
     "ticker": "QRVO",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "mid",
     "aliases": [
       "Qorvo"
@@ -473,7 +428,6 @@
   {
     "ticker": "ON",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "mid",
     "aliases": [
       "ON Semiconductor",
@@ -484,7 +438,6 @@
   {
     "ticker": "GFS",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "mid",
     "filing_form": "20-F",
     "feature_source": false,
@@ -497,7 +450,6 @@
   {
     "ticker": "TSM",
     "sub_universe": "ai_infra",
-    "sector": "semiconductors",
     "market_cap_tier": "mega",
     "filing_form": "20-F",
     "feature_source": false,
@@ -511,7 +463,6 @@
   {
     "ticker": "SMCI",
     "sub_universe": "ai_infra",
-    "sector": "it_services",
     "market_cap_tier": "mid",
     "aliases": [
       "Super Micro",
@@ -522,7 +473,6 @@
   {
     "ticker": "DELL",
     "sub_universe": "ai_infra",
-    "sector": "it_services",
     "market_cap_tier": "mid",
     "aliases": [
       "Dell",
@@ -533,7 +483,6 @@
   {
     "ticker": "NTNX",
     "sub_universe": "ai_infra",
-    "sector": "software_platform",
     "market_cap_tier": "mid",
     "aliases": [
       "Nutanix"
@@ -542,7 +491,6 @@
   {
     "ticker": "IBM",
     "sub_universe": "ai_infra",
-    "sector": "it_services",
     "market_cap_tier": "large",
     "aliases": [
       "IBM",
@@ -552,7 +500,6 @@
   {
     "ticker": "BE",
     "sub_universe": "ai_infra",
-    "sector": "power_equipment",
     "market_cap_tier": "small",
     "aliases": [
       "Bloom Energy"
@@ -561,7 +508,6 @@
   {
     "ticker": "VST",
     "sub_universe": "ai_infra",
-    "sector": "power_generation",
     "market_cap_tier": "mid",
     "aliases": [
       "Vistra",
@@ -572,7 +518,6 @@
   {
     "ticker": "CEG",
     "sub_universe": "ai_infra",
-    "sector": "power_generation",
     "market_cap_tier": "mid",
     "aliases": [
       "Constellation Energy",
@@ -582,7 +527,6 @@
   {
     "ticker": "TLN",
     "sub_universe": "ai_infra",
-    "sector": "power_generation",
     "market_cap_tier": "mid",
     "aliases": [
       "Talen Energy",
@@ -592,7 +536,6 @@
   {
     "ticker": "NRG",
     "sub_universe": "ai_infra",
-    "sector": "power_generation",
     "market_cap_tier": "mid",
     "aliases": [
       "NRG Energy",
@@ -602,7 +545,6 @@
   {
     "ticker": "OKLO",
     "sub_universe": "ai_infra",
-    "sector": "nuclear_smr",
     "market_cap_tier": "small",
     "aliases": [
       "Oklo"
@@ -611,7 +553,6 @@
   {
     "ticker": "SMR",
     "sub_universe": "ai_infra",
-    "sector": "nuclear_smr",
     "market_cap_tier": "small",
     "aliases": [
       "NuScale",
@@ -621,7 +562,6 @@
   {
     "ticker": "NNE",
     "sub_universe": "ai_infra",
-    "sector": "nuclear_smr",
     "market_cap_tier": "micro",
     "aliases": [
       "Nano Nuclear",
@@ -631,7 +571,6 @@
   {
     "ticker": "LEU",
     "sub_universe": "ai_infra",
-    "sector": "nuclear_fuel",
     "market_cap_tier": "small",
     "aliases": [
       "Centrus Energy",
@@ -641,7 +580,6 @@
   {
     "ticker": "CCJ",
     "sub_universe": "ai_infra",
-    "sector": "nuclear_fuel",
     "market_cap_tier": "mid",
     "filing_form": "40-F",
     "feature_source": false,
@@ -653,7 +591,6 @@
   {
     "ticker": "GEV",
     "sub_universe": "ai_infra",
-    "sector": "power_equipment",
     "market_cap_tier": "mid",
     "aliases": [
       "GE Vernova",
@@ -663,7 +600,6 @@
   {
     "ticker": "VRT",
     "sub_universe": "ai_infra",
-    "sector": "power_equipment",
     "market_cap_tier": "mid",
     "aliases": [
       "Vertiv",
@@ -673,7 +609,6 @@
   {
     "ticker": "ETN",
     "sub_universe": "ai_infra",
-    "sector": "power_equipment",
     "market_cap_tier": "mid",
     "aliases": [
       "Eaton",
@@ -683,7 +618,6 @@
   {
     "ticker": "PWR",
     "sub_universe": "ai_infra",
-    "sector": "infrastructure_construction",
     "market_cap_tier": "mid",
     "aliases": [
       "Quanta Services",
@@ -693,7 +627,6 @@
   {
     "ticker": "STRL",
     "sub_universe": "ai_infra",
-    "sector": "infrastructure_construction",
     "market_cap_tier": "small",
     "aliases": [
       "Sterling Infrastructure",
@@ -703,7 +636,6 @@
   {
     "ticker": "MIR",
     "sub_universe": "ai_infra",
-    "sector": "power_equipment",
     "market_cap_tier": "small",
     "aliases": [
       "Mirion",
@@ -713,7 +645,6 @@
   {
     "ticker": "IONQ",
     "sub_universe": "frontier_tech",
-    "sector": "quantum_computing",
     "market_cap_tier": "small",
     "aliases": [
       "IonQ"
@@ -722,7 +653,6 @@
   {
     "ticker": "RGTI",
     "sub_universe": "frontier_tech",
-    "sector": "quantum_computing",
     "market_cap_tier": "small",
     "aliases": [
       "Rigetti",
@@ -732,7 +662,6 @@
   {
     "ticker": "QBTS",
     "sub_universe": "frontier_tech",
-    "sector": "quantum_computing",
     "market_cap_tier": "small",
     "aliases": [
       "D-Wave",
@@ -742,7 +671,6 @@
   {
     "ticker": "QUBT",
     "sub_universe": "frontier_tech",
-    "sector": "quantum_computing",
     "market_cap_tier": "micro",
     "aliases": [
       "Quantum Computing Inc",
@@ -752,7 +680,6 @@
   {
     "ticker": "HON",
     "sub_universe": "frontier_tech",
-    "sector": "quantum_computing",
     "market_cap_tier": "large",
     "aliases": [
       "Honeywell",
@@ -763,7 +690,6 @@
   {
     "ticker": "RKLB",
     "sub_universe": "frontier_tech",
-    "sector": "space_launch",
     "market_cap_tier": "small",
     "aliases": [
       "Rocket Lab",
@@ -773,7 +699,6 @@
   {
     "ticker": "ASTS",
     "sub_universe": "frontier_tech",
-    "sector": "space_satellite",
     "market_cap_tier": "small",
     "aliases": [
       "AST SpaceMobile",
@@ -783,7 +708,6 @@
   {
     "ticker": "LUNR",
     "sub_universe": "frontier_tech",
-    "sector": "space_services",
     "market_cap_tier": "small",
     "aliases": [
       "Intuitive Machines"
@@ -792,7 +716,6 @@
   {
     "ticker": "PL",
     "sub_universe": "frontier_tech",
-    "sector": "space_eo",
     "market_cap_tier": "small",
     "aliases": [
       "Planet Labs",
@@ -802,7 +725,6 @@
   {
     "ticker": "RDW",
     "sub_universe": "frontier_tech",
-    "sector": "space_services",
     "market_cap_tier": "small",
     "aliases": [
       "Redwire",
@@ -812,7 +734,6 @@
   {
     "ticker": "BKSY",
     "sub_universe": "frontier_tech",
-    "sector": "space_eo",
     "market_cap_tier": "micro",
     "aliases": [
       "BlackSky",
@@ -822,7 +743,6 @@
   {
     "ticker": "SATS",
     "sub_universe": "frontier_tech",
-    "sector": "space_satellite",
     "market_cap_tier": "small",
     "aliases": [
       "EchoStar",

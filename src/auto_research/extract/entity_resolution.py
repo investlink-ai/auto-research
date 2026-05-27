@@ -5,10 +5,10 @@ Flow 3 of `docs/specs/2026-05-22-design.md` §8.3:
   1. Universe entries with aliases are embedded once with the adapter's
      backend (Voyage `voyage-finance-2` in production; BGE in tests).
      The index is a numpy matrix of L2-normalized vectors plus a sidecar
-     list of (ticker, alias_text, primary_name, sector). LanceDB is not
-     used — the index is ~250 rows total; an in-memory dot product
-     handles top-k in microseconds, and the bookkeeping for a versioned
-     table at this scale would dwarf the value.
+     list of (ticker, alias_text, primary_name). LanceDB is not used —
+     the index is ~250 rows total; an in-memory dot product handles
+     top-k in microseconds, and the bookkeeping for a versioned table
+     at this scale would dwarf the value.
 
   2. A mention text is embedded with the same adapter (`input_type="query"`
      on the asymmetric backends), cosine-scored against the index, and
@@ -17,7 +17,7 @@ Flow 3 of `docs/specs/2026-05-22-design.md` §8.3:
      is stable across universe re-sorts.
 
   3. The LLM disambiguator receives the mention text + the top-k candidate
-     (ticker, primary_name, sector) tuples and returns one ticker or null
+     (ticker, primary_name) tuples and returns one ticker or null
      ("unknown"). Returning null is a first-class result, not a failure —
      a false-confident pick corrupts downstream signal A1 data, so the
      prompt explicitly forbids picking a candidate without positive
@@ -116,7 +116,6 @@ class CandidateTicker(BaseModel):
 
     ticker: str
     primary_name: str
-    sector: str
     score: float = Field(ge=-1.0, le=1.0)
 
 
@@ -166,7 +165,6 @@ class _IndexEntry:
     ticker: str
     alias_text: str
     primary_name: str
-    sector: str
 
 
 # Find the JSON object inside the response. Prefer the simple case (the
@@ -217,9 +215,7 @@ def _normalize_picked_ticker(
 
 
 def _format_candidates(candidates: Sequence[CandidateTicker]) -> str:
-    lines = [
-        f"- {c.ticker}: {c.primary_name} ({c.sector})" for c in candidates
-    ]
+    lines = [f"- {c.ticker}: {c.primary_name}" for c in candidates]
     return "\n".join(lines)
 
 
@@ -458,7 +454,6 @@ class EntityResolver:
             CandidateTicker(
                 ticker=ticker,
                 primary_name=entry.primary_name,
-                sector=entry.sector,
                 # Clamp into [-1, 1] — float32 dot products of two
                 # L2-normalized vectors can overshoot 1.0 by ~1e-7 on
                 # some platforms (notably x86 Linux BGE). The semantic
@@ -511,7 +506,6 @@ def _flatten_aliases(entries: Iterable[TickerEntry]) -> list[_IndexEntry]:
                     ticker=entry.ticker,
                     alias_text=alias,
                     primary_name=primary,
-                    sector=entry.sector,
                 )
             )
     return out

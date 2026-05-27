@@ -50,13 +50,6 @@ class TickerEntry(BaseModel):
 
     ticker: str = Field(min_length=1, max_length=8, pattern=r"^[A-Z][A-Z0-9.\-]*$")
     sub_universe: SubUniverse
-    # sector is intentionally a free-form `str` placeholder. Hand-curated
-    # labels in the universe JSON are tech debt — the right source is GICS
-    # Industry codes sourced from FMP per ticker (see
-    # `feedback-industrial-taxonomies-from-data`). Locking in a Literal of
-    # whatever is currently in the JSON would freeze made-up labels as the
-    # spec; better to leave loose until the data-sourced replacement lands.
-    sector: str = Field(min_length=1)
     market_cap_tier: MarketCapTier
     # Below default to "U.S. 10-K filer that we ingest" so all
     # existing entries validate without per-row changes. Only the

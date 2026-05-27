@@ -26,11 +26,10 @@ from auto_research.extract.entity_resolution import (
 from auto_research.universe import TickerEntry
 
 
-def _entry(ticker: str, sector: str, aliases: tuple[str, ...]) -> TickerEntry:
+def _entry(ticker: str, aliases: tuple[str, ...]) -> TickerEntry:
     return TickerEntry(
         ticker=ticker,
         sub_universe="ai_infra",
-        sector=sector,
         market_cap_tier="large",
         aliases=aliases,
     )
@@ -38,9 +37,9 @@ def _entry(ticker: str, sector: str, aliases: tuple[str, ...]) -> TickerEntry:
 
 def _fixture_universe() -> tuple[TickerEntry, ...]:
     return (
-        _entry("NVDA", "semiconductors", ("NVIDIA", "Nvidia", "NVIDIA Corporation")),
-        _entry("AMD", "semiconductors", ("AMD", "Advanced Micro Devices")),
-        _entry("TSM", "semiconductors", ("TSMC", "Taiwan Semiconductor")),
+        _entry("NVDA", ("NVIDIA", "Nvidia", "NVIDIA Corporation")),
+        _entry("AMD", ("AMD", "Advanced Micro Devices")),
+        _entry("TSM", ("TSMC", "Taiwan Semiconductor")),
     )
 
 
@@ -307,7 +306,7 @@ def test_resolve_extracts_json_from_unfenced_response_with_prelude() -> None:
 
 
 def test_constructor_rejects_universe_with_no_aliases() -> None:
-    empty = (_entry("FOO", "semiconductors", ()),)
+    empty = (_entry("FOO", ()),)
     with pytest.raises(ValueError, match="aliases"):
         EntityResolver(
             adapter=_bge_adapter(),
@@ -321,7 +320,7 @@ def test_constructor_rejects_universe_with_no_aliases() -> None:
 def test_constructor_rejects_empty_alias_string() -> None:
     """An empty alias would embed to a degenerate vector that magnets
     unrelated mentions. Fail loud at construction."""
-    bad = (_entry("NVDA", "semiconductors", ("NVIDIA", "", "Nvidia Corp")),)
+    bad = (_entry("NVDA", ("NVIDIA", "", "Nvidia Corp")),)
     with pytest.raises(ValueError, match="empty"):
         EntityResolver(
             adapter=_bge_adapter(),
@@ -333,7 +332,7 @@ def test_constructor_rejects_empty_alias_string() -> None:
 
 
 def test_constructor_rejects_whitespace_only_alias() -> None:
-    bad = (_entry("NVDA", "semiconductors", ("NVIDIA", "   ", "Nvidia Corp")),)
+    bad = (_entry("NVDA", ("NVIDIA", "   ", "Nvidia Corp")),)
     with pytest.raises(ValueError, match="whitespace"):
         EntityResolver(
             adapter=_bge_adapter(),
@@ -377,12 +376,11 @@ def test_top_candidates_dedupes_by_ticker() -> None:
     assert len(tickers) == len(set(tickers))
 
 
-def test_candidate_carries_primary_name_and_sector() -> None:
+def test_candidate_carries_primary_name() -> None:
     resolver = _resolver(response_json={"ticker": "NVDA", "reasoning": "x"})
     result = resolver.resolve("NVIDIA")
     nvda_candidate = next(c for c in result.considered if c.ticker == "NVDA")
     assert nvda_candidate.primary_name == "NVIDIA"  # first alias in fixture
-    assert nvda_candidate.sector == "semiconductors"
     assert -1.0 <= nvda_candidate.score <= 1.0
 
 
@@ -425,9 +423,7 @@ def test_candidate_score_clamped_in_valid_range() -> None:
 
 def test_candidate_ticker_validates_score_range() -> None:
     with pytest.raises(ValidationError):
-        CandidateTicker(
-            ticker="NVDA", primary_name="NVIDIA", sector="semiconductors", score=1.5
-        )
+        CandidateTicker(ticker="NVDA", primary_name="NVIDIA", score=1.5)
 
 
 def test_top_candidates_breaks_ties_by_ticker_symbol() -> None:
@@ -435,12 +431,12 @@ def test_top_candidates_breaks_ties_by_ticker_symbol() -> None:
     confirm the slate order is deterministic regardless of universe load order.
     """
     universe_a = (
-        _entry("ZZZA", "semiconductors", ("identical alias",)),
-        _entry("AAAA", "semiconductors", ("identical alias",)),
+        _entry("ZZZA", ("identical alias",)),
+        _entry("AAAA", ("identical alias",)),
     )
     universe_b = (
-        _entry("AAAA", "semiconductors", ("identical alias",)),
-        _entry("ZZZA", "semiconductors", ("identical alias",)),
+        _entry("AAAA", ("identical alias",)),
+        _entry("ZZZA", ("identical alias",)),
     )
     r_a = _resolver(
         response_json={"ticker": "AAAA", "reasoning": "x"},
