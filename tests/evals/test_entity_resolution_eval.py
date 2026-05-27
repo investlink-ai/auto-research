@@ -106,9 +106,7 @@ def _resolve_with_capture(
         return resolver.resolve(sample.mention_text)
     except Exception as exc:  # pragma: no cover — exercised only in failures
         return EntityResolution(
-            mention_text=sample.mention_text,
             resolved_ticker=None,
-            confidence=None,
             reasoning=f"resolver raised {type(exc).__name__}: {exc}",
             considered=(),
             prompt_version=ENTITY_RESOLUTION_PROMPT_VERSION,

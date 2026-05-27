@@ -28,12 +28,15 @@ contract is enforced by the upstream mention-extraction worker
 (`SupplierMention.citation`); entity resolution operates on the already-
 extracted mention text and emits an `EntityResolution` decision. Because
 `SupplierMention` is frozen, integrators write back the resolver fields
-via `mention.model_copy(update={"resolved_ticker": ..., "resolver_confidence":
-..., "resolver_reasoning": ...})` rather than direct attribute assignment.
+via `mention.model_copy(update={"resolved_ticker": ..., "resolver_reasoning":
+...})` rather than direct attribute assignment.
 
 The resolver hardens the LLM contract at the parser boundary: the
-disambiguator response schema requires `confidence > 0` paired with any
-non-null ticker, and `reasoning` must be non-empty. Several
+disambiguator response schema requires non-empty `reasoning` and a
+ticker that is either null or one of the candidate strings. There is
+deliberately NO confidence field — LLM-emitted confidence is uncalibrated
+noise and no current consumer weights mentions, so the schema enforces
+decisiveness: pick with positive evidence, or return null. Several
 LLM-misbehavior modes (off-list ticker, stringified `"null"`, truncated
 response, case/whitespace drift) collapse to a structured `unknown` with
 the cause captured in `reasoning` rather than silently propagating an
@@ -45,14 +48,13 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import ClassVar
 
 import anthropic
 import numpy as np
 from numpy.typing import NDArray
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from auto_research.extract.client import ExtractionFn, make_extraction_client
 from auto_research.extract.embeddings import EmbeddingAdapter
@@ -129,11 +131,8 @@ class EntityResolution(BaseModel):
     """
 
     model_config = _FROZEN_STRICT
-    SCHEMA_VERSION: ClassVar[str] = "v1"
 
-    mention_text: str
     resolved_ticker: str | None
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     reasoning: str = Field(min_length=1)
     considered: tuple[CandidateTicker, ...]
     prompt_version: str
@@ -143,32 +142,21 @@ class EntityResolution(BaseModel):
 class _DisambiguatorResponse(BaseModel):
     """Internal shape used to parse the LLM's JSON output.
 
-    `reasoning` is required and non-empty: the issue's acceptance criterion
+    `reasoning` is required and non-empty: the acceptance criterion
     ("disambiguator stores reasoning per resolution for audit") would be
-    silently violated by an LLM that emitted an empty string. A non-null
-    ticker must be paired with `confidence > 0` — a self-contradictory
-    `confidence == 0` paired with a real ticker would multiply to zero in
-    downstream weighted-mention code and silently drop the mapping. Both
-    violations raise `ValidationError`, which the resolver catches and
-    reports as `malformed_disambiguator`.
+    silently violated by an LLM that emitted an empty string. There is
+    deliberately NO `confidence` field — LLM-emitted confidence (float
+    or categorical) is uncalibrated noise, and no downstream consumer
+    currently weights mentions, so the schema enforces decisiveness:
+    pick a ticker with positive evidence, or return null. When signal
+    code needs per-mention weighting it will derive it from data, not
+    from LLM self-reports.
     """
 
     model_config = _FROZEN_STRICT
 
     ticker: str | None
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     reasoning: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _check_ticker_confidence_pair(self) -> _DisambiguatorResponse:
-        if self.ticker is not None and (
-            self.confidence is None or self.confidence <= 0.0
-        ):
-            raise ValueError(
-                f"non-null ticker {self.ticker!r} requires confidence > 0; "
-                f"got {self.confidence!r}"
-            )
-        return self
 
 
 @dataclass(frozen=True)
@@ -327,7 +315,6 @@ class EntityResolver:
             if not stripped:
                 span.set_attribute("extract.outcome", "empty_mention")
                 return self._build_unknown(
-                    mention_text=mention_text,
                     reasoning="mention text was empty after stripping whitespace",
                     considered=(),
                 )
@@ -356,7 +343,6 @@ class EntityResolver:
                     )
                 )
                 return self._build_unknown(
-                    mention_text=mention_text,
                     reasoning=(
                         f"disambiguator response was truncated at "
                         f"max_tokens={_MAX_TOKENS} (stop_reason='max_tokens'); "
@@ -375,7 +361,6 @@ class EntityResolver:
                     Status(StatusCode.ERROR, "disambiguator returned no text block")
                 )
                 return self._build_unknown(
-                    mention_text=mention_text,
                     reasoning=(
                         "disambiguator response contained no text block "
                         "(likely a refusal or tool-use-only response)"
@@ -391,7 +376,6 @@ class EntityResolver:
                     Status(StatusCode.ERROR, "disambiguator returned malformed JSON")
                 )
                 return self._build_unknown(
-                    mention_text=mention_text,
                     reasoning=(
                         "disambiguator response could not be parsed as JSON "
                         f"matching the expected schema: {text!r}"
@@ -413,7 +397,6 @@ class EntityResolver:
                     Status(StatusCode.ERROR, _truncate(off_list_reason))
                 )
                 return self._build_unknown(
-                    mention_text=mention_text,
                     reasoning=(
                         f"{off_list_reason}; downgraded to unknown. "
                         f"Disambiguator reasoning: {parsed.reasoning}"
@@ -421,12 +404,6 @@ class EntityResolver:
                     considered=candidates,
                 )
 
-            # confidence must be None when ticker is None — enforce here so
-            # bad pairings don't leak into the audit trail. (Pydantic's
-            # post-validator already rejects ticker-with-zero-confidence;
-            # this handles the symmetric null-ticker-with-leftover-
-            # confidence case where the LLM contradicts itself.)
-            confidence = parsed.confidence if picked is not None else None
             span.set_attribute(
                 "extract.outcome",
                 "resolved" if picked is not None else "unknown",
@@ -434,9 +411,7 @@ class EntityResolver:
             if picked is not None:
                 span.set_attribute("entity.resolved_ticker", picked)
             return EntityResolution(
-                mention_text=mention_text,
                 resolved_ticker=picked,
-                confidence=confidence,
                 reasoning=parsed.reasoning,
                 considered=candidates,
                 prompt_version=ENTITY_RESOLUTION_PROMPT_VERSION,
@@ -446,15 +421,12 @@ class EntityResolver:
     def _build_unknown(
         self,
         *,
-        mention_text: str,
         reasoning: str,
         considered: tuple[CandidateTicker, ...],
     ) -> EntityResolution:
         """Construct an `unknown` EntityResolution with the captured version tags."""
         return EntityResolution(
-            mention_text=mention_text,
             resolved_ticker=None,
-            confidence=None,
             reasoning=reasoning,
             considered=considered,
             prompt_version=ENTITY_RESOLUTION_PROMPT_VERSION,

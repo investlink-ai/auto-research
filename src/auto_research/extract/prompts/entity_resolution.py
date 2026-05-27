@@ -36,12 +36,13 @@ when in doubt, return null.
 Output a single JSON object with EXACTLY these fields:
 - ticker: one of the candidate ticker strings (case-sensitive, e.g. "NVDA"),
   or null when no candidate fits.
-- confidence: a float in [0, 1] when ticker is non-null; null when ticker
-  is null. Express how confident you are that the mention maps to the chosen
-  ticker based on the mention text alone.
 - reasoning: one or two sentences naming the cues you used (or the missing
   cues that forced null). Cite the exact phrase from the mention that drove
   the decision when possible.
+
+There is NO `confidence` field. Pick a ticker only when the mention text
+gives positive evidence; otherwise return null. Do NOT include any other
+fields — the response is rejected if extra fields appear.
 
 Return ONLY the JSON object. Do not wrap it in markdown fences. Do not
 prepend or append any commentary. The response must start with `{` and end
