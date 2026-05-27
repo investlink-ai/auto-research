@@ -487,7 +487,12 @@ class EntityResolver:
                 ticker=ticker,
                 primary_name=entry.primary_name,
                 sector=entry.sector,
-                score=score,
+                # Clamp into [-1, 1] — float32 dot products of two
+                # L2-normalized vectors can overshoot 1.0 by ~1e-7 on
+                # some platforms (notably x86 Linux BGE). The semantic
+                # contract is still [-1, 1]; the overshoot is precision
+                # noise, not real signal.
+                score=max(-1.0, min(1.0, score)),
             )
             for ticker, (score, entry) in ranked
         )
