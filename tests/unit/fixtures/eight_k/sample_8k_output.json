@@ -1,0 +1,14 @@
+{
+  "cik": "0001234567",
+  "accession_number": "0001234567-26-000003",
+  "event_classification": "contract",
+  "milestone_mentions": [
+    {
+      "citation": {
+        "source_quote": "delivery of optical interconnect systems valued at approximately $42 million"
+      },
+      "confidence": 0.9
+    }
+  ],
+  "dilution_language_flags": []
+}

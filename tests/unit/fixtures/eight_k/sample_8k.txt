@@ -1,0 +1,19 @@
+UNITED STATES SECURITIES AND EXCHANGE COMMISSION
+Washington, D.C. 20549
+
+FORM 8-K
+CURRENT REPORT
+
+Pursuant to Section 13 or 15(d) of the Securities Exchange Act of 1934
+
+Date of Report: February 5, 2026
+
+Item 1.01. Entry into a Material Definitive Agreement.
+
+On February 3, 2026, ACME Photonics Inc. (the "Company") entered into a Material Definitive Agreement with a U.S. federal agency for the delivery of optical interconnect systems valued at approximately $42 million over a three-year period. The agreement is subject to customary closing conditions and is expected to commence shipments in the third fiscal quarter of 2026.
+
+Item 7.01. Regulation FD Disclosure.
+
+The Company is hosting an analyst day on February 28, 2026 in San Francisco, California, at which management will discuss long-term strategy, fiscal 2027 outlook, and recent product launches in the silicon photonics product line.
+
+Signatures.

@@ -1,0 +1,43 @@
+{
+  "cik": "0001045810",
+  "accession_number": "0001045810-26-000001",
+  "fiscal_period_end": "2026-01-31",
+  "guidance_tone": {
+    "citation": {
+      "source_quote": "We expect cautious growth in fiscal 2027 as channel inventory normalizes."
+    },
+    "confidence": 0.75
+  },
+  "accrual_flags": [
+    {
+      "citation": {
+        "source_quote": "capitalized software development costs of $118 million"
+      },
+      "confidence": 0.6
+    }
+  ],
+  "supplier_mentions": [
+    {
+      "mention_text": "Taiwan Semiconductor Manufacturing Company (TSMC)",
+      "citation": {
+        "source_quote": "Taiwan Semiconductor Manufacturing Company (TSMC) advanced-node wafer pricing"
+      },
+      "resolved_ticker": null,
+      "resolver_confidence": null,
+      "resolver_reasoning": null
+    }
+  ],
+  "customer_mentions": [
+    {
+      "mention_text": "Microsoft",
+      "citation": {
+        "source_quote": "Microsoft and Alphabet remain our largest customers by revenue"
+      },
+      "resolved_ticker": null,
+      "resolver_confidence": null,
+      "resolver_reasoning": null
+    }
+  ],
+  "language_novelty_score": 0.0,
+  "risk_factor_deltas": []
+}
