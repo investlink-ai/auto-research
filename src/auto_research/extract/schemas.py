@@ -30,7 +30,7 @@ migration. See `docs/CONTRACTS.md` §1.3.
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Annotated, ClassVar
+from typing import Annotated, ClassVar, Literal
 
 from pydantic import (
     BaseModel,
@@ -157,6 +157,54 @@ class ForwardStatement(BaseModel):
     horizon: str
 
 
+class FinancialLineItem(BaseModel):
+    """One line item from a 10-K Item 8 financial statement.
+
+    `value_usd` is the dollar value reported on the filing (negatives
+    allowed for losses / cash outflows). `confidence` is a categorical
+    label — float confidence on table-cell extraction is uncalibrated
+    noise; categorical lets a downstream consumer threshold cleanly
+    (e.g., only use `high`-confidence rows for financial signals).
+    """
+
+    model_config = _FROZEN_STRICT
+
+    value_usd: float
+    citation: Citation
+    confidence: Literal["high", "medium", "low"]
+
+
+class TenKFinancials(BaseModel):
+    """10-K Item 8 financial statements extracted from `ParentChunk.table_html`.
+
+    Each field is a `FinancialLineItem | None`; `None` means the line item
+    wasn't reported in this filing (firms sometimes break out cash-flow
+    categories differently or omit a sub-statement entirely). Adding line
+    items here is non-breaking; renaming or removing is a breaking change
+    that requires a Feast schema migration.
+
+    `SCHEMA_VERSION` is carried directly (not inherited from `TenKOutput`)
+    because the Item 8 extraction is its own (raw_table_html,
+    ten_k_financials_prompt, schema_version, model_id) cache key. Bumping
+    the financials schema must invalidate only Item 8 cache rows, not the
+    narrative cache.
+    """
+
+    model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
+
+    revenue: FinancialLineItem | None
+    gross_profit: FinancialLineItem | None
+    operating_income: FinancialLineItem | None
+    net_income: FinancialLineItem | None
+    total_assets: FinancialLineItem | None
+    total_liabilities: FinancialLineItem | None
+    stockholders_equity: FinancialLineItem | None
+    cash_from_operations: FinancialLineItem | None
+    cash_from_investing: FinancialLineItem | None
+    cash_from_financing: FinancialLineItem | None
+
+
 # --- Per-worker outputs -----------------------------------------------------
 
 
@@ -173,6 +221,13 @@ class TenKOutput(BaseModel):
     customer_mentions: list[CustomerMention]
     language_novelty_score: float  # vs prior 10-K, computed downstream
     risk_factor_deltas: list[RiskFactorDelta]
+    # Item 8 financials are extracted from `ParentChunk.table_html` via
+    # the structured `ten_k_financials` prompt + `TenKFinancials` schema,
+    # NOT via dense retrieval. `None` when the worker ran narrative-only
+    # (no chunkset supplied, or chunkset had no table parents).
+    # Additive field — defaults to None so existing TenKOutput
+    # construction continues to validate without modification.
+    financials: TenKFinancials | None = None
 
 
 class TranscriptOutput(BaseModel):
@@ -214,10 +269,12 @@ __all__ = [
     "Claim",
     "CustomerMention",
     "EightKOutput",
+    "FinancialLineItem",
     "ForwardStatement",
     "RiskFactorDelta",
     "SFilingOutput",
     "SupplierMention",
+    "TenKFinancials",
     "TenKOutput",
     "TranscriptOutput",
 ]

@@ -23,10 +23,12 @@ from auto_research.extract.schemas import (
     Claim,
     CustomerMention,
     EightKOutput,
+    FinancialLineItem,
     ForwardStatement,
     RiskFactorDelta,
     SFilingOutput,
     SupplierMention,
+    TenKFinancials,
     TenKOutput,
     TranscriptOutput,
 )
@@ -376,3 +378,103 @@ def test_schema_version_is_classvar_not_pydantic_field() -> None:
     downstream consumers (Feast, parquet) break."""
     for cls in (SFilingOutput, TenKOutput, TranscriptOutput, EightKOutput):
         assert "SCHEMA_VERSION" not in cls.model_fields
+
+
+# --- TenKFinancials + FinancialLineItem (Item 8 structured extraction) ------
+
+
+def test_financial_line_item_construction() -> None:
+    line = FinancialLineItem(
+        value_usd=1_234_000_000.0,
+        citation=_citation(),
+        confidence="high",
+    )
+    assert line.value_usd == 1_234_000_000.0
+    assert line.confidence == "high"
+
+
+def test_financial_line_item_confidence_is_categorical_not_float() -> None:
+    """Float `confidence` must reject — categorical-confidence policy
+    (user feedback memory: `LLM confidence is categorical`). Float
+    confidence on table extraction is uncalibrated noise."""
+    with pytest.raises(ValidationError):
+        FinancialLineItem(
+            value_usd=1.0,
+            citation=_citation(),
+            confidence=0.9,  # type: ignore[arg-type]
+        )
+
+
+def test_financial_line_item_confidence_rejects_unknown_label() -> None:
+    with pytest.raises(ValidationError):
+        FinancialLineItem(
+            value_usd=1.0,
+            citation=_citation(),
+            confidence="very-high",  # type: ignore[arg-type]
+        )
+
+
+def test_financial_line_item_is_frozen() -> None:
+    line = FinancialLineItem(
+        value_usd=1.0, citation=_citation(), confidence="medium"
+    )
+    with pytest.raises(ValidationError):
+        line.value_usd = 2.0
+
+
+def test_ten_k_financials_supports_none_per_field() -> None:
+    """Each TenKFinancials line item is independently optional — firms
+    omit different sub-statements, so the schema must accept null on any."""
+    fin = TenKFinancials(
+        revenue=FinancialLineItem(
+            value_usd=1.0, citation=_citation(), confidence="high"
+        ),
+        gross_profit=None,
+        operating_income=None,
+        net_income=None,
+        total_assets=None,
+        total_liabilities=None,
+        stockholders_equity=None,
+        cash_from_operations=None,
+        cash_from_investing=None,
+        cash_from_financing=None,
+    )
+    assert fin.revenue is not None
+    assert fin.gross_profit is None
+
+
+def test_ten_k_output_financials_defaults_to_none() -> None:
+    """Adding the `financials` field is additive: existing TenKOutput
+    construction (without specifying financials) must continue to validate."""
+    out = _ten_k_output()
+    assert out.financials is None
+
+
+def test_ten_k_output_accepts_financials_when_supplied() -> None:
+    fin = TenKFinancials(
+        revenue=FinancialLineItem(
+            value_usd=1.0, citation=_citation(), confidence="high"
+        ),
+        gross_profit=None,
+        operating_income=None,
+        net_income=None,
+        total_assets=None,
+        total_liabilities=None,
+        stockholders_equity=None,
+        cash_from_operations=None,
+        cash_from_investing=None,
+        cash_from_financing=None,
+    )
+    out = TenKOutput(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        guidance_tone=_claim(),
+        accrual_flags=[],
+        supplier_mentions=[],
+        customer_mentions=[],
+        language_novelty_score=0.0,
+        risk_factor_deltas=[],
+        financials=fin,
+    )
+    assert out.financials is fin
