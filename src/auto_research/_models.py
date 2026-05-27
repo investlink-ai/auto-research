@@ -74,6 +74,10 @@ _ROUTING: Final[dict[tuple[str, str], str]] = {
     # templated rewrite ⇒ Haiku per §7.3. Worker is the module identity
     # (matches the cache namespace data/cache/extract/contextual_chunking/).
     ("contextual_chunking", "contextual_chunk"): _HAIKU,
+    # Entity resolution: pick one ticker from a short (top-3) candidate
+    # list given a mention text. Templated reranker decision over a small
+    # prompt — routes to Haiku per §7.3 pattern-recognition tier.
+    ("entity_resolution", "disambiguate_mention"): _HAIKU,
     # Agents don't have output schemas; use logical task names instead of fields.
     ("research_agent", "default"): _SONNET,
     ("research_agent", "hard_critique"): _OPUS,

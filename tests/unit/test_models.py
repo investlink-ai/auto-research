@@ -39,6 +39,12 @@ def test_route_model_returns_haiku_for_routine_extraction() -> None:
         route_model("contextual_chunking", "contextual_chunk")
         == "claude-haiku-4-5"
     )
+    # Entity resolution: pick one ticker from top-3 candidates — templated
+    # reranker decision, routes to Haiku 4.5.
+    assert (
+        route_model("entity_resolution", "disambiguate_mention")
+        == "claude-haiku-4-5"
+    )
 
 
 def test_route_model_returns_opus_for_hard_critique() -> None:

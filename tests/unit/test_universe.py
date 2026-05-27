@@ -14,16 +14,12 @@ from auto_research.universe import TickerEntry, load_universe
 def _entry(
     ticker: str = "NVDA",
     sub_universe: str = "ai_infra",
-    sector: str = "semiconductors",
     market_cap_tier: str = "mega",
-    tradeable: bool = True,
 ) -> dict[str, object]:
     return {
         "ticker": ticker,
         "sub_universe": sub_universe,
-        "sector": sector,
         "market_cap_tier": market_cap_tier,
-        "tradeable": tradeable,
     }
 
 
@@ -50,33 +46,15 @@ def test_universe_v1_covers_spec_section_5_anchors() -> None:
     for ticker in ("AAPL", "MSFT", "GOOGL", "NVDA", "DLR", "EQIX"):
         assert ticker in by_ticker, ticker
         assert by_ticker[ticker].sub_universe == "ai_infra"
-        assert by_ticker[ticker].tradeable is False
-    # Tradeable compute & networking
+    # Compute & networking
     for ticker in ("CRDO", "ASML", "TSM", "SMCI"):
         assert by_ticker[ticker].sub_universe == "ai_infra"
-        assert by_ticker[ticker].tradeable is True
-    # Tradeable power & infra
+    # Power & infra
     for ticker in ("OKLO", "CEG", "VRT"):
         assert by_ticker[ticker].sub_universe == "ai_infra"
-        assert by_ticker[ticker].tradeable is True
     # Frontier tech — quantum + space
-    for ticker in ("IONQ", "RGTI"):
+    for ticker in ("IONQ", "RGTI", "RKLB", "ASTS"):
         assert by_ticker[ticker].sub_universe == "frontier_tech"
-        assert by_ticker[ticker].tradeable is True
-    for ticker in ("RKLB", "ASTS"):
-        assert by_ticker[ticker].sub_universe == "frontier_tech"
-        assert by_ticker[ticker].tradeable is True
-
-
-def test_load_universe_tradeable_only_filters_narrative_sources() -> None:
-    all_entries = load_universe()
-    tradeable = load_universe(tradeable_only=True)
-    assert 0 < len(tradeable) < len(all_entries)
-    assert all(e.tradeable for e in tradeable)
-    tradeable_tickers = {e.ticker for e in tradeable}
-    # Narrative-source names from spec §5 are excluded
-    for ticker in ("AAPL", "MSFT", "GOOGL", "NVDA", "META", "TSLA", "DLR", "EQIX"):
-        assert ticker not in tradeable_tickers, ticker
 
 
 # ---------- Foreign-filer annotation (20-F / 40-F) ---------------------------
@@ -121,14 +99,6 @@ def test_load_universe_feature_source_only_excludes_foreign_filers() -> None:
     pipeline_tickers = {e.ticker for e in pipeline}
     for ticker in ("ASML", "TSM", "ARM", "NVMI", "SIMO", "GFS", "CCJ"):
         assert ticker not in pipeline_tickers, ticker
-
-
-def test_filters_compose() -> None:
-    """tradeable_only AND feature_source_only together give the pilot's
-    extraction-and-trading set."""
-    pilot = load_universe(tradeable_only=True, feature_source_only=True)
-    assert pilot
-    assert all(e.tradeable and e.feature_source for e in pilot)
 
 
 # ---------- Negative cases (fixture files in tmp_path) ----------
