@@ -53,8 +53,17 @@ from auto_research.extract.prompts.ten_k_narrative import (
     TEN_K_NARRATIVE_PROMPT,
     TEN_K_NARRATIVE_PROMPT_VERSION,
 )
+from auto_research.extract.prompts.ten_k_narrative_field import (
+    TEN_K_NARRATIVE_FIELD_CONFIGS,
+    TEN_K_NARRATIVE_FIELD_PROMPT,
+    TEN_K_NARRATIVE_FIELD_PROMPT_VERSION,
+)
 from auto_research.extract.schemas import TenKFinancials, TenKOutput
-from auto_research.extract.workers._common import run_single_shot_extraction
+from auto_research.extract.workers._common import (
+    check_identity_agreement,
+    commit_staged_cache_writes,
+    run_single_shot_extraction,
+)
 
 _WORKER = "ten_k"
 # Narrative single-shot is dominated by the cross-doc supplier/customer
@@ -64,32 +73,6 @@ _NARRATIVE_DEFAULT_TASK = "supplier_mentions"
 _FINANCIALS_TASK = "financials"
 _NARRATIVE_MAX_TOKENS = 8192
 _FINANCIALS_MAX_TOKENS = 4096
-
-# Per-field RAG queries. Tuned at writing time; expected to evolve under
-# eval (#20) — the prompt itself is frozen at v1, the query strings are
-# orchestration code.
-_NARRATIVE_RAG_QUERIES: dict[str, str] = {
-    "guidance_tone": (
-        "What is management's tone on forward growth, gross margin, and "
-        "demand in the MD&A section?"
-    ),
-    "accrual_flags": (
-        "What are the accrual-quality concerns: unbilled receivables, "
-        "deferred revenue swings, capitalized R&D, restructuring resets?"
-    ),
-    "supplier_mentions": (
-        "Which specific named suppliers (e.g., TSMC, Foxconn, Samsung, "
-        "ASML) does the company rely on?"
-    ),
-    "customer_mentions": (
-        "Which specific named customers — hyperscalers, large enterprises "
-        "— are explicitly called out by name?"
-    ),
-    "risk_factor_deltas": (
-        "What new, removed, or modified Item 1A risk factors does this "
-        "filing disclose?"
-    ),
-}
 
 RetrieveFn = Callable[[str], list[ParentChunk]]
 
@@ -179,7 +162,6 @@ def _merge_financials(parts: list[TenKFinancials]) -> TenKFinancials:
 
 def _extract_ten_k_rag(
     *,
-    raw_doc: str,
     doc_id: str,
     chunkset: ChunkSet,
     retrieve_fn: RetrieveFn,
@@ -189,53 +171,62 @@ def _extract_ten_k_rag(
 ) -> TenKOutput | None:
     """Per-field RAG narrative extraction.
 
-    For each TenKOutput narrative field, retrieve the top parents via
-    `retrieve_fn`, format them as user content, and run the narrative
-    prompt. The prompt asks for the full narrative output; the worker
-    takes only the relevant field from each call and merges into one
-    TenKOutput.
+    For each narrative field, retrieve the top parents via
+    `retrieve_fn`, format them as user content, and run a
+    field-scoped prompt against a partial schema that carries exactly
+    that field plus the identity columns. The worker assembles the
+    five partials into a full `TenKOutput` at the end.
 
     Per-field calls stage their cache writes; the worker commits all
-    staged writes only AFTER the full 5-field loop succeeds. A mid-loop
-    quarantine returns None without persisting ANY of the earlier
-    fields' results — so re-runs see a consistent cache state rather
-    than half-cached partial output.
+    staged writes only AFTER the full 5-field loop succeeds AND the
+    cross-partial identity check passes. A mid-loop quarantine returns
+    `None` without persisting ANY of the earlier fields' results — so
+    re-runs see a consistent cache state rather than half-cached
+    partial output.
 
-    Identity-field disagreement is treated as a quarantine: when the
-    5 calls return different cik / accession_number / fiscal_period_end
-    values, the worker has no way to pick honestly. Option A (follow-up
-    PR) eliminates this by extracting identity once from the cover-page
-    chunk; until then the interim quarantine is correct.
+    Each per-field call uses the model tier the routing table actually
+    declares (3 of 5 are Haiku) — the unified pre-split call routed
+    everything to Sonnet via `_NARRATIVE_DEFAULT_TASK = supplier_mentions`,
+    paying for the wrong tier on guidance_tone / accrual_flags /
+    risk_factor_deltas. The partial schemas eliminate the dual-output
+    waste from emitting the full TenKOutput shape on every call and
+    discarding all but one field downstream — the unified-call path
+    paid ~5x output cost for this waste.
 
-    Per-field LLM calls trade higher cost for per-field reranker
-    selectivity, which is the spec §8.1 pattern ("for each Pydantic
-    schema field, retrieve top-k child chunks → resolve to parents →
-    extraction call from retrieved context"). The five-call cost is
-    accepted because long 10-Ks are ~20% of the corpus and the per-field
-    selectivity gain on accrual_flags + risk_factor_deltas is large.
+    `chunkset` is currently unused inside the loop — `retrieve_fn`
+    abstracts the chunkset-to-parent pipeline behind the
+    field-keyed query. Kept on the signature because the caller
+    (`extract_ten_k`) already has it and a future identity-from-cover-
+    page-chunk pass will need it directly.
     """
+    del chunkset  # currently consumed by `retrieve_fn`; keep on signature.
+
     pending_writes: list[tuple[str, dict[str, Any]]] = []
 
     def _stage(cache_key: str, payload: dict[str, Any]) -> None:
         pending_writes.append((cache_key, payload))
 
-    partials: dict[str, Any] = {}
+    narrative_partials: dict[str, Any] = {}
     identity_seen: dict[str, list[Any]] = {
         "cik": [],
         "accession_number": [],
         "fiscal_period_end": [],
     }
-    for field, query in _NARRATIVE_RAG_QUERIES.items():
-        parents = retrieve_fn(query)
+    for config in TEN_K_NARRATIVE_FIELD_CONFIGS:
+        parents = retrieve_fn(config.retrieval_query)
         user_content = _format_parents_as_context(parents)
+        field_prompt = TEN_K_NARRATIVE_FIELD_PROMPT.format(
+            field_name=config.field_name,
+            field_description=config.description,
+        )
         per_field = run_single_shot_extraction(
             raw_doc=user_content,
-            doc_id=f"{doc_id}#{field}",  # distinct cache key per field
+            doc_id=f"{doc_id}#{config.field_name}",
             worker=_WORKER,
-            task=field,
-            prompt=TEN_K_NARRATIVE_PROMPT,
-            prompt_version=TEN_K_NARRATIVE_PROMPT_VERSION,
-            output_model=TenKOutput,
+            task=config.field_name,
+            prompt=field_prompt,
+            prompt_version=TEN_K_NARRATIVE_FIELD_PROMPT_VERSION,
+            output_model=config.schema,
             max_tokens=_NARRATIVE_MAX_TOKENS,
             cache_root=cache_root,
             quarantine_root=quarantine_root,
@@ -249,46 +240,28 @@ def _extract_ten_k_rag(
             # record. No staged writes are committed, so re-runs see
             # no stale per-field cache entries from this attempt.
             return None
-        partials[field] = getattr(per_field, field)
-        identity_seen["cik"].append(per_field.cik)
-        identity_seen["accession_number"].append(per_field.accession_number)
-        identity_seen["fiscal_period_end"].append(per_field.fiscal_period_end)
-        partials.setdefault("cik", per_field.cik)
-        partials.setdefault("accession_number", per_field.accession_number)
-        partials.setdefault("fiscal_period_end", per_field.fiscal_period_end)
-
-    # Identity-field consistency check: the 5 per-field calls each
-    # return a full TenKOutput with cik / accession_number /
-    # fiscal_period_end. If they disagree, the model hallucinated on
-    # at least one call and silently keeping the first value would
-    # corrupt downstream attribution. Quarantine instead.
-    for field_name, values in identity_seen.items():
-        unique = set(values)
-        if len(unique) > 1:
-            from auto_research.extract.workers._common import _write_quarantine
-
-            _write_quarantine(
-                quarantine_root=quarantine_root,
-                worker=_WORKER,
-                prompt_version=TEN_K_NARRATIVE_PROMPT_VERSION,
-                doc_id=f"{doc_id}#identity-disagreement",
-                parsed={
-                    "field": field_name,
-                    "values_per_call": [str(v) for v in values],
-                },
-                error=(
-                    f"RAG per-field calls disagree on identity field "
-                    f"`{field_name}`: {sorted(str(v) for v in unique)!r}"
-                ),
+        narrative_partials[config.field_name] = getattr(
+            per_field, config.field_name
+        )
+        for identity_field in identity_seen:
+            identity_seen[identity_field].append(
+                getattr(per_field, identity_field)
             )
-            return None
 
-    # All 5 fields succeeded and identity agrees — commit the staged
-    # cache writes.
-    for cache_key, payload in pending_writes:
-        content_cache.write(cache_root, _WORKER, cache_key, payload)
+    agreed_identity = check_identity_agreement(
+        identity_values=identity_seen,
+        quarantine_root=quarantine_root,
+        worker=_WORKER,
+        prompt_version=TEN_K_NARRATIVE_FIELD_PROMPT_VERSION,
+        doc_id=doc_id,
+    )
+    if agreed_identity is None:
+        return None
 
-    return TenKOutput(**partials)
+    commit_staged_cache_writes(
+        cache_root=cache_root, worker=_WORKER, pending=pending_writes
+    )
+    return TenKOutput(**agreed_identity, **narrative_partials)
 
 
 def extract_ten_k(
@@ -348,7 +321,6 @@ def extract_ten_k(
             )
         assert chunkset is not None  # narrow for mypy
         narrative = _extract_ten_k_rag(
-            raw_doc=raw_doc,
             doc_id=doc_id,
             chunkset=chunkset,
             retrieve_fn=retrieve_fn,

@@ -293,6 +293,102 @@ class SFilingOutput(BaseModel):
     use_of_proceeds: list[Claim]
 
 
+# --- Per-field 10-K narrative partials --------------------------------------
+#
+# The 10-K RAG path runs one Anthropic call per narrative field so each
+# call uses the model tier the routing table actually declares (3 of 5
+# narrative fields are Haiku-tier; the unified pre-split call routed
+# everything to Sonnet). Each partial carries the identity fields plus
+# exactly ONE narrative field — the worker assembles them into a full
+# `TenKOutput` at the end of the loop, with a cross-partial identity
+# check to catch hallucinated cik / accession_number / fiscal_period_end
+# drift between calls.
+#
+# Each partial has its own `SCHEMA_VERSION` so a future iteration of one
+# field's contract (e.g., adding a sub-mention type) invalidates only
+# its own cache entries; the orthogonality matches the chunker /
+# embed-model version-pinning pattern already in the codebase.
+
+
+class TenKGuidanceTonePartial(BaseModel):
+    model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
+
+    cik: str
+    accession_number: str
+    fiscal_period_end: date
+    guidance_tone: Claim
+
+
+class TenKAccrualFlagsPartial(BaseModel):
+    model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
+
+    cik: str
+    accession_number: str
+    fiscal_period_end: date
+    accrual_flags: list[Claim]
+
+
+class TenKSupplierMentionsPartial(BaseModel):
+    model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
+
+    cik: str
+    accession_number: str
+    fiscal_period_end: date
+    supplier_mentions: list[SupplierMention]
+
+
+class TenKCustomerMentionsPartial(BaseModel):
+    model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
+
+    cik: str
+    accession_number: str
+    fiscal_period_end: date
+    customer_mentions: list[CustomerMention]
+
+
+class TenKRiskFactorDeltasPartial(BaseModel):
+    model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
+
+    cik: str
+    accession_number: str
+    fiscal_period_end: date
+    risk_factor_deltas: list[RiskFactorDelta]
+
+
+# --- Transcript partials ----------------------------------------------------
+#
+# Binary split by routing tier (spec §7.3). Prepared remarks is
+# templated/templated tone classification ⇒ Haiku. Q&A evasiveness and
+# the forward_statements list both need cross-utterance reasoning ⇒
+# Sonnet, so they share one Sonnet call rather than splitting into a
+# third. Eliminates the "one Sonnet call for everything" waste on the
+# prepared-remarks half.
+
+
+class TranscriptPreparedRemarksPartial(BaseModel):
+    model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
+
+    ticker: str
+    event_datetime: AwareDatetime | None
+    prepared_remarks_tone: Claim
+
+
+class TranscriptQAPartial(BaseModel):
+    model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
+
+    ticker: str
+    event_datetime: AwareDatetime | None
+    q_and_a_evasiveness: Claim
+    forward_statements: list[ForwardStatement]
+
+
 __all__ = [
     "Citation",
     "Claim",
@@ -304,7 +400,14 @@ __all__ = [
     "RiskFactorDelta",
     "SFilingOutput",
     "SupplierMention",
+    "TenKAccrualFlagsPartial",
+    "TenKCustomerMentionsPartial",
     "TenKFinancials",
+    "TenKGuidanceTonePartial",
     "TenKOutput",
+    "TenKRiskFactorDeltasPartial",
+    "TenKSupplierMentionsPartial",
     "TranscriptOutput",
+    "TranscriptPreparedRemarksPartial",
+    "TranscriptQAPartial",
 ]

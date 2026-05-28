@@ -129,6 +129,63 @@ def test_resolve_spans_does_not_mutate_input() -> None:
     assert parsed == snapshot
 
 
+def test_check_identity_agreement_returns_agreed_values_when_all_unique(
+    tmp_path: Path,
+) -> None:
+    from auto_research.extract.workers._common import check_identity_agreement
+
+    agreed = check_identity_agreement(
+        identity_values={"cik": ["X", "X", "X"], "fy_end": ["d1", "d1", "d1"]},
+        quarantine_root=tmp_path / "q",
+        worker="test_worker",
+        prompt_version="v1",
+        doc_id="doc-1",
+    )
+    assert agreed == {"cik": "X", "fy_end": "d1"}
+    # No quarantine record written on the agreement path.
+    assert not (tmp_path / "q").exists() or not list((tmp_path / "q").rglob("*.json"))
+
+
+def test_check_identity_agreement_quarantines_on_any_divergence(
+    tmp_path: Path,
+) -> None:
+    from auto_research.extract.workers._common import check_identity_agreement
+
+    result = check_identity_agreement(
+        identity_values={
+            "cik": ["X", "X", "X"],  # agrees
+            "fy_end": ["d1", "d2", "d1"],  # disagrees
+        },
+        quarantine_root=tmp_path / "q",
+        worker="test_worker",
+        prompt_version="v1",
+        doc_id="doc-1",
+    )
+    assert result is None
+    qrec = tmp_path / "q" / "test_worker" / "doc-1#identity-disagreement.json"
+    assert qrec.exists()
+    record = json.loads(qrec.read_text())
+    assert record["output"]["field"] == "fy_end"
+    assert "fy_end" in record["error"]
+    assert "disagree" in record["error"]
+
+
+def test_commit_staged_cache_writes_writes_all_entries(tmp_path: Path) -> None:
+    from auto_research.extract.workers._common import commit_staged_cache_writes
+
+    pending = [
+        ("key-a", {"data": 1}),
+        ("key-b", {"data": 2}),
+    ]
+    commit_staged_cache_writes(
+        cache_root=tmp_path / "cache",
+        worker="test_worker",
+        pending=pending,
+    )
+    written = sorted((tmp_path / "cache").rglob("*.json"))
+    assert len(written) == 2
+
+
 def test_write_quarantine_writes_record(tmp_path: Path) -> None:
     _write_quarantine(
         quarantine_root=tmp_path / "q",
