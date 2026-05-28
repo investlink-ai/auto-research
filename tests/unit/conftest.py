@@ -224,6 +224,22 @@ def _warm_qwen3_reranker() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_extraction_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reset `_common._CLIENTS` per test.
+
+    The production singleton table accumulates `@cost_cap` /
+    `@circuit_breaker` state across docs (the whole reason it exists).
+    Carrying that state across tests would let an injection-bypass
+    test pollute a subsequent production-singleton test under
+    pytest-randomly. Reset the dict via monkeypatch so the teardown
+    restores the original.
+    """
+    from auto_research.extract.workers import _common
+
+    monkeypatch.setattr(_common, "_CLIENTS", {})
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_default_quarantine_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -13,11 +13,12 @@ of AGENTS.md §3 — apply the same Tier 2 discipline.
 
 `run_single_shot_extraction` composes the helpers with the cache, the
 Anthropic client, and the post-validation guardrail in a single function
-that workers can call with their prompt + output model. The
-`client_factory` parameter is the per-worker singleton getter (e.g.,
-`s_filings._get_client`); when omitted, a fresh client is built per call,
-which is fine for hermetic tests that inject `anthropic_client` directly
-but defeats production cost-cap / circuit-breaker state accumulation.
+that workers can call with their prompt + output model. The per-worker
+extraction-client singleton lives here in `_CLIENTS` (keyed on worker
+name) so the workers don't each own a module-level `_CLIENT` + getter —
+that removed a footgun where a future worker forgetting to pass
+`client_factory=_get_client` would silently build a fresh client per
+call and defeat `@cost_cap` / `@circuit_breaker` state accumulation.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ import copy
 import re
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 import anthropic
 from opentelemetry import trace
@@ -176,20 +177,35 @@ def _write_quarantine(
     atomic_write_text(target, record.model_dump_json(indent=2))
 
 
-class ClientFactory(Protocol):
-    """Per-worker singleton-or-fresh client getter.
+# Module-level per-worker extraction-client singleton table. Keyed on
+# worker name so a single import-time data structure replaces the
+# duplicated `_CLIENT: ExtractionFn | None = None` + `_get_client(...)`
+# pattern that used to live in each worker module. Production calls
+# reuse one client per worker so `@cost_cap` / `@circuit_breaker` state
+# accumulates across docs; tests reset the dict per-test via a conftest
+# fixture and bypass it entirely when injecting `anthropic_client`.
+_CLIENTS: dict[str, ExtractionFn] = {}
 
-    Each worker module owns a module-level `_CLIENT: ExtractionFn | None`
-    and a `_get_client(anthropic_client)` function so the factory closure
-    (with its `@cost_cap` and `@circuit_breaker` state) survives across
-    calls. `run_single_shot_extraction` calls this factory once per
-    invocation rather than building a new client itself — that's what
-    keeps the production cost-cap counter accumulating across docs.
+
+def _get_or_build_client(
+    worker: str, anthropic_client: anthropic.Anthropic | None
+) -> ExtractionFn:
+    """Return the production singleton, or a fresh client for test injection.
+
+    `anthropic_client` is the test-injection escape hatch: when provided,
+    each call builds a fresh client around the duck-typed stub so per-test
+    state stays isolated. When omitted (the production path), the
+    worker-name-keyed singleton in `_CLIENTS` is created on first use and
+    reused thereafter so `@cost_cap` and `@circuit_breaker` state
+    accumulates across documents within a process.
     """
-
-    def __call__(
-        self, anthropic_client: anthropic.Anthropic | None
-    ) -> ExtractionFn: ...
+    if anthropic_client is not None:
+        return make_extraction_client(
+            worker=worker, anthropic_client=anthropic_client
+        )
+    if worker not in _CLIENTS:
+        _CLIENTS[worker] = make_extraction_client(worker=worker)
+    return _CLIENTS[worker]
 
 
 def run_single_shot_extraction[OutputT: BaseModel](
@@ -205,17 +221,19 @@ def run_single_shot_extraction[OutputT: BaseModel](
     cache_root: Path,
     quarantine_root: Path,
     anthropic_client: anthropic.Anthropic | None = None,
-    client_factory: ClientFactory | None = None,
     cache_write_handler: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> OutputT | None:
     """One-shot LLM extraction with the shared scaffolding.
 
     Each worker passes its `(prompt, prompt_version, output_model, task,
     max_tokens)` and gets back a validated output (or `None` with a
-    `QuarantineRecord` on the failure paths). `client_factory` is the
-    per-worker singleton getter (`_get_client`); when omitted, a fresh
-    client is built each call via `make_extraction_client` — acceptable
-    only for tests that inject `anthropic_client` directly.
+    `QuarantineRecord` on the failure paths). The extraction client is
+    pulled from the worker-keyed singleton in `_CLIENTS` (production)
+    or built fresh per call when the caller injects `anthropic_client`
+    (tests). Workers no longer pass their own `client_factory` — the
+    consolidation here is what prevents a future worker from
+    accidentally re-creating the singleton on every call and silently
+    defeating cost-cap state accumulation.
 
     `cache_write_handler`: when provided, the function calls
     `handler(cache_key, payload)` on a successful extraction INSTEAD of
@@ -251,12 +269,7 @@ def run_single_shot_extraction[OutputT: BaseModel](
             span.set_attribute("extract.outcome", "cache_hit")
             return output_model.model_validate(cached)
 
-        if client_factory is not None:
-            client = client_factory(anthropic_client)
-        else:
-            client = make_extraction_client(
-                worker=worker, anthropic_client=anthropic_client
-            )
+        client = _get_or_build_client(worker, anthropic_client)
 
         try:
             response = client(
@@ -367,7 +380,7 @@ def run_single_shot_extraction[OutputT: BaseModel](
 
 
 __all__ = [
-    "ClientFactory",
+    "_get_or_build_client",
     "_quote_to_flex_regex",
     "_resolve_spans",
     "_write_quarantine",

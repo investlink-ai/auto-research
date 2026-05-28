@@ -21,7 +21,6 @@ from pathlib import Path
 import anthropic
 
 from auto_research.extract import cache as content_cache
-from auto_research.extract.client import ExtractionFn, make_extraction_client
 from auto_research.extract.guardrails import DEFAULT_QUARANTINE_ROOT
 from auto_research.extract.prompts.transcript import (
     TRANSCRIPT_PROMPT,
@@ -36,20 +35,6 @@ _WORKER = "transcript"
 # §7.3 "Q&A evasiveness ⇒ Sonnet" rule for the unified call.
 _TASK = "q_and_a_evasiveness"
 _MAX_TOKENS = 8192
-
-_CLIENT: ExtractionFn | None = None
-
-
-def _get_client(anthropic_client: anthropic.Anthropic | None) -> ExtractionFn:
-    """Return the production singleton, or a fresh client for test injection."""
-    global _CLIENT
-    if anthropic_client is not None:
-        return make_extraction_client(
-            worker=_WORKER, anthropic_client=anthropic_client
-        )
-    if _CLIENT is None:
-        _CLIENT = make_extraction_client(worker=_WORKER)
-    return _CLIENT
 
 
 def extract_transcript(
@@ -81,7 +66,6 @@ def extract_transcript(
         if quarantine_root is not None
         else DEFAULT_QUARANTINE_ROOT,
         anthropic_client=anthropic_client,
-        client_factory=_get_client,
     )
 
 
