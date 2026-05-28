@@ -153,3 +153,5 @@ def test_ten_k_narrative_field_configs_includes_critical_accounting_estimate_cha
     assert config.retrieval_query.strip()
     assert "Item 7" in config.retrieval_query
     assert "Item 7" in config.description
+    assert "Item 8" in config.retrieval_query
+    assert "Item 8" in config.description

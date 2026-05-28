@@ -982,6 +982,10 @@ def test_ten_k_single_shot_populates_new_narrative_fields(
     assert "substantial doubt" in out.going_concern.citation.source_quote
     assert len(out.icfr_material_weaknesses) == 1
     assert len(out.critical_accounting_estimate_changes) == 1
+    assert (
+        "revised our estimated useful life"
+        in out.critical_accounting_estimate_changes[0].citation.source_quote
+    )
     assert client.messages.create.call_count == 1  # type: ignore[attr-defined]
 
 

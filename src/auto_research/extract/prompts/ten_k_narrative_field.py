@@ -237,7 +237,11 @@ TEN_K_NARRATIVE_FIELD_CONFIGS: tuple[TenKNarrativeFieldConfig, ...] = (
             "indicates a change versus the prior year (new estimate, "
             "methodology change, materially different assumptions). "
             "Empty list when no YoY change is flagged. Quote the "
-            "verbatim change-indicating sentence."
+            "verbatim change-indicating sentence. "
+            "Do NOT flag routine annual updates driven solely by market "
+            "input changes (e.g., updated discount rates, commodity "
+            "prices) unless management explicitly calls out a "
+            "methodological or structural change to the estimate itself."
         ),
         retrieval_query=(
             "Which critical accounting estimates does Item 7 MD&A or "
