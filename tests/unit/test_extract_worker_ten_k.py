@@ -131,8 +131,8 @@ def test_ten_k_single_shot_branch_short_doc_with_narrative_chunkset(
 def test_ten_k_rag_branch_fires_above_cutoff(tmp_path: Path) -> None:
     """count_tokens(raw_doc) >= SINGLE_SHOT_TOKEN_CUTOFF AND chunkset
     supplied → RAG branch. One LLM call per narrative field (5), each
-    against distinct user_content (per-field retrieve), producing 5
-    distinct cache keys and 5 LLM calls.
+    against distinct user_content (per-field retrieve), producing one
+    distinct cache key and one LLM call per narrative field config.
 
     Each per-field parent text contains a unique sentinel quote (the
     field's name appended to "FIELD-"). Each response cites that
@@ -417,7 +417,7 @@ def test_ten_k_rag_partial_failure_does_not_persist_earlier_fields(
 
 
 def test_ten_k_rag_identity_disagreement_quarantines(tmp_path: Path) -> None:
-    """If 5 per-field RAG calls disagree on cik / accession_number /
+    """If per-field RAG calls disagree on cik / accession_number /
     fiscal_period_end, the worker MUST quarantine rather than silently
     keep the first call's value."""
     long_raw = "word " * 200_000

@@ -83,10 +83,12 @@ Constraints (apply to every citation in this output):
   intentionally emitting per-occurrence multiple citations.
 - DO NOT include `source_span`; character offsets are computed in code.
 - DO NOT invent quotes. If the field has no support in the retrieved
-  passages, emit the empty list (or, for single-Claim fields, you
-  MUST still cite — silent omission is not an option; if the
-  passages truly carry no signal, cite the strongest available
-  hedging language).
+  passages, emit the empty list (for list fields) or null (for
+  fields whose type allows null, e.g. `going_concern: Claim | None`
+  when the audit opinion is unqualified). For non-nullable
+  single-Claim fields (e.g. `guidance_tone`) you MUST still cite —
+  silent omission is not an option; if the passages truly carry no
+  signal, cite the strongest available hedging language.
 
 Confidence on every Claim is EXACTLY one of "high", "medium", or "low"
 — float confidence is rejected.

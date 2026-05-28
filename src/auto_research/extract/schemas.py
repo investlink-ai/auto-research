@@ -246,9 +246,9 @@ class SFilingOutput(BaseModel):
 # --- Per-field 10-K narrative partials --------------------------------------
 #
 # The 10-K RAG path runs one Anthropic call per narrative field so each
-# call uses the model tier the routing table actually declares (3 of 5
-# narrative fields are Haiku-tier; the unified pre-split call routed
-# everything to Sonnet). Each partial carries the identity fields plus
+# call uses the model tier the routing table actually declares (most
+# fields are Haiku; the cross-doc supplier/customer mentions need
+# Sonnet). Each partial carries the identity fields plus
 # exactly ONE narrative field — the worker assembles them into a full
 # `TenKOutput` at the end of the loop, with a cross-partial identity
 # check to catch hallucinated cik / accession_number / fiscal_period_end
