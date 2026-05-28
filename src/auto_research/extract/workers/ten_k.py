@@ -8,11 +8,8 @@ Two paths, one entry point:
    `run_single_shot_extraction` driver.
 2. **Narrative RAG.** `count_tokens(raw_doc) ≥ SINGLE_SHOT_TOKEN_CUTOFF`
    AND a `ChunkSet` is supplied → one Anthropic call PER narrative
-   field, each scoped to the top reranked parents returned by the
-   injected `retrieve_fn`. The five fields (guidance_tone,
-   accrual_flags, supplier_mentions, customer_mentions,
-   risk_factor_deltas) each get a field-specific query string and a
-   distinct `doc_id` cache key.
+   field, iterating `TEN_K_NARRATIVE_FIELD_CONFIGS`. Each field gets a
+   field-specific query string and a distinct `doc_id` cache key.
 
 `retrieve_fn` is injected so this module stays orthogonal to the RAG
 stack — the backfill orchestrator owns wiring it to the real
@@ -92,20 +89,21 @@ def _extract_ten_k_rag(
     For each narrative field, retrieve the top parents via
     `retrieve_fn`, format them as user content, and run a
     field-scoped prompt against a partial schema that carries exactly
-    that field plus the identity columns. The worker assembles the
-    five partials into a full `TenKOutput` at the end.
+    that field plus the identity columns. The worker assembles all
+    per-field partials into a full `TenKOutput` at the end.
 
     Per-field calls stage their cache writes; the worker commits all
-    staged writes only AFTER the full 5-field loop succeeds AND the
+    staged writes only AFTER the full field loop succeeds AND the
     cross-partial identity check passes. A mid-loop quarantine returns
     `None` without persisting ANY of the earlier fields' results — so
     re-runs see a consistent cache state rather than half-cached
     partial output.
 
     Each per-field call uses the model tier the routing table actually
-    declares (3 of 5 are Haiku) — the unified pre-split call routed
-    everything to Sonnet via `_NARRATIVE_DEFAULT_TASK = supplier_mentions`,
-    paying for the wrong tier on guidance_tone / accrual_flags /
+    declares (most fields are Haiku; the cross-doc supplier/customer
+    fields run on Sonnet) — the unified pre-split call routed everything
+    to Sonnet via `_NARRATIVE_DEFAULT_TASK = supplier_mentions`, paying
+    for the wrong tier on guidance_tone / accrual_flags /
     risk_factor_deltas. The partial schemas eliminate the dual-output
     waste from emitting the full TenKOutput shape on every call and
     discarding all but one field downstream — the unified-call path

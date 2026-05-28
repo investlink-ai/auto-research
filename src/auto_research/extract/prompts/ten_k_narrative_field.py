@@ -1,17 +1,16 @@
 """Per-field 10-K narrative extraction prompt (Option A / PR-B).
 
 The RAG path runs one Anthropic call per narrative field so each call
-uses the model tier the routing table actually declares: three of the
-five fields are Haiku-tier (`guidance_tone`, `accrual_flags`,
-`risk_factor_deltas`); only `supplier_mentions` and `customer_mentions`
-genuinely need the Sonnet cross-doc tier. The unified pre-split call
+uses the model tier the routing table actually declares: most fields
+are Haiku-tier (only the cross-doc supplier/customer mentions need
+Sonnet). The unified pre-split call
 forced everything through `_NARRATIVE_DEFAULT_TASK = "supplier_mentions"`
-(Sonnet) — 3 of 5 fields paid the wrong tier.
+(Sonnet) — the Haiku-tier fields paid the wrong tier.
 
 Cache-prefix discipline: the parameterized blocks (`{field_name}`,
 `{field_description}`) sit at the END of the template so the long
 preamble (constraints, identity-field rules, citation discipline) is
-the cached prefix across all five fields. With the per-worker
+the cached prefix across all fields. With the per-worker
 ephemeral-cache marker on the system block, this keeps the
 ~80%-cached prefix economics intact across the field loop.
 """
@@ -53,8 +52,8 @@ class TenKNarrativeFieldConfig(NamedTuple):
 
 TEN_K_NARRATIVE_FIELD_PROMPT = """\
 You are extracting ONE narrative signal from an SEC 10-K annual report.
-The retrieved top passages (Item 1A Risk Factors, Item 7 MD&A, Item 7A
-Market Risk) will be supplied in the next user message.
+The retrieved top passages from the filing sections relevant to this
+field will be supplied in the next user message.
 
 This call extracts EXACTLY ONE narrative field — do not populate any
 other narrative fields. The output schema's `extra="forbid"` enforces
