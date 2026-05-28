@@ -82,10 +82,12 @@ _ROUTING: Final[dict[tuple[str, str], str]] = {
     ("ten_k", "guidance_tone"): _HAIKU,
     ("ten_k", "accrual_flags"): _HAIKU,
     ("ten_k", "risk_factor_deltas"): _HAIKU,
-    # Going-concern: narrative-only signal XBRL cannot give;
-    # templated language-pattern recognition per spec §7.3 ⇒ Haiku.
-    # (icfr_material_weaknesses and critical_accounting_estimate_changes route the same way once added.)
+    # Going-concern and ICFR material weaknesses: narrative-only signals
+    # XBRL cannot give; templated language-pattern recognition per spec
+    # §7.3 ⇒ Haiku.
+    # (critical_accounting_estimate_changes routes the same way once added.)
     ("ten_k", "going_concern"): _HAIKU,
+    ("ten_k", "icfr_material_weaknesses"): _HAIKU,
     # Transcripts (TranscriptOutput): Q&A nuance ⇒ Sonnet; prepared remarks ⇒ Haiku.
     ("transcript", "q_and_a_evasiveness"): _SONNET,
     ("transcript", "prepared_remarks_tone"): _HAIKU,

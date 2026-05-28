@@ -320,6 +320,16 @@ class TenKGoingConcernPartial(BaseModel):
     going_concern: Claim | None
 
 
+class TenKIcfrMaterialWeaknessesPartial(BaseModel):
+    model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
+
+    cik: str
+    accession_number: str
+    fiscal_period_end: date
+    icfr_material_weaknesses: list[Claim]
+
+
 # --- Transcript partials ----------------------------------------------------
 #
 # Binary split by routing tier (spec §7.3). Prepared remarks is
@@ -363,6 +373,7 @@ __all__ = [
     "TenKCustomerMentionsPartial",
     "TenKGoingConcernPartial",
     "TenKGuidanceTonePartial",
+    "TenKIcfrMaterialWeaknessesPartial",
     "TenKOutput",
     "TenKRiskFactorDeltasPartial",
     "TenKSupplierMentionsPartial",

@@ -529,3 +529,39 @@ def test_ten_k_output_going_concern_accepts_none() -> None:
         critical_accounting_estimate_changes=[],
     )
     assert out.going_concern is None
+
+
+# --- TenKIcfrMaterialWeaknessesPartial --------------------------------------
+
+
+def test_ten_k_icfr_material_weaknesses_partial_carries_identity_and_field() -> None:
+    """`TenKIcfrMaterialWeaknessesPartial` is the RAG-path schema for
+    Item 9A material-weakness disclosures."""
+    from auto_research.extract.schemas import (
+        TenKIcfrMaterialWeaknessesPartial,
+    )
+
+    p = TenKIcfrMaterialWeaknessesPartial(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        icfr_material_weaknesses=[_claim(), _claim(confidence="high")],
+    )
+    assert len(p.icfr_material_weaknesses) == 2
+    assert p.icfr_material_weaknesses[1].confidence == "high"
+
+
+def test_ten_k_icfr_material_weaknesses_partial_accepts_empty_list() -> None:
+    """`icfr_material_weaknesses` is `list[Claim]` — the modal case
+    in `universe_v1` is ICFR-effective (empty list)."""
+    from auto_research.extract.schemas import (
+        TenKIcfrMaterialWeaknessesPartial,
+    )
+
+    p = TenKIcfrMaterialWeaknessesPartial(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        icfr_material_weaknesses=[],
+    )
+    assert p.icfr_material_weaknesses == []

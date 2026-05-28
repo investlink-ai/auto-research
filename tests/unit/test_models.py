@@ -74,3 +74,12 @@ def test_route_model_routes_ten_k_going_concern_to_haiku() -> None:
     """Going-concern is binary auditor language — templated
     pattern-recognition tier per spec §7.3 ⇒ Haiku."""
     assert route_model("ten_k", "going_concern") == "claude-haiku-4-5"
+
+
+def test_route_model_routes_ten_k_icfr_material_weaknesses_to_haiku() -> None:
+    """ICFR material-weakness language is Item 9A pattern recognition
+    — Haiku per §7.3."""
+    assert (
+        route_model("ten_k", "icfr_material_weaknesses")
+        == "claude-haiku-4-5"
+    )

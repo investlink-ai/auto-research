@@ -25,6 +25,7 @@ from auto_research.extract.schemas import (
     TenKCustomerMentionsPartial,
     TenKGoingConcernPartial,
     TenKGuidanceTonePartial,
+    TenKIcfrMaterialWeaknessesPartial,
     TenKRiskFactorDeltasPartial,
     TenKSupplierMentionsPartial,
 )
@@ -206,6 +207,23 @@ TEN_K_NARRATIVE_FIELD_CONFIGS: tuple[TenKNarrativeFieldConfig, ...] = (
             "Does the auditor's report in Item 8 or the liquidity "
             "discussion in Item 7 express substantial doubt about the "
             "company's ability to continue as a going concern?"
+        ),
+    ),
+    TenKNarrativeFieldConfig(
+        field_name="icfr_material_weaknesses",
+        schema=TenKIcfrMaterialWeaknessesPartial,
+        description=(
+            "A list of Claims, one per distinct material weakness "
+            "disclosed in management's Item 9A internal-controls-over-"
+            "financial-reporting (ICFR) report. Empty list when "
+            "management concludes ICFR is effective with no material "
+            "weaknesses identified. Quote the verbatim weakness "
+            "description sentence (e.g., 'we did not maintain "
+            "effective controls over X')."
+        ),
+        retrieval_query=(
+            "Does management's Item 9A internal-controls-over-financial-"
+            "reporting report identify any material weaknesses in ICFR?"
         ),
     ),
 )

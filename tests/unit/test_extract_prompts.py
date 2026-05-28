@@ -127,3 +127,16 @@ def test_ten_k_narrative_field_configs_includes_going_concern() -> None:
     assert config.retrieval_query.strip(), "retrieval_query is empty"
     assert "Item 8" in config.retrieval_query or "going concern" in config.retrieval_query.lower()
     assert "Item 8" in config.description or "going concern" in config.description.lower()
+
+
+def test_ten_k_narrative_field_configs_includes_icfr_material_weaknesses() -> None:
+    from auto_research.extract.prompts.ten_k_narrative_field import (
+        TEN_K_NARRATIVE_FIELD_CONFIGS,
+    )
+
+    by_name = {c.field_name: c for c in TEN_K_NARRATIVE_FIELD_CONFIGS}
+    assert "icfr_material_weaknesses" in by_name
+    config = by_name["icfr_material_weaknesses"]
+    assert config.retrieval_query.strip()
+    assert "Item 9A" in config.retrieval_query
+    assert "Item 9A" in config.description
