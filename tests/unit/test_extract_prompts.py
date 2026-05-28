@@ -102,8 +102,28 @@ def test_ten_k_narrative_prompt_exports() -> None:
         "supplier_mentions",
         "customer_mentions",
         "risk_factor_deltas",
+        "going_concern",
+        "icfr_material_weaknesses",
+        "critical_accounting_estimate_changes",
     ):
         assert field in TEN_K_NARRATIVE_PROMPT, f"missing instruction for {field}"
     # language_novelty_score must be explicitly excluded from the
     # narrative prompt — it is computed downstream.
     assert "language_novelty_score" in TEN_K_NARRATIVE_PROMPT
+
+
+def test_ten_k_narrative_field_configs_includes_going_concern() -> None:
+    """The RAG per-field loop iterates TEN_K_NARRATIVE_FIELD_CONFIGS.
+    A new field MUST appear there with a non-empty retrieval_query that
+    names its source section (so retrieval drift is mechanically
+    catchable) and a description that names the source section too."""
+    from auto_research.extract.prompts.ten_k_narrative_field import (
+        TEN_K_NARRATIVE_FIELD_CONFIGS,
+    )
+
+    by_name = {c.field_name: c for c in TEN_K_NARRATIVE_FIELD_CONFIGS}
+    assert "going_concern" in by_name
+    config = by_name["going_concern"]
+    assert config.retrieval_query.strip(), "retrieval_query is empty"
+    assert "Item 8" in config.retrieval_query or "going concern" in config.retrieval_query.lower()
+    assert "Item 8" in config.description or "going concern" in config.description.lower()

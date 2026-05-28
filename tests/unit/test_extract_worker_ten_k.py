@@ -59,6 +59,9 @@ def _valid_narrative() -> dict[str, Any]:
         "customer_mentions": [],
         "language_novelty_score": 0.0,
         "risk_factor_deltas": [],
+        "going_concern": None,
+        "icfr_material_weaknesses": [],
+        "critical_accounting_estimate_changes": [],
     }
 
 
@@ -151,6 +154,7 @@ def test_ten_k_rag_branch_fires_above_cutoff(tmp_path: Path) -> None:
         "supplier_mentions": "supplier",
         "customer_mentions": "customer",
         "risk_factor_deltas": "risk",
+        "going_concern": "going concern",
     }
     # Each parent's text contains a unique sentinel "FIELD-<field>" that
     # serves as the response's source_quote. Distinct text → distinct
@@ -240,11 +244,19 @@ def test_ten_k_rag_branch_fires_above_cutoff(tmp_path: Path) -> None:
                     }
                 ],
             }
+        if field == "going_concern":
+            return {
+                **base,
+                "going_concern": {
+                    "citation": {"source_quote": sentinel},
+                    "confidence": "high",
+                },
+            }
         raise ValueError(f"unknown field {field!r}")
 
-    # The worker iterates `_NARRATIVE_RAG_QUERIES` in dict order, which
-    # is insertion order: guidance_tone, accrual_flags, supplier_mentions,
-    # customer_mentions, risk_factor_deltas.
+    # The worker iterates `TEN_K_NARRATIVE_FIELD_CONFIGS` in order:
+    # guidance_tone, accrual_flags, supplier_mentions,
+    # customer_mentions, risk_factor_deltas, going_concern.
     responses_in_order = [
         _response_for(f)
         for f in (
@@ -253,6 +265,7 @@ def test_ten_k_rag_branch_fires_above_cutoff(tmp_path: Path) -> None:
             "supplier_mentions",
             "customer_mentions",
             "risk_factor_deltas",
+            "going_concern",
         )
     ]
     client = _fake_client_sequence(responses_in_order)
@@ -265,8 +278,8 @@ def test_ten_k_rag_branch_fires_above_cutoff(tmp_path: Path) -> None:
         retrieve_fn=fake_retrieve,
     )
     assert out is not None
-    assert len(queries_seen) == 5  # one query per narrative field
-    assert client.messages.create.call_count == 5  # type: ignore[attr-defined]
+    assert len(queries_seen) == 6  # one query per narrative field
+    assert client.messages.create.call_count == 6  # type: ignore[attr-defined]
 
 
 def test_ten_k_rag_branch_requires_retrieve_fn(tmp_path: Path) -> None:
@@ -286,14 +299,14 @@ def test_ten_k_rag_branch_requires_retrieve_fn(tmp_path: Path) -> None:
 
 
 def _rag_partials_in_order(cik: str = "0000000001") -> list[dict[str, Any]]:
-    """Five partial-schema dicts (one per narrative field) whose
+    """Six partial-schema dicts (one per narrative field) whose
     citation quote ('cautious growth in fiscal 2026') is present in
     `_chunkset_narrative_only`'s parent text — so each per-field
     response validates cleanly against its respective Pydantic partial.
 
     Order matches `TEN_K_NARRATIVE_FIELD_CONFIGS`: guidance_tone,
     accrual_flags, supplier_mentions, customer_mentions,
-    risk_factor_deltas.
+    risk_factor_deltas, going_concern.
     """
     base = {
         "cik": cik,
@@ -313,6 +326,13 @@ def _rag_partials_in_order(cik: str = "0000000001") -> list[dict[str, Any]]:
         {**base, "supplier_mentions": []},
         {**base, "customer_mentions": []},
         {**base, "risk_factor_deltas": []},
+        {
+            **base,
+            "going_concern": {
+                "citation": {"source_quote": quote},
+                "confidence": "high",
+            },
+        },
     ]
 
 
@@ -377,9 +397,9 @@ def test_ten_k_rag_identity_disagreement_quarantines(tmp_path: Path) -> None:
     base = _rag_partials_in_order(cik="0000000001")
     diverged = _rag_partials_in_order(cik="0000999999")
     # Swap the second call (accrual_flags) for a partial with a
-    # diverged cik. The remaining 4 keep the agreed cik.
+    # diverged cik. The remaining 5 keep the agreed cik.
     client = _fake_client_sequence(
-        [base[0], diverged[1], base[2], base[3], base[4]]
+        [base[0], diverged[1], base[2], base[3], base[4], base[5]]
     )
     out = extract_ten_k(
         raw_doc=long_raw,
@@ -396,14 +416,146 @@ def test_ten_k_rag_identity_disagreement_quarantines(tmp_path: Path) -> None:
     record = json.loads(qrec.read_text())
     assert "disagree" in record["error"]
     assert "cik" in record["error"]
-    # All 5 per-field calls were attempted before the identity check
+    # All 6 per-field calls were attempted before the identity check
     # fired. Without this, a regression that short-circuited on the
     # first non-matching cik would still see `out is None` + empty
     # cache and pass.
-    assert client.messages.create.call_count == 5  # type: ignore[attr-defined]
+    assert client.messages.create.call_count == 6  # type: ignore[attr-defined]
     # Identity check fires BEFORE commit, so staged writes are dropped
-    # and the cache stays empty even though all 5 calls validated.
+    # and the cache stays empty even though all 6 calls validated.
     assert list((tmp_path / "cache").rglob("*.json")) == []
+
+
+def test_ten_k_rag_populates_going_concern_when_planted(
+    tmp_path: Path,
+) -> None:
+    """When the retrieved Item 8 audit passage contains a substantial-
+    doubt sentence, the going_concern field on the merged TenKOutput
+    is a Claim quoting that sentence."""
+    long_raw = "word " * 200_000
+    meta = ChunkMetadata(
+        ticker="ACME",
+        filing_date=date(2026, 1, 30),
+        fiscal_period="FY2025",
+        doc_type="10-K",
+        doc_id="10k-going-001",
+    )
+    going_concern_text = (
+        "the conditions raise substantial doubt about the Company's "
+        "ability to continue as a going concern."
+    )
+    parent_text = f"Item 8 audit report. {going_concern_text}"
+    parent = ParentChunk(
+        text=parent_text,
+        section_name="item_8",
+        char_span=(0, len(parent_text)),
+        token_count=10,
+        table_html=None,
+        metadata=meta,
+    )
+    chunkset = ChunkSet(parents=(parent,), children=())
+
+    base = {
+        "cik": "0000000001",
+        "accession_number": "0000000001-26-000001",
+        "fiscal_period_end": "2025-12-31",
+    }
+    responses = [
+        {
+            **base,
+            "guidance_tone": {
+                "citation": {"source_quote": "audit report"},
+                "confidence": "medium",
+            },
+        },
+        {**base, "accrual_flags": []},
+        {**base, "supplier_mentions": []},
+        {**base, "customer_mentions": []},
+        {**base, "risk_factor_deltas": []},
+        {
+            **base,
+            "going_concern": {
+                "citation": {"source_quote": going_concern_text},
+                "confidence": "high",
+            },
+        },
+    ]
+    client = _fake_client_sequence(responses)
+    out = extract_ten_k(
+        raw_doc=long_raw,
+        doc_id="10k-going-001",
+        cache_root=tmp_path / "cache",
+        quarantine_root=tmp_path / "q",
+        anthropic_client=client,
+        chunkset=chunkset,
+        retrieve_fn=lambda _q: [parent],
+    )
+    assert out is not None
+    assert out.going_concern is not None
+    assert "substantial doubt" in out.going_concern.citation.source_quote
+    assert out.going_concern.confidence == "high"
+    assert client.messages.create.call_count == 6  # type: ignore[attr-defined]
+
+
+def test_ten_k_rag_going_concern_absent_returns_none(
+    tmp_path: Path,
+) -> None:
+    """Unqualified audit opinion → partial returns going_concern=None
+    → merged TenKOutput carries None."""
+    long_raw = "word " * 200_000
+    meta = ChunkMetadata(
+        ticker="ACME",
+        filing_date=date(2026, 1, 30),
+        fiscal_period="FY2025",
+        doc_type="10-K",
+        doc_id="10k-going-002",
+    )
+    parent_text = (
+        "Item 8 audit report. In our opinion, the financial statements "
+        "present fairly, in all material respects, the financial "
+        "position of the Company."
+    )
+    parent = ParentChunk(
+        text=parent_text,
+        section_name="item_8",
+        char_span=(0, len(parent_text)),
+        token_count=10,
+        table_html=None,
+        metadata=meta,
+    )
+    chunkset = ChunkSet(parents=(parent,), children=())
+
+    base = {
+        "cik": "0000000001",
+        "accession_number": "0000000001-26-000001",
+        "fiscal_period_end": "2025-12-31",
+    }
+    responses = [
+        {
+            **base,
+            "guidance_tone": {
+                "citation": {"source_quote": "Company"},
+                "confidence": "low",
+            },
+        },
+        {**base, "accrual_flags": []},
+        {**base, "supplier_mentions": []},
+        {**base, "customer_mentions": []},
+        {**base, "risk_factor_deltas": []},
+        {**base, "going_concern": None},
+    ]
+    client = _fake_client_sequence(responses)
+    out = extract_ten_k(
+        raw_doc=long_raw,
+        doc_id="10k-going-002",
+        cache_root=tmp_path / "cache",
+        quarantine_root=tmp_path / "q",
+        anthropic_client=client,
+        chunkset=chunkset,
+        retrieve_fn=lambda _q: [parent],
+    )
+    assert out is not None
+    assert out.going_concern is None
 
 
 def test_ten_k_long_doc_without_chunkset_raises(tmp_path: Path) -> None:

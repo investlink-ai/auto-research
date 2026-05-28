@@ -68,3 +68,9 @@ def test_route_model_raises_on_unknown_worker() -> None:
     with pytest.raises(ValueError) as exc_info:
         route_model("not_a_worker", "default")
     assert "not_a_worker" in str(exc_info.value)
+
+
+def test_route_model_routes_ten_k_going_concern_to_haiku() -> None:
+    """Going-concern is binary auditor language — templated
+    pattern-recognition tier per spec §7.3 ⇒ Haiku."""
+    assert route_model("ten_k", "going_concern") == "claude-haiku-4-5"

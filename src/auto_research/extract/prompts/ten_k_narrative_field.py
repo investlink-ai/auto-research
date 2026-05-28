@@ -23,6 +23,7 @@ from typing import NamedTuple
 from auto_research.extract.schemas import (
     TenKAccrualFlagsPartial,
     TenKCustomerMentionsPartial,
+    TenKGoingConcernPartial,
     TenKGuidanceTonePartial,
     TenKRiskFactorDeltasPartial,
     TenKSupplierMentionsPartial,
@@ -189,6 +190,22 @@ TEN_K_NARRATIVE_FIELD_CONFIGS: tuple[TenKNarrativeFieldConfig, ...] = (
         retrieval_query=(
             "What new, removed, or modified Item 1A risk factors does this "
             "filing disclose?"
+        ),
+    ),
+    TenKNarrativeFieldConfig(
+        field_name="going_concern",
+        schema=TenKGoingConcernPartial,
+        description=(
+            "A single Claim quoting verbatim the auditor's "
+            "'substantial doubt' sentence from the Item 8 audit report "
+            "or the Item 7 liquidity discussion, or null when the audit "
+            "report carries an unqualified opinion. Do NOT paraphrase — "
+            "quote the actual disclaimer sentence."
+        ),
+        retrieval_query=(
+            "Does the auditor's report in Item 8 or the liquidity "
+            "discussion in Item 7 express substantial doubt about the "
+            "company's ability to continue as a going concern?"
         ),
     ),
 )

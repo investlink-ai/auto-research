@@ -57,6 +57,24 @@ Fields to populate:
   - citation: {source_quote: "..."} anchoring the text in THIS filing.
   When the prior year is not available in the supplied text, treat all
   Item 1A risk factors as "added".
+- going_concern: a single Claim quoting verbatim the auditor's
+  "substantial doubt" sentence from the Item 8 audit report or the
+  Item 7 liquidity discussion, or null when the audit report carries
+  an unqualified opinion. Do NOT paraphrase — quote the actual
+  disclaimer sentence. Confidence categorical
+  ("high", "medium", "low").
+- icfr_material_weaknesses: a list of Claims, one per distinct
+  material weakness disclosed in management's Item 9A internal-
+  controls-over-financial-reporting (ICFR) report. Empty list when
+  management concludes ICFR is effective with no material
+  weaknesses. Quote the verbatim weakness description.
+- critical_accounting_estimate_changes: a list of Claims for
+  accounting estimates that management flags in Item 7 MD&A "Critical
+  Accounting Estimates" or the Item 8 Significant Accounting Policies
+  note as requiring significant judgment AND where management
+  indicates a change versus the prior year (new estimate, methodology
+  change, materially different assumptions). Empty list when no YoY
+  change is flagged.
 
 A Claim is `{"citation": {"source_quote": "..."}, "confidence":
 "high"|"medium"|"low"}` — float confidence is rejected. A
@@ -94,7 +112,10 @@ omitted — see Constraints):
       }
     ],
     "customer_mentions": [],
-    "risk_factor_deltas": []
+    "risk_factor_deltas": [],
+    "going_concern": null,
+    "icfr_material_weaknesses": [],
+    "critical_accounting_estimate_changes": []
   }
 
 Constraints (apply to every field unless noted):

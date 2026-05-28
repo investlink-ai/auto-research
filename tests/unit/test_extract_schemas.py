@@ -134,6 +134,9 @@ def _ten_k_output() -> TenKOutput:
         customer_mentions=[],
         language_novelty_score=0.0,
         risk_factor_deltas=[],
+        going_concern=None,
+        icfr_material_weaknesses=[],
+        critical_accounting_estimate_changes=[],
     )
 
 
@@ -186,6 +189,9 @@ def test_ten_k_output_rejects_extra_fields() -> None:
             customer_mentions=[],
             language_novelty_score=0.0,
             risk_factor_deltas=[],
+            going_concern=None,
+            icfr_material_weaknesses=[],
+            critical_accounting_estimate_changes=[],
             unknown_field=1,  # type: ignore[call-arg]
         )
 
@@ -440,5 +446,86 @@ def test_ten_k_output_language_novelty_score_defaults_to_zero() -> None:
         supplier_mentions=[],
         customer_mentions=[],
         risk_factor_deltas=[],
+        going_concern=None,
+        icfr_material_weaknesses=[],
+        critical_accounting_estimate_changes=[],
     )
     assert out.language_novelty_score == 0.0
+
+
+# --- TenKGoingConcernPartial -------------------------------------------------
+
+
+def test_ten_k_going_concern_partial_carries_identity_and_field() -> None:
+    """`TenKGoingConcernPartial` is the RAG-path schema for the new
+    going_concern field — same identity-fields + single-narrative-field
+    shape as the other TenK*Partial models."""
+    from auto_research.extract.schemas import TenKGoingConcernPartial
+
+    p = TenKGoingConcernPartial(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        going_concern=_claim(),
+    )
+    assert p.going_concern is not None
+    assert p.going_concern.confidence == "medium"
+
+
+def test_ten_k_going_concern_partial_accepts_none() -> None:
+    """`going_concern` is `Claim | None` — the modal case in
+    `universe_v1` is the auditor's unqualified opinion, where the
+    field MUST be None rather than a fabricated Claim."""
+    from auto_research.extract.schemas import TenKGoingConcernPartial
+
+    p = TenKGoingConcernPartial(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        going_concern=None,
+    )
+    assert p.going_concern is None
+
+
+# --- TenKOutput new fields ---------------------------------------------------
+
+
+def test_ten_k_output_carries_going_concern_field() -> None:
+    """`TenKOutput.going_concern: Claim | None` — required field
+    (no default) consistent with the existing narrative fields
+    (guidance_tone, accrual_flags, ...). Both narrative paths
+    (single-shot via TEN_K_NARRATIVE_PROMPT, RAG via
+    the per-field config loop) populate these. Spec:
+    docs/superpowers/specs/2026-05-29-tenk-narrative-financial-disclosures-design.md."""
+    out = TenKOutput(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        guidance_tone=_claim(),
+        accrual_flags=[],
+        supplier_mentions=[],
+        customer_mentions=[],
+        risk_factor_deltas=[],
+        going_concern=_claim(),
+        icfr_material_weaknesses=[],
+        critical_accounting_estimate_changes=[],
+    )
+    assert out.going_concern is not None
+    assert out.going_concern.confidence == "medium"
+
+
+def test_ten_k_output_going_concern_accepts_none() -> None:
+    out = TenKOutput(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        guidance_tone=_claim(),
+        accrual_flags=[],
+        supplier_mentions=[],
+        customer_mentions=[],
+        risk_factor_deltas=[],
+        going_concern=None,
+        icfr_material_weaknesses=[],
+        critical_accounting_estimate_changes=[],
+    )
+    assert out.going_concern is None

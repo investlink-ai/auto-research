@@ -195,6 +195,13 @@ class TenKOutput(BaseModel):
     # validation when the model obeys.
     language_novelty_score: float = 0.0
     risk_factor_deltas: list[RiskFactorDelta]
+    # Narrative-only signals XBRL definitionally cannot give. Both
+    # narrative paths (single-shot via TEN_K_NARRATIVE_PROMPT, RAG via
+    # the per-field config loop) populate these. Spec:
+    # docs/superpowers/specs/2026-05-29-tenk-narrative-financial-disclosures-design.md.
+    going_concern: Claim | None
+    icfr_material_weaknesses: list[Claim]
+    critical_accounting_estimate_changes: list[Claim]
 
 
 class TranscriptOutput(BaseModel):
@@ -303,6 +310,16 @@ class TenKRiskFactorDeltasPartial(BaseModel):
     risk_factor_deltas: list[RiskFactorDelta]
 
 
+class TenKGoingConcernPartial(BaseModel):
+    model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
+
+    cik: str
+    accession_number: str
+    fiscal_period_end: date
+    going_concern: Claim | None
+
+
 # --- Transcript partials ----------------------------------------------------
 #
 # Binary split by routing tier (spec §7.3). Prepared remarks is
@@ -344,6 +361,7 @@ __all__ = [
     "SupplierMention",
     "TenKAccrualFlagsPartial",
     "TenKCustomerMentionsPartial",
+    "TenKGoingConcernPartial",
     "TenKGuidanceTonePartial",
     "TenKOutput",
     "TenKRiskFactorDeltasPartial",

@@ -39,5 +39,8 @@
     }
   ],
   "language_novelty_score": 0.0,
-  "risk_factor_deltas": []
+  "risk_factor_deltas": [],
+  "going_concern": null,
+  "icfr_material_weaknesses": [],
+  "critical_accounting_estimate_changes": []
 }
