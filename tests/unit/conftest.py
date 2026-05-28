@@ -27,6 +27,47 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from anthropic.types import Message, ToolUseBlock, Usage
+
+
+def make_tool_use_message(
+    *,
+    tool_input: dict,
+    tool_name: str = "record_extraction",
+    model: str = "claude-haiku-4-5-20251001",
+    input_tokens: int = 100,
+    output_tokens: int = 50,
+    cache_creation_input_tokens: int | None = None,
+    cache_read_input_tokens: int | None = None,
+) -> Message:
+    """Build a Message whose content is a single ToolUseBlock.
+
+    Mirrors the on-wire shape every extraction response carries: one
+    tool_use block whose `.input` is the parsed dict — no text +
+    json.loads round-trip.
+    """
+    return Message(
+        id="msg_test",
+        type="message",
+        role="assistant",
+        model=model,
+        content=[
+            ToolUseBlock(
+                type="tool_use",
+                id="toolu_test",
+                name=tool_name,
+                input=tool_input,
+            )
+        ],
+        stop_reason="tool_use",
+        stop_sequence=None,
+        usage=Usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation_input_tokens=cache_creation_input_tokens,
+            cache_read_input_tokens=cache_read_input_tokens,
+        ),
+    )
 
 
 @pytest.fixture(scope="session", autouse=True)
