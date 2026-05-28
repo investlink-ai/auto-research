@@ -40,8 +40,8 @@ def _citation(start: int = 0, end: int = 4, quote: str = "hello") -> Citation:
     return Citation(source_span=(start, end), source_quote=quote)
 
 
-def _claim(confidence: float = 0.5) -> Claim:
-    return Claim(citation=_citation(), confidence=confidence)
+def _claim(confidence: str = "medium") -> Claim:
+    return Claim(citation=_citation(), confidence=confidence)  # type: ignore[arg-type]
 
 
 # --- Citation ---------------------------------------------------------------
@@ -94,26 +94,29 @@ def test_citation_rejects_extra_fields() -> None:
 # --- Claim ------------------------------------------------------------------
 
 
-def test_claim_accepts_confidence_in_range() -> None:
-    Claim(citation=_citation(), confidence=0.0)
-    Claim(citation=_citation(), confidence=1.0)
-    Claim(citation=_citation(), confidence=0.5)
+def test_claim_accepts_categorical_confidence() -> None:
+    for level in ("high", "medium", "low"):
+        c = Claim(citation=_citation(), confidence=level)
+        assert c.confidence == level
 
 
-def test_claim_rejects_confidence_below_zero() -> None:
+def test_claim_rejects_float_confidence() -> None:
+    """Float `confidence` must reject — categorical-confidence policy
+    (user feedback memory: `LLM confidence is categorical`). Float
+    confidence is uncalibrated noise."""
     with pytest.raises(ValidationError):
-        Claim(citation=_citation(), confidence=-0.01)
+        Claim(citation=_citation(), confidence=0.7)  # type: ignore[arg-type]
 
 
-def test_claim_rejects_confidence_above_one() -> None:
+def test_claim_rejects_unknown_categorical_label() -> None:
     with pytest.raises(ValidationError):
-        Claim(citation=_citation(), confidence=1.01)
+        Claim(citation=_citation(), confidence="maybe")  # type: ignore[arg-type]
 
 
 def test_claim_is_frozen() -> None:
     c = _claim()
     with pytest.raises(ValidationError):
-        c.confidence = 0.9
+        c.confidence = "high"
 
 
 # --- Output models — frozen + extra=forbid ----------------------------------

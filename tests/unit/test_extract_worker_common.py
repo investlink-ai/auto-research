@@ -11,30 +11,16 @@ from unittest.mock import MagicMock
 
 import anthropic
 import pytest
-from anthropic.types import Message, TextBlock, Usage
 
 from auto_research.extract.enums import EventClassification
 from auto_research.extract.schemas import EightKOutput
 from auto_research.extract.workers._common import (
     _quote_to_flex_regex,
     _resolve_spans,
-    _strip_fence,
     _write_quarantine,
     run_single_shot_extraction,
 )
-
-
-def test_strip_fence_removes_json_fence_with_newlines() -> None:
-    assert _strip_fence('```json\n{"a": 1}\n```') == '{"a": 1}'
-
-
-def test_strip_fence_removes_json_fence_no_newlines() -> None:
-    assert _strip_fence('```{"a": 1}```') == '{"a": 1}'
-
-
-def test_strip_fence_passthrough_when_no_fence() -> None:
-    body = '{"a": 1}'
-    assert _strip_fence(body) == body
+from tests.unit.conftest import make_fake_anthropic_client as _fake_client
 
 
 def test_quote_to_flex_regex_collapses_whitespace() -> None:
@@ -161,34 +147,6 @@ def test_write_quarantine_writes_record(tmp_path: Path) -> None:
     assert record["output"] == {"raw": "thing"}
 
 
-def _make_response(text: str) -> Message:
-    return Message(
-        id="msg_test",
-        content=[TextBlock(type="text", text=text, citations=None)],
-        model="claude-haiku-4-5",
-        role="assistant",
-        stop_reason="end_turn",
-        stop_sequence=None,
-        type="message",
-        usage=Usage(
-            input_tokens=10,
-            output_tokens=10,
-            cache_creation=None,
-            cache_creation_input_tokens=None,
-            cache_read_input_tokens=None,
-            inference_geo=None,
-            server_tool_use=None,
-            service_tier="standard",
-        ),
-    )
-
-
-def _fake_client(text: str) -> anthropic.Anthropic:
-    fake = MagicMock()
-    fake.messages.create.return_value = _make_response(text)
-    return cast(anthropic.Anthropic, fake)
-
-
 def test_run_single_shot_extraction_happy_path(tmp_path: Path) -> None:
     raw = "Material agreement signed with the Department of Defense."
     payload = {
@@ -198,7 +156,7 @@ def test_run_single_shot_extraction_happy_path(tmp_path: Path) -> None:
         "milestone_mentions": [],
         "dilution_language_flags": [],
     }
-    client = _fake_client(json.dumps(payload))
+    client = _fake_client(payload)
     out = run_single_shot_extraction(
         raw_doc=raw,
         doc_id="doc-1",
@@ -216,8 +174,14 @@ def test_run_single_shot_extraction_happy_path(tmp_path: Path) -> None:
     assert out.event_classification == EventClassification.CONTRACT
 
 
-def test_run_single_shot_extraction_quarantines_bad_json(tmp_path: Path) -> None:
-    client = _fake_client("not json")
+def test_run_single_shot_extraction_quarantines_when_no_record_extraction_block(
+    tmp_path: Path,
+) -> None:
+    """Forced tool_choice should guarantee the model emits a
+    `record_extraction` tool_use block; if the response carries only
+    blocks of a different tool name, quarantine with a clear cause
+    rather than crashing."""
+    client = _fake_client({"foo": "bar"}, tool_name="some_other_tool")
     out = run_single_shot_extraction(
         raw_doc="x",
         doc_id="doc-bad",
@@ -232,7 +196,10 @@ def test_run_single_shot_extraction_quarantines_bad_json(tmp_path: Path) -> None
         anthropic_client=client,
     )
     assert out is None
-    assert (tmp_path / "quar" / "eight_k" / "doc-bad.json").exists()
+    quar_path = tmp_path / "quar" / "eight_k" / "doc-bad.json"
+    assert quar_path.exists()
+    record = json.loads(quar_path.read_text())
+    assert "record_extraction" in record["error"]
 
 
 def test_run_single_shot_extraction_cache_hit_skips_llm(tmp_path: Path) -> None:
@@ -244,7 +211,7 @@ def test_run_single_shot_extraction_cache_hit_skips_llm(tmp_path: Path) -> None:
         "milestone_mentions": [],
         "dilution_language_flags": [],
     }
-    client = _fake_client(json.dumps(payload))
+    client = _fake_client(payload)
     first = run_single_shot_extraction(
         raw_doc=raw,
         doc_id="doc-cache",

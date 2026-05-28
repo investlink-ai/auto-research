@@ -16,11 +16,12 @@ shape the contract: a hallucinated field name fails validation at
 parse time, never reaching the citation-grounding step.
 
 Field validators on `Citation` and `Claim` reject obviously bad data
-(negative spans, empty quotes, start ≥ end, confidence outside [0, 1])
-at construction so the post-validator has fewer corner cases to handle.
-A non-empty quote + start < end means every valid `Citation` has at
-least one character that must align with `source_text` — there's no
-degenerate "empty citation always passes" mode.
+(negative spans, empty quotes, start ≥ end, confidence outside the
+categorical `high`/`medium`/`low` set) at construction so the
+post-validator has fewer corner cases to handle. A non-empty quote +
+start < end means every valid `Citation` has at least one character
+that must align with `source_text` — there's no degenerate "empty
+citation always passes" mode.
 
 Adding a field to any output model is non-breaking; removing or renaming
 a field requires a `prompt_version` bump (INV-6) and a Feast schema
@@ -54,6 +55,15 @@ from auto_research.extract.enums import (
 _FROZEN_STRICT = ConfigDict(frozen=True, extra="forbid")
 
 
+# Categorical confidence label used on every LLM-emitted confidence
+# field. Float confidence is uncalibrated noise; the categorical form
+# lets a downstream consumer threshold cleanly. Reuse this alias on
+# any new claim-bearing schema so the three values stay aligned across
+# the codebase — a `Literal['high','med','low']` typo in a new schema
+# would diverge silently if the alias weren't shared.
+ConfidenceLevel = Literal["high", "medium", "low"]
+
+
 # --- Base types -------------------------------------------------------------
 
 
@@ -84,12 +94,20 @@ class Citation(BaseModel):
 class Claim(BaseModel):
     """A confidence-weighted citation. The composition unit for "subjective"
     extracted fields (guidance tone, evasiveness, milestone-event mentions).
+
+    `confidence` is a categorical label (`high` / `medium` / `low`).
+    Float confidence on LLM-emitted claims is uncalibrated noise; the
+    project's standing rule is that LLM confidence is categorical so a
+    downstream consumer can threshold cleanly without pretending a
+    `0.73` from one prompt is comparable to a `0.73` from another.
+    `FinancialLineItem.confidence` uses the same shape — keep them
+    aligned when adding new claim-bearing schemas.
     """
 
     model_config = _FROZEN_STRICT
 
     citation: Citation
-    confidence: Annotated[float, Field(ge=0.0, le=1.0)]
+    confidence: ConfidenceLevel
 
 
 # --- Subordinate citation-bearing types -------------------------------------
@@ -172,7 +190,7 @@ class FinancialLineItem(BaseModel):
 
     value_usd: float
     citation: Citation
-    confidence: Literal["high", "medium", "low"]
+    confidence: ConfidenceLevel
 
 
 class TenKFinancials(BaseModel):
@@ -278,6 +296,7 @@ class SFilingOutput(BaseModel):
 __all__ = [
     "Citation",
     "Claim",
+    "ConfidenceLevel",
     "CustomerMention",
     "EightKOutput",
     "FinancialLineItem",

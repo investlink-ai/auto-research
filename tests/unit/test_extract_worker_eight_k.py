@@ -10,48 +10,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
-from unittest.mock import MagicMock
-
-import anthropic
-from anthropic.types import Message, TextBlock, Usage
+from typing import Any
 
 from auto_research.extract.enums import EventClassification
 from auto_research.extract.workers.eight_k import extract_eight_k
+from tests.unit.conftest import make_fake_anthropic_client as _fake_client
 
 _SAMPLE_8K = (
     "On January 15, 2026, the company entered into a Material Definitive "
     "Agreement with the Department of Defense for delivery of optical "
     "interconnect systems valued at $42 million."
 )
-
-
-def _make_response(text: str) -> Message:
-    return Message(
-        id="msg_test",
-        content=[TextBlock(type="text", text=text, citations=None)],
-        model="claude-haiku-4-5",
-        role="assistant",
-        stop_reason="end_turn",
-        stop_sequence=None,
-        type="message",
-        usage=Usage(
-            input_tokens=10,
-            output_tokens=10,
-            cache_creation=None,
-            cache_creation_input_tokens=None,
-            cache_read_input_tokens=None,
-            inference_geo=None,
-            server_tool_use=None,
-            service_tier="standard",
-        ),
-    )
-
-
-def _fake_client(text: str) -> anthropic.Anthropic:
-    fake = MagicMock()
-    fake.messages.create.return_value = _make_response(text)
-    return cast(anthropic.Anthropic, fake)
 
 
 def _valid_output() -> dict[str, Any]:
@@ -63,14 +32,14 @@ def _valid_output() -> dict[str, Any]:
         "dilution_language_flags": [
             {
                 "citation": {"source_quote": "Material Definitive Agreement"},
-                "confidence": 0.85,
+                "confidence": "high",
             }
         ],
     }
 
 
 def test_extract_eight_k_returns_validated_output(tmp_path: Path) -> None:
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     out = extract_eight_k(
         raw_doc=_SAMPLE_8K,
         doc_id="8k-001",
@@ -83,7 +52,7 @@ def test_extract_eight_k_returns_validated_output(tmp_path: Path) -> None:
 
 
 def test_extract_eight_k_resolves_span_into_raw_doc(tmp_path: Path) -> None:
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     out = extract_eight_k(
         raw_doc=_SAMPLE_8K,
         doc_id="8k-002",
@@ -97,7 +66,7 @@ def test_extract_eight_k_resolves_span_into_raw_doc(tmp_path: Path) -> None:
 
 
 def test_extract_eight_k_cache_hit_skips_llm(tmp_path: Path) -> None:
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     first = extract_eight_k(
         raw_doc=_SAMPLE_8K,
         doc_id="8k-cache",
@@ -119,10 +88,10 @@ def test_extract_eight_k_quarantines_hallucinated_quote(tmp_path: Path) -> None:
     bad["milestone_mentions"] = [
         {
             "citation": {"source_quote": "not in the filing at all"},
-            "confidence": 0.9,
+            "confidence": "high",
         }
     ]
-    client = _fake_client(json.dumps(bad))
+    client = _fake_client(bad)
     out = extract_eight_k(
         raw_doc=_SAMPLE_8K,
         doc_id="8k-bad",
@@ -139,7 +108,7 @@ def test_extract_eight_k_rejects_invalid_event_classification(tmp_path: Path) ->
     silently round-trip."""
     bad = _valid_output()
     bad["event_classification"] = "not-a-real-classification"
-    client = _fake_client(json.dumps(bad))
+    client = _fake_client(bad)
     out = extract_eight_k(
         raw_doc=_SAMPLE_8K,
         doc_id="8k-enum",
@@ -164,7 +133,7 @@ def test_eight_k_real_fixture_passes_citation_grounding(tmp_path: Path) -> None:
 
     fixture_dir = Path(__file__).parent / "fixtures" / "eight_k"
     raw = (fixture_dir / "sample_8k.txt").read_text()
-    frozen = (fixture_dir / "sample_8k_output.json").read_text()
+    frozen = json.loads((fixture_dir / "sample_8k_output.json").read_text())
     client = _fake_client(frozen)
     out = extract_eight_k(
         raw_doc=raw,

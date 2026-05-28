@@ -9,14 +9,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
-from unittest.mock import MagicMock
-
-import anthropic
-import pytest
-from anthropic.types import Message, TextBlock, Usage
+from typing import Any
 
 from auto_research.extract.workers.transcript import extract_transcript
+from tests.unit.conftest import make_fake_anthropic_client as _fake_client
 
 _SAMPLE_TRANSCRIPT = (
     "Operator: Welcome to ACME's fiscal 2026 first-quarter earnings call.\n"
@@ -24,34 +20,6 @@ _SAMPLE_TRANSCRIPT = (
     "Q&A Analyst: What about FY26 gross margins?\n"
     "CFO: we can't comment on that beyond what's in our guidance.\n"
 )
-
-
-def _make_response(text: str) -> Message:
-    return Message(
-        id="msg_test",
-        content=[TextBlock(type="text", text=text, citations=None)],
-        model="claude-sonnet-4-6",
-        role="assistant",
-        stop_reason="end_turn",
-        stop_sequence=None,
-        type="message",
-        usage=Usage(
-            input_tokens=10,
-            output_tokens=10,
-            cache_creation=None,
-            cache_creation_input_tokens=None,
-            cache_read_input_tokens=None,
-            inference_geo=None,
-            server_tool_use=None,
-            service_tier="standard",
-        ),
-    )
-
-
-def _fake_client(text: str) -> anthropic.Anthropic:
-    fake = MagicMock()
-    fake.messages.create.return_value = _make_response(text)
-    return cast(anthropic.Anthropic, fake)
 
 
 def _valid_output() -> dict[str, Any]:
@@ -62,20 +30,20 @@ def _valid_output() -> dict[str, Any]:
             "citation": {
                 "source_quote": "We had a strong quarter with revenue up 30%"
             },
-            "confidence": 0.75,
+            "confidence": "high",
         },
         "q_and_a_evasiveness": {
             "citation": {
                 "source_quote": "we can't comment on that beyond what's in our guidance"
             },
-            "confidence": 0.6,
+            "confidence": "medium",
         },
         "forward_statements": [],
     }
 
 
 def test_extract_transcript_returns_validated_output(tmp_path: Path) -> None:
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     out = extract_transcript(
         raw_doc=_SAMPLE_TRANSCRIPT,
         doc_id="trn-001",
@@ -86,11 +54,11 @@ def test_extract_transcript_returns_validated_output(tmp_path: Path) -> None:
     assert out.ticker == "ACME"
     assert out.event_datetime is not None
     assert out.event_datetime.year == 2026
-    assert out.prepared_remarks_tone.confidence == pytest.approx(0.75)
+    assert out.prepared_remarks_tone.confidence == "high"
 
 
 def test_extract_transcript_resolves_spans_into_raw_doc(tmp_path: Path) -> None:
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     out = extract_transcript(
         raw_doc=_SAMPLE_TRANSCRIPT,
         doc_id="trn-002",
@@ -107,7 +75,7 @@ def test_extract_transcript_resolves_spans_into_raw_doc(tmp_path: Path) -> None:
 
 
 def test_extract_transcript_cache_hit_skips_llm(tmp_path: Path) -> None:
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     extract_transcript(
         raw_doc=_SAMPLE_TRANSCRIPT,
         doc_id="trn-cache",
@@ -133,7 +101,7 @@ def test_extract_transcript_quarantines_hallucinated_quote(tmp_path: Path) -> No
             "horizon": "long-term",
         }
     ]
-    client = _fake_client(json.dumps(bad))
+    client = _fake_client(bad)
     out = extract_transcript(
         raw_doc=_SAMPLE_TRANSCRIPT,
         doc_id="trn-bad",
@@ -158,7 +126,7 @@ def test_transcript_real_fixture_passes_citation_grounding(tmp_path: Path) -> No
 
     fixture_dir = Path(__file__).parent / "fixtures" / "transcript"
     raw = (fixture_dir / "sample_transcript.txt").read_text()
-    frozen = (fixture_dir / "sample_transcript_output.json").read_text()
+    frozen = json.loads((fixture_dir / "sample_transcript_output.json").read_text())
     client = _fake_client(frozen)
     out = extract_transcript(
         raw_doc=raw,

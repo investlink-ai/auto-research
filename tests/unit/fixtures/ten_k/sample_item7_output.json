@@ -6,14 +6,14 @@
     "citation": {
       "source_quote": "We expect cautious growth in fiscal 2027 as channel inventory normalizes."
     },
-    "confidence": 0.75
+    "confidence": "high"
   },
   "accrual_flags": [
     {
       "citation": {
         "source_quote": "capitalized software development costs of $118 million"
       },
-      "confidence": 0.6
+      "confidence": "medium"
     }
   ],
   "supplier_mentions": [

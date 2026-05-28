@@ -48,6 +48,7 @@ Production callers compose:
             task="dilution_event",
             system_prompt=PROMPT.text,
             user_content=raw_doc.text,
+            output_schema=SFilingOutput,
         )
         return validate_or_quarantine(parse(response), raw_doc.text, ...)
 """
@@ -57,13 +58,41 @@ from __future__ import annotations
 from typing import Any, Final, Protocol
 
 import anthropic
-from anthropic.types import Message
+from anthropic.types import Message, ToolChoiceToolParam, ToolParam
 from opentelemetry import trace
+from pydantic import BaseModel
 
 from auto_research._models import route_model
 from auto_research._pricing import usd_for_message
 from auto_research.agents.reliability import reliable_agent_node
 from auto_research.extract._caching import cached_system_block
+
+# The tool name every worker forces via `tool_choice`. Single value
+# (not a per-worker name) so the response-parsing branch in
+# `workers/_common.py` can match by literal without threading the
+# worker name through.
+RECORD_EXTRACTION_TOOL_NAME: Final[str] = "record_extraction"
+
+
+def extract_tool_use_input(message: Message) -> dict[str, Any] | None:
+    """Return the first `record_extraction` tool_use block's `.input`.
+
+    Returns `None` when the response carries no matching tool_use block
+    (e.g., model refused, or the call ran in free-form text mode).
+    Callers route the `None` outcome to their own quarantine /
+    fallback path. Co-located with the tool name + tool_choice setup
+    in `_call` so the producer and consumer of the tool_use envelope
+    live in one module.
+
+    The SDK's `ToolUseBlock.input` is typed and validated as a `dict`
+    at parse-time — non-dict inputs are rejected by the SDK before
+    they reach this helper, so the return type is a real `dict` (not
+    `dict | object`).
+    """
+    for block in message.content:
+        if block.type == "tool_use" and block.name == RECORD_EXTRACTION_TOOL_NAME:
+            return block.input
+    return None
 
 # Token budget for extended thinking on Sonnet/Opus routes. 2048 is the
 # Anthropic-documented sweet spot for structured-extraction tasks where
@@ -80,6 +109,18 @@ class ExtractionFn(Protocol):
 
     Documented as a Protocol so workers can annotate `_CLIENT: ExtractionFn`
     without having to spell out the kwargs each time.
+
+    `output_schema` switches the response shape:
+
+    - When provided (default for extraction workers), the schema is
+      forwarded as the `record_extraction` tool's `input_schema` and
+      `tool_choice` forces the model to emit exactly one tool_use
+      block whose `.input` is the parsed dict. The worker reads it
+      directly without a text/json.loads round-trip.
+    - When `None` (default for callers that want free-form text — e.g.,
+      the contextual-chunker writing a one-line context per child),
+      the call omits `tools` / `tool_choice` and the response carries
+      ordinary `text` content blocks.
     """
 
     def __call__(
@@ -88,6 +129,7 @@ class ExtractionFn(Protocol):
         task: str,
         system_prompt: str,
         user_content: str,
+        output_schema: type[BaseModel] | None = None,
         max_tokens: int = ...,
     ) -> Message: ...
 
@@ -128,6 +170,21 @@ def make_extraction_client(
     """
     sdk = anthropic_client if anthropic_client is not None else anthropic.Anthropic()
 
+    # Per-client memo of `output_schema.model_json_schema()`. Pydantic v2
+    # does NOT cache that call (each invocation builds a fresh dict, ~57μs
+    # per call locally measured), and the same 4-7 schemas are reused
+    # across thousands of extraction calls during a backfill. Cache by
+    # class identity so a re-defined schema (same name, new fields)
+    # doesn't return a stale entry.
+    _schema_cache: dict[int, dict[str, Any]] = {}
+
+    def _tool_input_schema(output_schema: type[BaseModel]) -> dict[str, Any]:
+        cached = _schema_cache.get(id(output_schema))
+        if cached is None:
+            cached = output_schema.model_json_schema()
+            _schema_cache[id(output_schema)] = cached
+        return cached
+
     @reliable_agent_node(
         failures=failures,
         usd=usd_cap,
@@ -140,6 +197,7 @@ def make_extraction_client(
         task: str,
         system_prompt: str,
         user_content: str,
+        output_schema: type[BaseModel] | None = None,
         max_tokens: int = 4096,
     ) -> Message:
         # Route the model first — surfaces unknown-task ValueError before
@@ -160,6 +218,33 @@ def make_extraction_client(
                 "type": "enabled",
                 "budget_tokens": EXTENDED_THINKING_BUDGET,
             }
+
+        # Server-side schema enforcement via tool_use when an
+        # `output_schema` is provided. The tool's `input_schema` is the
+        # pydantic model's JSON schema; Anthropic rejects responses
+        # whose tool_use.input doesn't conform, cutting json-decode and
+        # schema-noncompliance quarantines from ~5-15% to <1%. The
+        # forced `tool_choice` makes the model emit exactly one
+        # `record_extraction` tool_use block; the worker's
+        # response-parser pulls `tool_use.input` directly without a
+        # json.loads round-trip. When `output_schema` is None
+        # (contextual-chunker and similar free-form text callers), the
+        # call falls back to ordinary text content with no tool plumbing.
+        if output_schema is not None:
+            tool: ToolParam = {
+                "name": RECORD_EXTRACTION_TOOL_NAME,
+                "description": (
+                    "Emit the structured extraction result. Call this tool "
+                    "exactly once; its input is the full output object."
+                ),
+                "input_schema": _tool_input_schema(output_schema),
+            }
+            tool_choice: ToolChoiceToolParam = {
+                "type": "tool",
+                "name": RECORD_EXTRACTION_TOOL_NAME,
+            }
+            extra_kwargs["tools"] = [tool]
+            extra_kwargs["tool_choice"] = tool_choice
 
         # `cached_system_block` builds the structured-block form with
         # `cache_control: ephemeral` — same helper as the batch client
@@ -208,4 +293,9 @@ def make_extraction_client(
     return _call
 
 
-__all__ = ["ExtractionFn", "make_extraction_client"]
+__all__ = [
+    "RECORD_EXTRACTION_TOOL_NAME",
+    "ExtractionFn",
+    "extract_tool_use_input",
+    "make_extraction_client",
+]

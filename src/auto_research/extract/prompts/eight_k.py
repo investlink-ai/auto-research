@@ -41,8 +41,9 @@ Fields to populate:
   exercises.
 
 A Claim is an object with EXACTLY two fields: `citation` (an object
-with `source_quote`) and `confidence` (a float in [0, 1]). No other
-fields are allowed inside a Claim or Citation.
+with `source_quote`) and `confidence` (EXACTLY one of "high",
+"medium", or "low" — float confidence is rejected). No other fields
+are allowed inside a Claim or Citation.
 
 Example of a fully-formed EightKOutput:
 
@@ -56,7 +57,7 @@ Example of a fully-formed EightKOutput:
         "citation": {
           "source_quote": "entered into a Material Definitive Agreement"
         },
-        "confidence": 0.9
+        "confidence": "high"
       }
     ]
   }

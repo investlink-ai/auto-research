@@ -43,22 +43,24 @@ Fields to populate:
 - accession_number: the filing's SEC accession number.
 - form_type: "S-1" or "S-3".
 - dilution_event: a single Claim describing the headline dilution event
-  (e.g., "shelf takedown of $200M common stock"), with confidence in [0, 1].
+  (e.g., "shelf takedown of $200M common stock"), with confidence
+  categorical (one of "high", "medium", or "low").
 - capital_raise_language: list of Claims for each distinct capital-raise
   phrase in the filing (e.g., "at-the-market offering", "registered direct").
 - use_of_proceeds: list of Claims describing intended uses (e.g.,
   "general corporate purposes", "fund Phase II clinical trial").
 
 A Claim is an object with EXACTLY two fields: `citation` (an object with
-`source_quote`) and `confidence` (a float in [0, 1]). No other fields are
-allowed inside a Claim or Citation. Example of the required shape for a
-single Claim:
+`source_quote`) and `confidence` (EXACTLY one of "high", "medium", or
+"low" — float confidence is rejected). No other fields are allowed
+inside a Claim or Citation. Example of the required shape for a single
+Claim:
 
   {
     "citation": {
       "source_quote": "shelf takedown of $200 million of common stock"
     },
-    "confidence": 0.9
+    "confidence": "high"
   }
 
 Do not invent quotes. If a field has no support in the filing, return an
