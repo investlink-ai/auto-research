@@ -565,3 +565,38 @@ def test_ten_k_icfr_material_weaknesses_partial_accepts_empty_list() -> None:
         icfr_material_weaknesses=[],
     )
     assert p.icfr_material_weaknesses == []
+
+
+# --- TenKCriticalAccountingEstimateChangesPartial ----------------------------
+
+
+def test_ten_k_critical_accounting_estimate_changes_partial_carries_identity_and_field() -> None:
+    """`TenKCriticalAccountingEstimateChangesPartial` is the RAG-path
+    schema for Item 7 / Item 8 footnote disclosures of critical
+    accounting estimate changes."""
+    from auto_research.extract.schemas import (
+        TenKCriticalAccountingEstimateChangesPartial,
+    )
+
+    p = TenKCriticalAccountingEstimateChangesPartial(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        critical_accounting_estimate_changes=[_claim(confidence="medium")],
+    )
+    assert len(p.critical_accounting_estimate_changes) == 1
+
+
+def test_ten_k_critical_accounting_estimate_changes_partial_accepts_empty_list() -> None:
+    """Empty list when no YoY change is flagged."""
+    from auto_research.extract.schemas import (
+        TenKCriticalAccountingEstimateChangesPartial,
+    )
+
+    p = TenKCriticalAccountingEstimateChangesPartial(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        critical_accounting_estimate_changes=[],
+    )
+    assert p.critical_accounting_estimate_changes == []

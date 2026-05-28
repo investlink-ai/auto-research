@@ -140,3 +140,16 @@ def test_ten_k_narrative_field_configs_includes_icfr_material_weaknesses() -> No
     assert config.retrieval_query.strip()
     assert "Item 9A" in config.retrieval_query
     assert "Item 9A" in config.description
+
+
+def test_ten_k_narrative_field_configs_includes_critical_accounting_estimate_changes() -> None:
+    from auto_research.extract.prompts.ten_k_narrative_field import (
+        TEN_K_NARRATIVE_FIELD_CONFIGS,
+    )
+
+    by_name = {c.field_name: c for c in TEN_K_NARRATIVE_FIELD_CONFIGS}
+    assert "critical_accounting_estimate_changes" in by_name
+    config = by_name["critical_accounting_estimate_changes"]
+    assert config.retrieval_query.strip()
+    assert "Item 7" in config.retrieval_query
+    assert "Item 7" in config.description

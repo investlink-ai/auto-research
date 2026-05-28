@@ -156,6 +156,7 @@ def test_ten_k_rag_branch_fires_above_cutoff(tmp_path: Path) -> None:
         "risk_factor_deltas": "risk",
         "going_concern": "going concern",
         "icfr_material_weaknesses": "ICFR",
+        "critical_accounting_estimate_changes": "critical accounting",
     }
     # Each parent's text contains a unique sentinel "FIELD-<field>" that
     # serves as the response's source_quote. Distinct text → distinct
@@ -263,12 +264,22 @@ def test_ten_k_rag_branch_fires_above_cutoff(tmp_path: Path) -> None:
                     }
                 ],
             }
+        if field == "critical_accounting_estimate_changes":
+            return {
+                **base,
+                "critical_accounting_estimate_changes": [
+                    {
+                        "citation": {"source_quote": sentinel},
+                        "confidence": "high",
+                    }
+                ],
+            }
         raise ValueError(f"unknown field {field!r}")
 
     # The worker iterates `TEN_K_NARRATIVE_FIELD_CONFIGS` in order:
     # guidance_tone, accrual_flags, supplier_mentions,
     # customer_mentions, risk_factor_deltas, going_concern,
-    # icfr_material_weaknesses.
+    # icfr_material_weaknesses, critical_accounting_estimate_changes.
     responses_in_order = [
         _response_for(f)
         for f in (
@@ -279,6 +290,7 @@ def test_ten_k_rag_branch_fires_above_cutoff(tmp_path: Path) -> None:
             "risk_factor_deltas",
             "going_concern",
             "icfr_material_weaknesses",
+            "critical_accounting_estimate_changes",
         )
     ]
     client = _fake_client_sequence(responses_in_order)
@@ -291,8 +303,8 @@ def test_ten_k_rag_branch_fires_above_cutoff(tmp_path: Path) -> None:
         retrieve_fn=fake_retrieve,
     )
     assert out is not None
-    assert len(queries_seen) == 7  # one query per narrative field
-    assert client.messages.create.call_count == 7  # type: ignore[attr-defined]
+    assert len(queries_seen) == 8  # one query per narrative field
+    assert client.messages.create.call_count == 8  # type: ignore[attr-defined]
 
 
 def test_ten_k_rag_branch_requires_retrieve_fn(tmp_path: Path) -> None:
@@ -312,14 +324,15 @@ def test_ten_k_rag_branch_requires_retrieve_fn(tmp_path: Path) -> None:
 
 
 def _rag_partials_in_order(cik: str = "0000000001") -> list[dict[str, Any]]:
-    """Seven partial-schema dicts (one per narrative field) whose
+    """Eight partial-schema dicts (one per narrative field) whose
     citation quote ('cautious growth in fiscal 2026') is present in
     `_chunkset_narrative_only`'s parent text — so each per-field
     response validates cleanly against its respective Pydantic partial.
 
     Order matches `TEN_K_NARRATIVE_FIELD_CONFIGS`: guidance_tone,
     accrual_flags, supplier_mentions, customer_mentions,
-    risk_factor_deltas, going_concern, icfr_material_weaknesses.
+    risk_factor_deltas, going_concern, icfr_material_weaknesses,
+    critical_accounting_estimate_changes.
     """
     base = {
         "cik": cik,
@@ -347,6 +360,7 @@ def _rag_partials_in_order(cik: str = "0000000001") -> list[dict[str, Any]]:
             },
         },
         {**base, "icfr_material_weaknesses": []},
+        {**base, "critical_accounting_estimate_changes": []},
     ]
 
 
@@ -411,9 +425,9 @@ def test_ten_k_rag_identity_disagreement_quarantines(tmp_path: Path) -> None:
     base = _rag_partials_in_order(cik="0000000001")
     diverged = _rag_partials_in_order(cik="0000999999")
     # Swap the second call (accrual_flags) for a partial with a
-    # diverged cik. The remaining 6 keep the agreed cik.
+    # diverged cik. The remaining 7 keep the agreed cik.
     client = _fake_client_sequence(
-        [base[0], diverged[1], base[2], base[3], base[4], base[5], base[6]]
+        [base[0], diverged[1], base[2], base[3], base[4], base[5], base[6], base[7]]
     )
     out = extract_ten_k(
         raw_doc=long_raw,
@@ -430,13 +444,13 @@ def test_ten_k_rag_identity_disagreement_quarantines(tmp_path: Path) -> None:
     record = json.loads(qrec.read_text())
     assert "disagree" in record["error"]
     assert "cik" in record["error"]
-    # All 7 per-field calls were attempted before the identity check
+    # All 8 per-field calls were attempted before the identity check
     # fired. Without this, a regression that short-circuited on the
     # first non-matching cik would still see `out is None` + empty
     # cache and pass.
-    assert client.messages.create.call_count == 7  # type: ignore[attr-defined]
+    assert client.messages.create.call_count == 8  # type: ignore[attr-defined]
     # Identity check fires BEFORE commit, so staged writes are dropped
-    # and the cache stays empty even though all 7 calls validated.
+    # and the cache stays empty even though all 8 calls validated.
     assert list((tmp_path / "cache").rglob("*.json")) == []
 
 
@@ -494,6 +508,7 @@ def test_ten_k_rag_populates_going_concern_when_planted(
             },
         },
         {**base, "icfr_material_weaknesses": []},
+        {**base, "critical_accounting_estimate_changes": []},
     ]
     client = _fake_client_sequence(responses)
     out = extract_ten_k(
@@ -509,7 +524,7 @@ def test_ten_k_rag_populates_going_concern_when_planted(
     assert out.going_concern is not None
     assert "substantial doubt" in out.going_concern.citation.source_quote
     assert out.going_concern.confidence == "high"
-    assert client.messages.create.call_count == 7  # type: ignore[attr-defined]
+    assert client.messages.create.call_count == 8  # type: ignore[attr-defined]
 
 
 def test_ten_k_rag_going_concern_absent_returns_none(
@@ -559,6 +574,7 @@ def test_ten_k_rag_going_concern_absent_returns_none(
         {**base, "risk_factor_deltas": []},
         {**base, "going_concern": None},
         {**base, "icfr_material_weaknesses": []},
+        {**base, "critical_accounting_estimate_changes": []},
     ]
     client = _fake_client_sequence(responses)
     out = extract_ten_k(
@@ -631,6 +647,7 @@ def test_ten_k_rag_populates_icfr_material_weaknesses_when_planted(
                 }
             ],
         },
+        {**base, "critical_accounting_estimate_changes": []},
     ]
     client = _fake_client_sequence(responses)
     out = extract_ten_k(
@@ -646,7 +663,7 @@ def test_ten_k_rag_populates_icfr_material_weaknesses_when_planted(
     assert len(out.icfr_material_weaknesses) == 1
     assert "effective controls" in out.icfr_material_weaknesses[0].citation.source_quote
     assert out.icfr_material_weaknesses[0].confidence == "high"
-    assert client.messages.create.call_count == 7  # type: ignore[attr-defined]
+    assert client.messages.create.call_count == 8  # type: ignore[attr-defined]
 
 
 def test_ten_k_rag_icfr_effective_returns_empty_list(tmp_path: Path) -> None:
@@ -694,6 +711,7 @@ def test_ten_k_rag_icfr_effective_returns_empty_list(tmp_path: Path) -> None:
         {**base, "risk_factor_deltas": []},
         {**base, "going_concern": None},
         {**base, "icfr_material_weaknesses": []},
+        {**base, "critical_accounting_estimate_changes": []},
     ]
     client = _fake_client_sequence(responses)
     out = extract_ten_k(
@@ -707,6 +725,144 @@ def test_ten_k_rag_icfr_effective_returns_empty_list(tmp_path: Path) -> None:
     )
     assert out is not None
     assert out.icfr_material_weaknesses == []
+
+
+def test_ten_k_rag_populates_critical_accounting_estimate_changes_when_planted(
+    tmp_path: Path,
+) -> None:
+    """Item 7 'Critical Accounting Estimates' passage with a flagged
+    YoY change → critical_accounting_estimate_changes is non-empty."""
+    long_raw = "word " * 200_000
+    meta = ChunkMetadata(
+        ticker="ACME",
+        filing_date=date(2026, 1, 30),
+        fiscal_period="FY2025",
+        doc_type="10-K",
+        doc_id="10k-est-001",
+    )
+    change_text = (
+        "we revised our estimated useful life of server hardware from "
+        "four to six years effective fiscal 2025."
+    )
+    parent_text = f"Item 7. Critical Accounting Estimates. {change_text}"
+    parent = ParentChunk(
+        text=parent_text,
+        section_name="item_7",
+        char_span=(0, len(parent_text)),
+        token_count=10,
+        table_html=None,
+        metadata=meta,
+    )
+    chunkset = ChunkSet(parents=(parent,), children=())
+
+    base = {
+        "cik": "0000000001",
+        "accession_number": "0000000001-26-000001",
+        "fiscal_period_end": "2025-12-31",
+    }
+    responses = [
+        {
+            **base,
+            "guidance_tone": {
+                "citation": {"source_quote": "fiscal 2025"},
+                "confidence": "low",
+            },
+        },
+        {**base, "accrual_flags": []},
+        {**base, "supplier_mentions": []},
+        {**base, "customer_mentions": []},
+        {**base, "risk_factor_deltas": []},
+        {**base, "going_concern": None},
+        {**base, "icfr_material_weaknesses": []},
+        {
+            **base,
+            "critical_accounting_estimate_changes": [
+                {
+                    "citation": {"source_quote": change_text},
+                    "confidence": "high",
+                }
+            ],
+        },
+    ]
+    client = _fake_client_sequence(responses)
+    out = extract_ten_k(
+        raw_doc=long_raw,
+        doc_id="10k-est-001",
+        cache_root=tmp_path / "cache",
+        quarantine_root=tmp_path / "q",
+        anthropic_client=client,
+        chunkset=chunkset,
+        retrieve_fn=lambda _q: [parent],
+    )
+    assert out is not None
+    assert len(out.critical_accounting_estimate_changes) == 1
+    assert (
+        "revised our estimated useful life"
+        in out.critical_accounting_estimate_changes[0].citation.source_quote
+    )
+    assert client.messages.create.call_count == 8  # type: ignore[attr-defined]
+
+
+def test_ten_k_rag_critical_estimates_unchanged_returns_empty_list(tmp_path: Path) -> None:
+    """Item 7 passage discusses critical estimates without flagging
+    a YoY change → empty list."""
+    long_raw = "word " * 200_000
+    meta = ChunkMetadata(
+        ticker="ACME",
+        filing_date=date(2026, 1, 30),
+        fiscal_period="FY2025",
+        doc_type="10-K",
+        doc_id="10k-est-002",
+    )
+    parent_text = (
+        "Item 7. Critical Accounting Estimates. Our estimates for "
+        "revenue recognition, inventory valuation, and income taxes "
+        "involve significant judgment. There have been no material "
+        "changes from the prior year's methodology or assumptions."
+    )
+    parent = ParentChunk(
+        text=parent_text,
+        section_name="item_7",
+        char_span=(0, len(parent_text)),
+        token_count=10,
+        table_html=None,
+        metadata=meta,
+    )
+    chunkset = ChunkSet(parents=(parent,), children=())
+
+    base = {
+        "cik": "0000000001",
+        "accession_number": "0000000001-26-000001",
+        "fiscal_period_end": "2025-12-31",
+    }
+    responses = [
+        {
+            **base,
+            "guidance_tone": {
+                "citation": {"source_quote": "judgment"},
+                "confidence": "low",
+            },
+        },
+        {**base, "accrual_flags": []},
+        {**base, "supplier_mentions": []},
+        {**base, "customer_mentions": []},
+        {**base, "risk_factor_deltas": []},
+        {**base, "going_concern": None},
+        {**base, "icfr_material_weaknesses": []},
+        {**base, "critical_accounting_estimate_changes": []},
+    ]
+    client = _fake_client_sequence(responses)
+    out = extract_ten_k(
+        raw_doc=long_raw,
+        doc_id="10k-est-002",
+        cache_root=tmp_path / "cache",
+        quarantine_root=tmp_path / "q",
+        anthropic_client=client,
+        chunkset=chunkset,
+        retrieve_fn=lambda _q: [parent],
+    )
+    assert out is not None
+    assert out.critical_accounting_estimate_changes == []
 
 
 def test_ten_k_long_doc_without_chunkset_raises(tmp_path: Path) -> None:
@@ -761,6 +917,71 @@ def test_ten_k_single_shot_cache_hit_skips_llm(tmp_path: Path) -> None:
         anthropic_client=client,
     )
     assert first == second
+    assert client.messages.create.call_count == 1  # type: ignore[attr-defined]
+
+
+def test_ten_k_single_shot_populates_new_narrative_fields(
+    tmp_path: Path,
+) -> None:
+    """Short raw doc → single-shot. The narrative prompt now instructs
+    the model to emit going_concern / icfr_material_weaknesses /
+    critical_accounting_estimate_changes; verify they round-trip when
+    populated."""
+    raw_doc = (
+        "Item 1A. Risk Factors. Our supply chain depends on TSMC.\n"
+        "Item 7. Management's Discussion and Analysis. "
+        "We expect cautious growth in fiscal 2026.\n"
+        "Item 8. Audit report. The conditions raise substantial doubt "
+        "about the Company's ability to continue as a going concern.\n"
+        "Item 9A. We did not maintain effective controls over revenue "
+        "recognition.\n"
+        "Critical Accounting Estimates. We revised our estimated "
+        "useful life of server hardware from four to six years.\n"
+    )
+    response = _valid_narrative()
+    response["going_concern"] = {
+        "citation": {
+            "source_quote": (
+                "substantial doubt about the Company's ability to "
+                "continue as a going concern"
+            )
+        },
+        "confidence": "high",
+    }
+    response["icfr_material_weaknesses"] = [
+        {
+            "citation": {
+                "source_quote": (
+                    "did not maintain effective controls over revenue "
+                    "recognition"
+                )
+            },
+            "confidence": "high",
+        }
+    ]
+    response["critical_accounting_estimate_changes"] = [
+        {
+            "citation": {
+                "source_quote": (
+                    "revised our estimated useful life of server "
+                    "hardware from four to six years"
+                )
+            },
+            "confidence": "medium",
+        }
+    ]
+    client = _fake_client_single(response)
+    out = extract_ten_k(
+        raw_doc=raw_doc,
+        doc_id="10k-singleshot-new",
+        cache_root=tmp_path,
+        anthropic_client=client,
+    )
+    assert out is not None
+    assert out.going_concern is not None
+    assert "substantial doubt" in out.going_concern.citation.source_quote
+    assert len(out.icfr_material_weaknesses) == 1
+    assert len(out.critical_accounting_estimate_changes) == 1
     assert client.messages.create.call_count == 1  # type: ignore[attr-defined]
 
 

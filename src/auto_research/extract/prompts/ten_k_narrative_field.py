@@ -21,6 +21,7 @@ from typing import NamedTuple
 
 from auto_research.extract.schemas import (
     TenKAccrualFlagsPartial,
+    TenKCriticalAccountingEstimateChangesPartial,
     TenKCustomerMentionsPartial,
     TenKGoingConcernPartial,
     TenKGuidanceTonePartial,
@@ -223,6 +224,25 @@ TEN_K_NARRATIVE_FIELD_CONFIGS: tuple[TenKNarrativeFieldConfig, ...] = (
         retrieval_query=(
             "Does management's Item 9A internal-controls-over-financial-"
             "reporting report identify any material weaknesses in ICFR?"
+        ),
+    ),
+    TenKNarrativeFieldConfig(
+        field_name="critical_accounting_estimate_changes",
+        schema=TenKCriticalAccountingEstimateChangesPartial,
+        description=(
+            "A list of Claims for accounting estimates that management "
+            "flags in Item 7 MD&A 'Critical Accounting Estimates' or "
+            "the Item 8 Significant Accounting Policies note as "
+            "requiring significant judgment AND where management "
+            "indicates a change versus the prior year (new estimate, "
+            "methodology change, materially different assumptions). "
+            "Empty list when no YoY change is flagged. Quote the "
+            "verbatim change-indicating sentence."
+        ),
+        retrieval_query=(
+            "Which critical accounting estimates does Item 7 MD&A or "
+            "the Item 8 footnotes flag as new, changed, or requiring "
+            "materially different assumptions versus the prior year?"
         ),
     ),
 )

@@ -83,3 +83,12 @@ def test_route_model_routes_ten_k_icfr_material_weaknesses_to_haiku() -> None:
         route_model("ten_k", "icfr_material_weaknesses")
         == "claude-haiku-4-5"
     )
+
+
+def test_route_model_routes_ten_k_critical_accounting_estimate_changes_to_haiku() -> None:
+    """Critical-estimate language is Item 7 / footnote pattern
+    recognition — Haiku per §7.3."""
+    assert (
+        route_model("ten_k", "critical_accounting_estimate_changes")
+        == "claude-haiku-4-5"
+    )

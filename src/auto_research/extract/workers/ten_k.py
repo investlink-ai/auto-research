@@ -177,14 +177,7 @@ def _extract_ten_k_rag(
     commit_staged_cache_writes(
         cache_root=cache_root, worker=_WORKER, pending=pending_writes
     )
-    # TODO: remove rag_defaults once critical_accounting_estimate_changes
-    # has a per-field config in TEN_K_NARRATIVE_FIELD_CONFIGS — the loop
-    # will then populate it directly and the default becomes a dead
-    # branch that narrative_partials always overrides.
-    rag_defaults: dict[str, Any] = {
-        "critical_accounting_estimate_changes": [],
-    }
-    return TenKOutput(**agreed_identity, **rag_defaults, **narrative_partials)
+    return TenKOutput(**agreed_identity, **narrative_partials)
 
 
 def extract_ten_k(
