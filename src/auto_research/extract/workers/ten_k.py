@@ -179,11 +179,11 @@ def _extract_ten_k_rag(
     commit_staged_cache_writes(
         cache_root=cache_root, worker=_WORKER, pending=pending_writes
     )
-    # Fields whose routing/configs land in follow-up tasks default to
-    # empty/None here until those tasks add their per-field configs.
-    # Once Tasks 4/5 add configs for icfr_material_weaknesses and
-    # critical_accounting_estimate_changes, `narrative_partials` will
-    # supply them and these defaults are overridden by **narrative_partials.
+    # TODO: remove rag_defaults once icfr_material_weaknesses and
+    # critical_accounting_estimate_changes have per-field configs in
+    # TEN_K_NARRATIVE_FIELD_CONFIGS — the loop will then populate them
+    # directly and the defaults become dead branches that
+    # narrative_partials always overrides.
     rag_defaults: dict[str, Any] = {
         "icfr_material_weaknesses": [],
         "critical_accounting_estimate_changes": [],
