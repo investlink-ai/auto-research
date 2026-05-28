@@ -15,17 +15,7 @@ TRANSCRIPT_PROMPT = """\
 You are extracting language signals from an earnings call transcript.
 The transcript text will be supplied in the next user message.
 
-Return a single JSON object matching the TranscriptOutput schema. Every
-claim MUST include:
-- source_quote: a verbatim substring of the transcript supporting the
-  claim. Preserve the original whitespace exactly — do NOT collapse
-  runs of whitespace. The substring will be located in the transcript
-  by whitespace-flexible match; if no occurrence is found, OR if more
-  than one occurrence is found, the claim is rejected and the output
-  quarantined. Choose quotes long and specific enough to be unique
-  in the transcript.
-
-DO NOT include `source_span`. Character offsets are computed in code.
+Return a single JSON object matching the TranscriptOutput schema.
 
 Fields to populate:
 - ticker: the issuing company's stock ticker (uppercase).
@@ -61,10 +51,44 @@ A Claim is `{"citation": {"source_quote": "..."}, "confidence":
 "horizon": "..."}`. No other fields are allowed inside any of these
 objects.
 
-If a field has no support in the transcript, return an empty list. Do
-not fabricate citations.
+Example of a fully-formed TranscriptOutput:
 
-Return ONLY the JSON object. No markdown code fences. No commentary.
+  {
+    "ticker": "ACME",
+    "event_datetime": "2026-01-30T17:00:00-05:00",
+    "prepared_remarks_tone": {
+      "citation": {"source_quote": "We delivered a strong first quarter"},
+      "confidence": 0.8
+    },
+    "q_and_a_evasiveness": {
+      "citation": {"source_quote": "We don't typically guide that far out"},
+      "confidence": 0.65
+    },
+    "forward_statements": [
+      {
+        "statement_text": "Expect mid-to-high twenties revenue growth for FY26.",
+        "citation": {"source_quote": "we expect mid-to-high twenties revenue growth for fiscal 2026"},
+        "mentioned_entities": [],
+        "horizon": "FY2026"
+      }
+    ]
+  }
+
+Constraints (apply to every field unless noted):
+- source_quote MUST be a verbatim substring of the transcript text —
+  preserve original whitespace and punctuation; do NOT collapse runs of
+  whitespace. The substring is located in the transcript by
+  whitespace-flexible match; ZERO matches or AMBIGUOUS matches
+  (more occurrences than citations sharing the same quote) quarantine
+  the entire output. When a quote naturally repeats (e.g., a recurring
+  analyst phrase), emit one citation per textual occurrence so counts
+  match.
+- Choose quotes long and specific enough to be unique unless
+  intentionally emitting per-occurrence multiple citations.
+- DO NOT include `source_span`; character offsets are computed in code.
+- DO NOT invent quotes. If a field has no support, return an empty list.
+- DO NOT wrap the response in markdown fences or any commentary.
+  The response MUST start with `{` and end with `}`.
 """
 
 __all__ = [

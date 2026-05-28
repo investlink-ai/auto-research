@@ -27,18 +27,7 @@ Risk) — those sections dominate the language-signal value for downstream
 signals.
 
 Return a single JSON object matching the TenKOutput schema's narrative
-fields. Every claim MUST include:
-- source_quote: a verbatim substring of the supplied text supporting
-  the claim. Preserve the original whitespace exactly — do NOT collapse
-  runs of whitespace. The substring will be located in the supplied
-  text by whitespace-flexible match; if no occurrence is found, OR if
-  more than one occurrence is found, the claim is rejected and the
-  output quarantined. Choose quotes long and specific enough to be
-  unique in the supplied text.
-
-DO NOT include `source_span`. Character offsets are computed in code.
-DO NOT populate `financials` (Item 8 is handled by a separate prompt).
-DO NOT populate `language_novelty_score` (computed downstream).
+fields.
 
 Fields to populate:
 - cik: the issuer's CIK (10-digit, leading zeros).
@@ -79,10 +68,54 @@ RiskFactorDelta is `{"change_type": "...", "text": "...",
 "citation": {"source_quote": "..."}}`. No other fields are allowed
 inside any of these objects.
 
-If a field has no support in the supplied text, return an empty list.
-Do not fabricate citations.
+Example of a fully-formed narrative TenKOutput (financials and
+language_novelty_score omitted — see Constraints):
 
-Return ONLY the JSON object. No markdown code fences. No commentary.
+  {
+    "cik": "0001045810",
+    "accession_number": "0001045810-26-000001",
+    "fiscal_period_end": "2026-01-31",
+    "guidance_tone": {
+      "citation": {"source_quote": "We expect cautious growth in fiscal 2027"},
+      "confidence": 0.75
+    },
+    "accrual_flags": [
+      {
+        "citation": {"source_quote": "capitalized software development costs of $118 million"},
+        "confidence": 0.6
+      }
+    ],
+    "supplier_mentions": [
+      {
+        "mention_text": "Taiwan Semiconductor Manufacturing Company (TSMC)",
+        "citation": {"source_quote": "Taiwan Semiconductor Manufacturing Company (TSMC) advanced-node wafer pricing"},
+        "resolved_ticker": null,
+        "resolver_confidence": null,
+        "resolver_reasoning": null
+      }
+    ],
+    "customer_mentions": [],
+    "risk_factor_deltas": []
+  }
+
+Constraints (apply to every field unless noted):
+- source_quote MUST be a verbatim substring of the supplied text —
+  preserve original whitespace and punctuation; do NOT collapse runs of
+  whitespace. The substring is located by whitespace-flexible match;
+  ZERO matches or AMBIGUOUS matches (more occurrences than citations
+  sharing the same quote) quarantine the entire output. When a quote
+  naturally repeats (e.g., the same supplier named across Risk
+  Factors, MD&A, and Properties), emit one SupplierMention per textual
+  occurrence so counts match — the worker pairs them in document order.
+- Choose quotes long and specific enough to be unique unless
+  intentionally emitting per-occurrence multiple citations.
+- DO NOT include `source_span`; character offsets are computed in code.
+- DO NOT populate `financials` (Item 8 is handled by a separate prompt).
+- DO NOT populate `language_novelty_score` (computed downstream; the
+  schema defaults it to 0.0).
+- DO NOT invent quotes. If a field has no support, return an empty list.
+- DO NOT wrap the response in markdown fences or any commentary.
+  The response MUST start with `{` and end with `}`.
 """
 
 __all__ = [

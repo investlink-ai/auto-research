@@ -20,7 +20,8 @@ TEN_K_FINANCIALS_PROMPT_VERSION = "v1"
 
 TEN_K_FINANCIALS_PROMPT = """\
 You are extracting line items from a 10-K Item 8 financial statement
-table. The table HTML will be supplied in the next user message.
+table. The table TEXT (rendered from HTML — cell contents separated by
+spaces, tags stripped) will be supplied in the next user message.
 
 Return a single JSON object matching the TenKFinancials schema. Each
 field is either a FinancialLineItem object or null when the line item
@@ -30,12 +31,9 @@ isn't reported in this table. Every FinancialLineItem MUST include:
   scale to dollars in your output (e.g., a table showing
   "Revenue: 1,234 (in millions)" → value_usd: 1234000000).
 - citation: {source_quote: "..."} — a verbatim substring of the
-  table's text (the cell value plus enough surrounding label text to
-  be unique, e.g., "Total revenue $1,234"). Preserve original
-  whitespace and punctuation. The substring will be located in the
-  table HTML by whitespace-flexible match; if no occurrence is found,
-  OR if more than one occurrence is found, the claim is rejected and
-  the output quarantined.
+  rendered table text (cell label plus value, e.g.,
+  "Total revenue $1,234"). Preserve original whitespace and
+  punctuation as they appear in the rendered text.
 - confidence: EXACTLY one of "high", "medium", or "low". Use:
   - "high" when the line label is unambiguous and the value is
     clearly labelled.
@@ -44,8 +42,6 @@ isn't reported in this table. Every FinancialLineItem MUST include:
     header or footnote.
   - "low" when the cell is at the edge of the table or could
     plausibly refer to a different line item.
-
-DO NOT include `source_span` — character offsets are computed in code.
 
 Line items to populate (return null when not present in the table):
 - revenue: total revenue / net revenue / total net sales.
@@ -64,7 +60,45 @@ year columns), extract ONLY the most recent fiscal period. The current
 fiscal period is typically the leftmost or rightmost data column — use
 the column header dates to choose.
 
-Return ONLY the JSON object. No markdown code fences. No commentary.
+Example of a fully-formed TenKFinancials (income-statement table
+yielding revenue + net_income, balance/cash-flow fields null because
+they belong in OTHER tables that this call did NOT see):
+
+  {
+    "revenue": {
+      "value_usd": 1234000000,
+      "citation": {"source_quote": "Total revenue $1,234"},
+      "confidence": "high"
+    },
+    "gross_profit": null,
+    "operating_income": null,
+    "net_income": {
+      "value_usd": 456000000,
+      "citation": {"source_quote": "Net income $456"},
+      "confidence": "high"
+    },
+    "total_assets": null,
+    "total_liabilities": null,
+    "stockholders_equity": null,
+    "cash_from_operations": null,
+    "cash_from_investing": null,
+    "cash_from_financing": null
+  }
+
+Constraints (apply to every field unless noted):
+- source_quote MUST be a verbatim substring of the rendered table text
+  — preserve original whitespace and punctuation. The substring is
+  located by whitespace-flexible match; ZERO matches or AMBIGUOUS
+  matches (more occurrences than citations sharing the same quote)
+  quarantine the entire output.
+- Use a label+value form for source_quote (e.g., "Total revenue
+  $1,234") rather than a bare value — bare numbers repeat often in
+  financial tables and cause AMBIGUOUS rejections.
+- DO NOT include `source_span`; character offsets are computed in code.
+- Return null for any line item NOT present in THIS table — do not
+  fabricate or carry over values from other statements.
+- DO NOT wrap the response in markdown fences or any commentary.
+  The response MUST start with `{` and end with `}`.
 """
 
 __all__ = [

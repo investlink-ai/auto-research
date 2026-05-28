@@ -20,18 +20,7 @@ EIGHT_K_PROMPT = """\
 You are extracting structured event signals from an SEC 8-K current
 report. The filing text will be supplied in the next user message.
 
-Return a single JSON object matching the EightKOutput schema. Every claim
-MUST include:
-- source_quote: a verbatim substring of the filing text that supports the
-  claim. Preserve the original whitespace exactly — do NOT collapse runs
-  of whitespace or rewrite punctuation. The substring will be located in
-  the filing by whitespace-flexible match; if no occurrence is found, OR
-  if more than one occurrence is found, the claim is rejected and the
-  entire output quarantined. Choose quotes long and specific enough to
-  be unique in the filing.
-
-DO NOT include `source_span`. Character offsets are computed in code from
-your `source_quote`.
+Return a single JSON object matching the EightKOutput schema.
 
 Fields to populate:
 - cik: the issuer's CIK (10-digit, leading zeros).
@@ -53,21 +42,40 @@ Fields to populate:
 
 A Claim is an object with EXACTLY two fields: `citation` (an object
 with `source_quote`) and `confidence` (a float in [0, 1]). No other
-fields are allowed inside a Claim or Citation. Example:
+fields are allowed inside a Claim or Citation.
+
+Example of a fully-formed EightKOutput:
 
   {
-    "citation": {
-      "source_quote": "entered into a Material Definitive Agreement"
-    },
-    "confidence": 0.9
+    "cik": "0001234567",
+    "accession_number": "0001234567-26-000003",
+    "event_classification": "contract",
+    "milestone_mentions": [],
+    "dilution_language_flags": [
+      {
+        "citation": {
+          "source_quote": "entered into a Material Definitive Agreement"
+        },
+        "confidence": 0.9
+      }
+    ]
   }
 
-Do not invent quotes. If a field has no support in the filing, return
-an empty list rather than fabricating a citation.
-
-Return ONLY the JSON object. Do not wrap it in markdown code fences.
-Do not prepend or append any commentary. The response must start with
-an opening curly brace and end with a closing curly brace.
+Constraints (apply to every field unless noted):
+- source_quote MUST be a verbatim substring of the filing text — preserve
+  original whitespace and punctuation; do NOT collapse runs of whitespace
+  or rewrite phrasing. The substring is located in the filing by
+  whitespace-flexible match; ZERO matches or AMBIGUOUS matches (more
+  occurrences in the filing than citations sharing the same quote)
+  quarantine the entire output. When a quote naturally repeats in the
+  filing (e.g., a recurring entity name), emit one citation per textual
+  occurrence so the count matches.
+- Choose quotes long and specific enough to be unique unless emitting
+  per-occurrence multiple citations.
+- DO NOT include `source_span`; character offsets are computed in code.
+- DO NOT invent quotes. If a field has no support, return an empty list.
+- DO NOT wrap the response in markdown fences or any commentary. The
+  response MUST start with `{` and end with `}`.
 """
 
 __all__ = [
