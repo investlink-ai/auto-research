@@ -379,10 +379,101 @@ def run_single_shot_extraction[OutputT: BaseModel](
         return validated
 
 
+# --- Multi-call worker primitives -------------------------------------------
+#
+# Workers that issue more than one LLM call per document (10-K RAG per-field
+# loop, transcript binary split, and any future N-way split) share two
+# bits of orchestration on top of `run_single_shot_extraction`:
+#
+# 1. Stage per-call cache writes via `cache_write_handler=` and commit them
+#    only after every per-call success AND every cross-call invariant
+#    (e.g., identity-field agreement) has passed. Half-cached state on a
+#    mid-loop failure would let re-runs hit stale entries from a prior
+#    attempt — the staging-and-commit primitive below makes "all or
+#    nothing" the default.
+#
+# 2. Check that identity columns the model emits on every call (cik,
+#    accession_number, fiscal_period_end on 10-K; ticker, event_datetime
+#    on transcripts) AGREE across calls. A model that hallucinates a
+#    different value on one call would silently corrupt downstream
+#    attribution if the first value were kept; the helper quarantines
+#    instead and returns None so the caller drops the staged writes.
+
+
+def commit_staged_cache_writes(
+    *,
+    cache_root: Path,
+    worker: str,
+    pending: list[tuple[str, dict[str, Any]]],
+) -> None:
+    """Commit a batch of staged cache writes after all cross-call checks pass.
+
+    Called from a multi-call worker AFTER every per-call extraction
+    returned a non-None result AND `check_identity_agreement` (or any
+    other cross-call invariant) confirmed the calls agree. The worker
+    accumulates entries by passing `cache_write_handler=pending.append`
+    (or equivalent) to each `run_single_shot_extraction` call; only the
+    final commit hits disk. On any failure path, the caller returns
+    None without calling this, and re-runs see no half-cached state
+    from this attempt.
+    """
+    for cache_key, payload in pending:
+        content_cache.write(cache_root, worker, cache_key, payload)
+
+
+def check_identity_agreement(
+    *,
+    identity_values: dict[str, list[Any]],
+    quarantine_root: Path,
+    worker: str,
+    prompt_version: str,
+    doc_id: str,
+) -> dict[str, Any] | None:
+    """Verify each identity field has exactly one unique value across calls.
+
+    `identity_values` maps a field name to the list of values that field
+    took across the N per-call extractions. On full agreement (every
+    field has a single unique value), returns a dict mapping each
+    field to the agreed value so the caller can construct the merged
+    output without re-deriving identity. On disagreement on ANY field,
+    writes a `{doc_id}#identity-disagreement` quarantine record naming
+    the divergent field + per-call values and returns None — the
+    caller MUST treat None as "do not commit staged cache writes;
+    return None to your caller."
+
+    Same discipline applies regardless of how many calls a worker
+    issued: 5 for the 10-K RAG path, 2 for the transcript binary
+    split, N for any future multi-call worker.
+    """
+    agreed: dict[str, Any] = {}
+    for field_name, values in identity_values.items():
+        unique_strs = {str(v) for v in values}
+        if len(unique_strs) > 1:
+            _write_quarantine(
+                quarantine_root=quarantine_root,
+                worker=worker,
+                prompt_version=prompt_version,
+                doc_id=f"{doc_id}#identity-disagreement",
+                parsed={
+                    "field": field_name,
+                    "values_per_call": [str(v) for v in values],
+                },
+                error=(
+                    "multi-call extraction disagrees on identity field "
+                    f"`{field_name}`: {sorted(unique_strs)!r}"
+                ),
+            )
+            return None
+        agreed[field_name] = values[0]
+    return agreed
+
+
 __all__ = [
     "_get_or_build_client",
     "_quote_to_flex_regex",
     "_resolve_spans",
     "_write_quarantine",
+    "check_identity_agreement",
+    "commit_staged_cache_writes",
     "run_single_shot_extraction",
 ]

@@ -18,7 +18,35 @@ ephemeral-cache marker on the system block, this keeps the
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
+from auto_research.extract.schemas import (
+    TenKAccrualFlagsPartial,
+    TenKCustomerMentionsPartial,
+    TenKGuidanceTonePartial,
+    TenKRiskFactorDeltasPartial,
+    TenKSupplierMentionsPartial,
+)
+
 TEN_K_NARRATIVE_FIELD_PROMPT_VERSION = "v1"
+
+
+class TenKNarrativeFieldConfig(NamedTuple):
+    """Per-field config for the 10-K RAG loop.
+
+    `schema` is the partial pydantic model whose tool_use `input_schema`
+    Anthropic validates against; `field_name` is both the JSON key
+    (matched by `getattr(partial, field_name)` in the worker) and the
+    cache-namespace token. Bundling these here keeps `schema` and
+    `field_name` aligned — splitting them across the worker module + a
+    prompt config was a footgun where adding a field required edits
+    in two places.
+    """
+
+    field_name: str
+    schema: type
+    description: str
+    retrieval_query: str
 
 
 TEN_K_NARRATIVE_FIELD_PROMPT = """\
@@ -77,37 +105,40 @@ Now extract the field `{field_name}` from this filing:
 # The order of this list is load-bearing: the RAG worker iterates in
 # this order and stages per-field cache writes; reordering changes the
 # observable per-field cache namespace. New fields go at the end.
-TEN_K_NARRATIVE_FIELD_CONFIGS: tuple[tuple[str, str, str], ...] = (
-    (
-        "guidance_tone",
-        (
+TEN_K_NARRATIVE_FIELD_CONFIGS: tuple[TenKNarrativeFieldConfig, ...] = (
+    TenKNarrativeFieldConfig(
+        field_name="guidance_tone",
+        schema=TenKGuidanceTonePartial,
+        description=(
             "A single Claim describing the tone of forward-looking language "
             "in MD&A (e.g., 'cautious; gross-margin headwinds called out "
             "twice'). Quote the passage in MD&A that most strongly carries "
             "the tone, not a generic disclaimer."
         ),
-        (
+        retrieval_query=(
             "What is management's tone on forward growth, gross margin, and "
             "demand in the MD&A section?"
         ),
     ),
-    (
-        "accrual_flags",
-        (
+    TenKNarrativeFieldConfig(
+        field_name="accrual_flags",
+        schema=TenKAccrualFlagsPartial,
+        description=(
             "A list of Claims flagging accrual-quality concerns — large "
             "unbilled receivables, deferred revenue swings, capitalized R&D "
             "growing faster than revenue, restructuring-charge resets. One "
             "Claim per distinct concern. Empty list when none surface in "
             "the retrieved passages."
         ),
-        (
+        retrieval_query=(
             "What are the accrual-quality concerns: unbilled receivables, "
             "deferred revenue swings, capitalized R&D, restructuring resets?"
         ),
     ),
-    (
-        "supplier_mentions",
-        (
+    TenKNarrativeFieldConfig(
+        field_name="supplier_mentions",
+        schema=TenKSupplierMentionsPartial,
+        description=(
             "A list of SupplierMention objects naming specific named "
             "suppliers (e.g., TSMC, Foxconn, Samsung, ASML). Each "
             "SupplierMention has:\n"
@@ -119,14 +150,15 @@ TEN_K_NARRATIVE_FIELD_CONFIGS: tuple[tuple[str, str, str], ...] = (
             "fabricate or guess.\n"
             "Empty list when no specific named supplier is called out."
         ),
-        (
+        retrieval_query=(
             "Which specific named suppliers (e.g., TSMC, Foxconn, Samsung, "
             "ASML) does the company rely on?"
         ),
     ),
-    (
-        "customer_mentions",
-        (
+    TenKNarrativeFieldConfig(
+        field_name="customer_mentions",
+        schema=TenKCustomerMentionsPartial,
+        description=(
             "A list of CustomerMention objects (same shape as "
             "SupplierMention). Include named customers — typically "
             "hyperscaler or enterprise customers explicitly called out "
@@ -135,14 +167,15 @@ TEN_K_NARRATIVE_FIELD_CONFIGS: tuple[tuple[str, str, str], ...] = (
             "null-resolver-fields discipline as supplier mentions. Empty "
             "list when no specific named customer is called out."
         ),
-        (
+        retrieval_query=(
             "Which specific named customers — hyperscalers, large "
             "enterprises — are explicitly called out by name?"
         ),
     ),
-    (
-        "risk_factor_deltas",
-        (
+    TenKNarrativeFieldConfig(
+        field_name="risk_factor_deltas",
+        schema=TenKRiskFactorDeltasPartial,
+        description=(
             "A list of RiskFactorDelta objects, each:\n"
             "  - change_type: EXACTLY one of 'added', 'removed', or "
             "'modified' (vs the prior year's 10-K).\n"
@@ -153,7 +186,7 @@ TEN_K_NARRATIVE_FIELD_CONFIGS: tuple[tuple[str, str, str], ...] = (
             "When the prior year is not available in the supplied passages, "
             "treat all Item 1A risk factors as 'added'."
         ),
-        (
+        retrieval_query=(
             "What new, removed, or modified Item 1A risk factors does this "
             "filing disclose?"
         ),
@@ -165,4 +198,5 @@ __all__ = [
     "TEN_K_NARRATIVE_FIELD_CONFIGS",
     "TEN_K_NARRATIVE_FIELD_PROMPT",
     "TEN_K_NARRATIVE_FIELD_PROMPT_VERSION",
+    "TenKNarrativeFieldConfig",
 ]

@@ -129,6 +129,12 @@ def test_extract_transcript_quarantines_hallucinated_quote(tmp_path: Path) -> No
     )
     assert out is None
     assert (tmp_path / "q" / "transcript" / "trn-bad#qa.json").exists()
+    # Both calls were attempted (prepared succeeded → staged; qa
+    # failed → quarantined). Without this assertion, a regression that
+    # skipped the prepared call (e.g., reordered the loop or short-
+    # circuited on a wrong condition) would still see `out is None` +
+    # the qa quarantine and pass.
+    assert client.messages.create.call_count == 2  # type: ignore[attr-defined]
 
 
 def test_extract_transcript_quarantines_on_identity_disagreement(

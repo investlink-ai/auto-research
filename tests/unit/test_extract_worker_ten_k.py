@@ -427,6 +427,11 @@ def test_ten_k_rag_partial_failure_does_not_persist_earlier_fields(
         retrieve_fn=lambda _q: list(chunkset.parents),
     )
     assert out is None
+    # Exactly 3 SDK calls were attempted (2 successes + the failing
+    # supplier_mentions call). Without this assertion, a regression
+    # that short-circuited earlier would still see `out is None` +
+    # empty cache and pass.
+    assert client.messages.create.call_count == 3  # type: ignore[attr-defined]
     # No cache files written — staged writes are dropped on failure.
     cache_files = list((tmp_path / "cache").rglob("*.json"))
     assert cache_files == [], f"unexpected cache state: {cache_files}"
@@ -460,6 +465,11 @@ def test_ten_k_rag_identity_disagreement_quarantines(tmp_path: Path) -> None:
     record = json.loads(qrec.read_text())
     assert "disagree" in record["error"]
     assert "cik" in record["error"]
+    # All 5 per-field calls were attempted before the identity check
+    # fired. Without this, a regression that short-circuited on the
+    # first non-matching cik would still see `out is None` + empty
+    # cache and pass.
+    assert client.messages.create.call_count == 5  # type: ignore[attr-defined]
     # Identity check fires BEFORE commit, so staged writes are dropped
     # and the cache stays empty even though all 5 calls validated.
     assert list((tmp_path / "cache").rglob("*.json")) == []
