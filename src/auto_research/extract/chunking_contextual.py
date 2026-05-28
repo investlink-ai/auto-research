@@ -369,6 +369,14 @@ def contextualize_chunks(
                 )
                 continue
 
+            # Free-form text mode: deliberately omit `output_schema=` so
+            # the extraction client skips tool_use plumbing and the model
+            # emits ordinary text blocks. `_validate_response` joins the
+            # text blocks via `_extract_text`; a regression that adds
+            # `output_schema=...` here would shift the response to a
+            # tool_use block, collapse `_extract_text` to "", and silently
+            # drop every contextual chunk's context — degrading retrieval
+            # quality with no test failure. Keep this call schemaless.
             try:
                 response = client(
                     task=_TASK,

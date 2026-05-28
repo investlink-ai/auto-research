@@ -10,55 +10,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
-from unittest.mock import MagicMock
-
-import anthropic
-from anthropic.types import Message, ToolUseBlock, Usage
+from typing import Any
 
 from auto_research.extract.enums import EventClassification
 from auto_research.extract.workers.eight_k import extract_eight_k
+from tests.unit.conftest import make_fake_anthropic_client as _fake_client
 
 _SAMPLE_8K = (
     "On January 15, 2026, the company entered into a Material Definitive "
     "Agreement with the Department of Defense for delivery of optical "
     "interconnect systems valued at $42 million."
 )
-
-
-def _make_tool_response(tool_input: Any) -> Message:
-    return Message(
-        id="msg_test",
-        content=[
-            ToolUseBlock(
-                id="toolu_test",
-                input=tool_input,
-                name="record_extraction",
-                type="tool_use",
-            )
-        ],
-        model="claude-haiku-4-5",
-        role="assistant",
-        stop_reason="tool_use",
-        stop_sequence=None,
-        type="message",
-        usage=Usage(
-            input_tokens=10,
-            output_tokens=10,
-            cache_creation=None,
-            cache_creation_input_tokens=None,
-            cache_read_input_tokens=None,
-            inference_geo=None,
-            server_tool_use=None,
-            service_tier="standard",
-        ),
-    )
-
-
-def _fake_client(tool_input: Any) -> anthropic.Anthropic:
-    fake = MagicMock()
-    fake.messages.create.return_value = _make_tool_response(tool_input)
-    return cast(anthropic.Anthropic, fake)
 
 
 def _valid_output() -> dict[str, Any]:

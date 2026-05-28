@@ -37,8 +37,8 @@ from auto_research._io import atomic_write_text
 from auto_research._models import route_model
 from auto_research.extract import cache as content_cache
 from auto_research.extract.client import (
-    RECORD_EXTRACTION_TOOL_NAME,
     ExtractionFn,
+    extract_tool_use_input,
     make_extraction_client,
 )
 from auto_research.extract.guardrails import (
@@ -271,85 +271,67 @@ def run_single_shot_extraction[OutputT: BaseModel](
             span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
             raise
 
-        # Forced `tool_choice={'type':'tool','name':'record_extraction'}`
-        # guarantees the model emits exactly one matching tool_use block
-        # alongside any optional thinking blocks. Quarantine the response
-        # if the contract is violated rather than silently coercing a
-        # partial answer.
-        tool_use_blocks = [
-            b
-            for b in response.content
-            if b.type == "tool_use" and b.name == RECORD_EXTRACTION_TOOL_NAME
-        ]
-        if not tool_use_blocks:
+        # Local helper bundles the three-step quarantine ceremony: write
+        # the QuarantineRecord, mark the OTel span outcome+status, and
+        # return None. Keeps the four failure branches below visually
+        # parallel and ensures any future change to the ceremony (an
+        # added span attribute, a different status code) happens once.
+        def _quarantine(
+            *,
+            parsed_payload: object,
+            error: str,
+            status_msg: str,
+        ) -> None:
             _write_quarantine(
                 quarantine_root=quarantine_root,
                 worker=worker,
                 prompt_version=prompt_version,
                 doc_id=doc_id,
-                parsed={
+                parsed=parsed_payload,
+                error=error,
+            )
+            span.set_attribute("extract.outcome", "quarantined")
+            span.set_status(Status(StatusCode.ERROR, _truncate(status_msg)))
+
+        # Forced `tool_choice={'type':'tool','name':'record_extraction'}`
+        # guarantees the model emits one matching tool_use block alongside
+        # any optional thinking blocks; `extract_tool_use_input` filters
+        # by tool name. Quarantine if the contract is violated rather
+        # than silently coercing a partial answer. The SDK enforces
+        # `tool_use.input: dict` at parse-time, so an emitted block is
+        # always a dict here — no defensive isinstance check needed.
+        parsed = extract_tool_use_input(response)
+        if parsed is None:
+            _quarantine(
+                parsed_payload={
                     "raw_response_block_types": [
                         b.type for b in response.content
                     ]
                 },
-                error=(
-                    f"no {RECORD_EXTRACTION_TOOL_NAME} tool_use block in "
-                    "model response"
-                ),
-            )
-            span.set_attribute("extract.outcome", "quarantined")
-            span.set_status(
-                Status(StatusCode.ERROR, "no tool_use block")
-            )
-            return None
-        parsed = tool_use_blocks[0].input
-        if not isinstance(parsed, dict):
-            _write_quarantine(
-                quarantine_root=quarantine_root,
-                worker=worker,
-                prompt_version=prompt_version,
-                doc_id=doc_id,
-                parsed={"raw": parsed},
-                error=(
-                    f"tool_use.input is not a dict (got "
-                    f"{type(parsed).__name__})"
-                ),
-            )
-            span.set_attribute("extract.outcome", "quarantined")
-            span.set_status(
-                Status(StatusCode.ERROR, "tool_use.input not dict")
+                error="no record_extraction tool_use block in model response",
+                status_msg="no tool_use block",
             )
             return None
 
-        parsed_snapshot = copy.deepcopy(parsed)
+        # `_resolve_spans` deep-copies its input internally and only
+        # mutates the copy; the original `parsed` is preserved for the
+        # quarantine snapshot below without an extra copy here.
         resolved, problem_quotes = _resolve_spans(parsed, raw_doc)
         if problem_quotes:
-            _write_quarantine(
-                quarantine_root=quarantine_root,
-                worker=worker,
-                prompt_version=prompt_version,
-                doc_id=doc_id,
-                parsed=parsed_snapshot,
+            _quarantine(
+                parsed_payload=parsed,
                 error=f"source_quote(s) unresolvable in raw_doc: {problem_quotes!r}",
+                status_msg="source_quote(s) unresolvable",
             )
-            span.set_attribute("extract.outcome", "quarantined")
-            span.set_status(Status(StatusCode.ERROR, "source_quote(s) unresolvable"))
             return None
 
         try:
             output = output_model.model_validate(resolved)
         except ValidationError as exc:
-            _write_quarantine(
-                quarantine_root=quarantine_root,
-                worker=worker,
-                prompt_version=prompt_version,
-                doc_id=doc_id,
-                parsed=parsed_snapshot,
+            _quarantine(
+                parsed_payload=parsed,
                 error=f"schema validation failed: {exc}",
-            )
-            span.set_attribute("extract.outcome", "quarantined")
-            span.set_status(
-                Status(StatusCode.ERROR, _truncate(f"schema validation failed: {exc}"))
+                status_msg=f"schema validation failed: {exc}",
             )
             return None
 
@@ -360,10 +342,12 @@ def run_single_shot_extraction[OutputT: BaseModel](
             worker=worker,
             prompt_version=prompt_version,
             quarantine_root=quarantine_root,
-            # Pass the pre-_resolve_spans snapshot so a downstream
+            # Pass the original tool_use.input so a downstream
             # CitationMismatch's QuarantineRecord shows what the model
             # actually returned rather than the worker's snapped quotes.
-            original_output=parsed_snapshot,
+            # `_resolve_spans` only mutated its own deep copy, so
+            # `parsed` is identical to the SDK's view of the response.
+            original_output=parsed,
         )
         if validated is None:
             span.set_attribute("extract.outcome", "quarantined")

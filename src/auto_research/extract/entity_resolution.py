@@ -56,8 +56,8 @@ from opentelemetry.trace import Status, StatusCode
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from auto_research.extract.client import (
-    RECORD_EXTRACTION_TOOL_NAME,
     ExtractionFn,
+    extract_tool_use_input,
     make_extraction_client,
 )
 from auto_research.extract.embeddings import EmbeddingAdapter
@@ -337,15 +337,14 @@ class EntityResolver:
                     considered=candidates,
                 )
 
-            # Forced `tool_choice` should guarantee a tool_use block;
-            # treat its absence as a "no answer" outcome with the same
-            # `unknown` collapse as a malformed response.
-            tool_use_blocks = [
-                b
-                for b in response.content
-                if b.type == "tool_use" and b.name == RECORD_EXTRACTION_TOOL_NAME
-            ]
-            if not tool_use_blocks:
+            # Forced `tool_choice` should guarantee a record_extraction
+            # tool_use block; treat its absence as a "no answer" outcome
+            # with the same `unknown` collapse as a malformed response.
+            # The SDK enforces `tool_use.input: dict` at parse-time, so
+            # `extract_tool_use_input` returns either a real dict or
+            # None — no separate isinstance check needed.
+            tool_input = extract_tool_use_input(response)
+            if tool_input is None:
                 span.set_attribute("extract.outcome", "no_tool_use_block")
                 span.set_status(
                     Status(
@@ -356,22 +355,8 @@ class EntityResolver:
                 return self._build_unknown(
                     reasoning=(
                         "disambiguator response contained no "
-                        f"{RECORD_EXTRACTION_TOOL_NAME} tool_use block "
+                        "record_extraction tool_use block "
                         "(likely a refusal)"
-                    ),
-                    considered=candidates,
-                )
-
-            tool_input = tool_use_blocks[0].input
-            if not isinstance(tool_input, dict):
-                span.set_attribute("extract.outcome", "malformed_disambiguator")
-                span.set_status(
-                    Status(StatusCode.ERROR, "tool_use.input is not a dict")
-                )
-                return self._build_unknown(
-                    reasoning=(
-                        "disambiguator tool_use.input was not a JSON object "
-                        f"(got {type(tool_input).__name__}): {tool_input!r}"
                     ),
                     considered=candidates,
                 )

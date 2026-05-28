@@ -9,13 +9,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
-from unittest.mock import MagicMock
-
-import anthropic
-from anthropic.types import Message, ToolUseBlock, Usage
+from typing import Any
 
 from auto_research.extract.workers.transcript import extract_transcript
+from tests.unit.conftest import make_fake_anthropic_client as _fake_client
 
 _SAMPLE_TRANSCRIPT = (
     "Operator: Welcome to ACME's fiscal 2026 first-quarter earnings call.\n"
@@ -23,41 +20,6 @@ _SAMPLE_TRANSCRIPT = (
     "Q&A Analyst: What about FY26 gross margins?\n"
     "CFO: we can't comment on that beyond what's in our guidance.\n"
 )
-
-
-def _make_tool_response(tool_input: Any) -> Message:
-    return Message(
-        id="msg_test",
-        content=[
-            ToolUseBlock(
-                id="toolu_test",
-                input=tool_input,
-                name="record_extraction",
-                type="tool_use",
-            )
-        ],
-        model="claude-sonnet-4-6",
-        role="assistant",
-        stop_reason="tool_use",
-        stop_sequence=None,
-        type="message",
-        usage=Usage(
-            input_tokens=10,
-            output_tokens=10,
-            cache_creation=None,
-            cache_creation_input_tokens=None,
-            cache_read_input_tokens=None,
-            inference_geo=None,
-            server_tool_use=None,
-            service_tier="standard",
-        ),
-    )
-
-
-def _fake_client(tool_input: Any) -> anthropic.Anthropic:
-    fake = MagicMock()
-    fake.messages.create.return_value = _make_tool_response(tool_input)
-    return cast(anthropic.Anthropic, fake)
 
 
 def _valid_output() -> dict[str, Any]:

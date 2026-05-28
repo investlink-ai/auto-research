@@ -15,12 +15,9 @@ from __future__ import annotations
 import json
 from datetime import date
 from pathlib import Path
-from typing import Any, cast
-from unittest.mock import MagicMock
+from typing import Any
 
-import anthropic
 import pytest
-from anthropic.types import Message, ToolUseBlock, Usage
 
 from auto_research.extract.chunking import (
     ChildChunk,
@@ -38,58 +35,18 @@ from auto_research.extract.workers.ten_k import (
     _render_table_html_to_text,
     extract_ten_k,
 )
+from tests.unit.conftest import (
+    make_fake_anthropic_client as _fake_client_single,
+)
+from tests.unit.conftest import (
+    make_fake_anthropic_client_sequence as _fake_client_sequence,
+)
 
 _SAMPLE_10K = (
     "Item 1A. Risk Factors. Our supply chain depends on TSMC.\n"
     "Item 7. Management's Discussion and Analysis. "
     "We expect cautious growth in fiscal 2026.\n"
 )
-
-
-def _make_tool_response(tool_input: Any) -> Message:
-    return Message(
-        id="msg_test",
-        content=[
-            ToolUseBlock(
-                id="toolu_test",
-                input=tool_input,
-                name="record_extraction",
-                type="tool_use",
-            )
-        ],
-        model="claude-sonnet-4-6",
-        role="assistant",
-        stop_reason="tool_use",
-        stop_sequence=None,
-        type="message",
-        usage=Usage(
-            input_tokens=10,
-            output_tokens=10,
-            cache_creation=None,
-            cache_creation_input_tokens=None,
-            cache_read_input_tokens=None,
-            inference_geo=None,
-            server_tool_use=None,
-            service_tier="standard",
-        ),
-    )
-
-
-def _fake_client_single(tool_input: Any) -> anthropic.Anthropic:
-    fake = MagicMock()
-    fake.messages.create.return_value = _make_tool_response(tool_input)
-    return cast(anthropic.Anthropic, fake)
-
-
-def _fake_client_sequence(tool_inputs: list[Any]) -> anthropic.Anthropic:
-    """A client that returns a different response on each call.
-
-    Used for the multi-call paths (RAG: one call per narrative field;
-    Item 8: narrative + financials).
-    """
-    fake = MagicMock()
-    fake.messages.create.side_effect = [_make_tool_response(t) for t in tool_inputs]
-    return cast(anthropic.Anthropic, fake)
 
 
 def _valid_narrative() -> dict[str, Any]:

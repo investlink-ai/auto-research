@@ -148,7 +148,11 @@ def test_extended_thinking_auto_enabled_on_sonnet() -> None:
     """Sonnet-tier extraction (cross-doc reasoning per §7.3) gets extended
     thinking automatically — the worker doesn't have to remember it.
     Haiku-tier templated extraction does NOT get thinking (no quality
-    benefit, pure latency cost)."""
+    benefit, pure latency cost). Also pins that `tools` + `tool_choice`
+    are present alongside `thinking` so a future refactor that drops
+    one when the other is set surfaces here instead of silently
+    breaking Sonnet extraction.
+    """
     fake = _FakeAnthropicClient(
         response_factory=lambda **kw: _make_message(model=kw["model"]),
     )
@@ -164,6 +168,14 @@ def test_extended_thinking_auto_enabled_on_sonnet() -> None:
     assert "thinking" in sonnet_call
     assert sonnet_call["thinking"]["type"] == "enabled"
     assert sonnet_call["thinking"]["budget_tokens"] == 2048
+    # thinking + tool_use compose together — both must be present on
+    # the Sonnet path.
+    assert "tools" in sonnet_call
+    assert sonnet_call["tools"][0]["name"] == RECORD_EXTRACTION_TOOL_NAME
+    assert sonnet_call["tool_choice"] == {
+        "type": "tool",
+        "name": RECORD_EXTRACTION_TOOL_NAME,
+    }
 
 
 def test_extended_thinking_skipped_on_haiku() -> None:
@@ -200,16 +212,16 @@ def test_call_sends_tool_use_payload_from_output_schema() -> None:
         output_schema=_TinyOutput,
     )
     call = fake.messages.calls[0]
-    assert call["tools"] == [
-        {
-            "name": RECORD_EXTRACTION_TOOL_NAME,
-            "description": (
-                "Emit the structured extraction result. Call this tool "
-                "exactly once; its input is the full output object."
-            ),
-            "input_schema": _TinyOutput.model_json_schema(),
-        }
-    ]
+    # Pin the load-bearing parts: the tool name (matched by worker
+    # parsers) and the input_schema (server-side validation contract).
+    # Description is a human-facing string — a `description in tool`
+    # check keeps it intentional without making prompt-engineering
+    # edits churn this test.
+    assert len(call["tools"]) == 1
+    tool = call["tools"][0]
+    assert tool["name"] == RECORD_EXTRACTION_TOOL_NAME
+    assert tool["input_schema"] == _TinyOutput.model_json_schema()
+    assert "description" in tool and isinstance(tool["description"], str) and tool["description"]
     assert call["tool_choice"] == {
         "type": "tool",
         "name": RECORD_EXTRACTION_TOOL_NAME,

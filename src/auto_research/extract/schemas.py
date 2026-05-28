@@ -55,6 +55,15 @@ from auto_research.extract.enums import (
 _FROZEN_STRICT = ConfigDict(frozen=True, extra="forbid")
 
 
+# Categorical confidence label used on every LLM-emitted confidence
+# field. Float confidence is uncalibrated noise; the categorical form
+# lets a downstream consumer threshold cleanly. Reuse this alias on
+# any new claim-bearing schema so the three values stay aligned across
+# the codebase — a `Literal['high','med','low']` typo in a new schema
+# would diverge silently if the alias weren't shared.
+ConfidenceLevel = Literal["high", "medium", "low"]
+
+
 # --- Base types -------------------------------------------------------------
 
 
@@ -98,7 +107,7 @@ class Claim(BaseModel):
     model_config = _FROZEN_STRICT
 
     citation: Citation
-    confidence: Literal["high", "medium", "low"]
+    confidence: ConfidenceLevel
 
 
 # --- Subordinate citation-bearing types -------------------------------------
@@ -181,7 +190,7 @@ class FinancialLineItem(BaseModel):
 
     value_usd: float
     citation: Citation
-    confidence: Literal["high", "medium", "low"]
+    confidence: ConfidenceLevel
 
 
 class TenKFinancials(BaseModel):
@@ -287,6 +296,7 @@ class SFilingOutput(BaseModel):
 __all__ = [
     "Citation",
     "Claim",
+    "ConfidenceLevel",
     "CustomerMention",
     "EightKOutput",
     "FinancialLineItem",

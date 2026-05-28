@@ -24,10 +24,10 @@ from unittest.mock import MagicMock
 
 import anthropic
 import pytest
-from anthropic.types import Message, ToolUseBlock, Usage
 
 from auto_research.extract.workers.s_filings import extract_s_filing
 from tests._otel_helpers import SpanRecorder
+from tests.unit.conftest import make_fake_anthropic_client as _fake_client
 
 # Two-line raw doc so we exercise whitespace-flexible matching across a
 # newline that the LLM would naturally collapse when quoting.
@@ -36,35 +36,6 @@ _SAMPLE_S3 = (
     "will be used for general corporate purposes and to fund\n"
     "the Phase II clinical trial."
 )
-
-
-def _make_tool_response(tool_input: Any) -> Message:
-    return Message(
-        id="msg_test",
-        content=[
-            ToolUseBlock(
-                id="toolu_test",
-                input=tool_input,
-                name="record_extraction",
-                type="tool_use",
-            )
-        ],
-        model="claude-haiku-4-5",
-        role="assistant",
-        stop_reason="tool_use",
-        stop_sequence=None,
-        type="message",
-        usage=Usage(
-            input_tokens=100,
-            output_tokens=50,
-            cache_creation=None,
-            cache_creation_input_tokens=None,
-            cache_read_input_tokens=None,
-            inference_geo=None,
-            server_tool_use=None,
-            service_tier="standard",
-        ),
-    )
 
 
 def _valid_output() -> dict[str, Any]:
@@ -83,12 +54,6 @@ def _valid_output() -> dict[str, Any]:
         "capital_raise_language": [],
         "use_of_proceeds": [],
     }
-
-
-def _fake_client(tool_input: Any) -> anthropic.Anthropic:
-    fake = MagicMock()
-    fake.messages.create.return_value = _make_tool_response(tool_input)
-    return cast(anthropic.Anthropic, fake)
 
 
 def test_extract_s_filing_returns_validated_output(tmp_path: Path) -> None:

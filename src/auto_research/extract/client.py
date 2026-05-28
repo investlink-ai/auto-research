@@ -73,6 +73,27 @@ from auto_research.extract._caching import cached_system_block
 # worker name through.
 RECORD_EXTRACTION_TOOL_NAME: Final[str] = "record_extraction"
 
+
+def extract_tool_use_input(message: Message) -> dict[str, Any] | None:
+    """Return the first `record_extraction` tool_use block's `.input`.
+
+    Returns `None` when the response carries no matching tool_use block
+    (e.g., model refused, or the call ran in free-form text mode).
+    Callers route the `None` outcome to their own quarantine /
+    fallback path. Co-located with the tool name + tool_choice setup
+    in `_call` so the producer and consumer of the tool_use envelope
+    live in one module.
+
+    The SDK's `ToolUseBlock.input` is typed and validated as a `dict`
+    at parse-time — non-dict inputs are rejected by the SDK before
+    they reach this helper, so the return type is a real `dict` (not
+    `dict | object`).
+    """
+    for block in message.content:
+        if block.type == "tool_use" and block.name == RECORD_EXTRACTION_TOOL_NAME:
+            return block.input
+    return None
+
 # Token budget for extended thinking on Sonnet/Opus routes. 2048 is the
 # Anthropic-documented sweet spot for structured-extraction tasks where
 # the model benefits from reasoning before emitting JSON but doesn't
@@ -149,6 +170,21 @@ def make_extraction_client(
     """
     sdk = anthropic_client if anthropic_client is not None else anthropic.Anthropic()
 
+    # Per-client memo of `output_schema.model_json_schema()`. Pydantic v2
+    # does NOT cache that call (each invocation builds a fresh dict, ~57μs
+    # per call locally measured), and the same 4-7 schemas are reused
+    # across thousands of extraction calls during a backfill. Cache by
+    # class identity so a re-defined schema (same name, new fields)
+    # doesn't return a stale entry.
+    _schema_cache: dict[int, dict[str, Any]] = {}
+
+    def _tool_input_schema(output_schema: type[BaseModel]) -> dict[str, Any]:
+        cached = _schema_cache.get(id(output_schema))
+        if cached is None:
+            cached = output_schema.model_json_schema()
+            _schema_cache[id(output_schema)] = cached
+        return cached
+
     @reliable_agent_node(
         failures=failures,
         usd=usd_cap,
@@ -201,7 +237,7 @@ def make_extraction_client(
                     "Emit the structured extraction result. Call this tool "
                     "exactly once; its input is the full output object."
                 ),
-                "input_schema": output_schema.model_json_schema(),
+                "input_schema": _tool_input_schema(output_schema),
             }
             tool_choice: ToolChoiceToolParam = {
                 "type": "tool",
@@ -260,5 +296,6 @@ def make_extraction_client(
 __all__ = [
     "RECORD_EXTRACTION_TOOL_NAME",
     "ExtractionFn",
+    "extract_tool_use_input",
     "make_extraction_client",
 ]

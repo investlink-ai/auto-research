@@ -11,7 +11,6 @@ from unittest.mock import MagicMock
 
 import anthropic
 import pytest
-from anthropic.types import Message, ToolUseBlock, Usage
 
 from auto_research.extract.enums import EventClassification
 from auto_research.extract.schemas import EightKOutput
@@ -21,6 +20,7 @@ from auto_research.extract.workers._common import (
     _write_quarantine,
     run_single_shot_extraction,
 )
+from tests.unit.conftest import make_fake_anthropic_client as _fake_client
 
 
 def test_quote_to_flex_regex_collapses_whitespace() -> None:
@@ -145,45 +145,6 @@ def test_write_quarantine_writes_record(tmp_path: Path) -> None:
     assert record["doc_id"] == "doc-1"
     assert record["error"] == "bad json"
     assert record["output"] == {"raw": "thing"}
-
-
-def _make_tool_response(tool_input: Any, *, tool_name: str = "record_extraction") -> Message:
-    return Message(
-        id="msg_test",
-        content=[
-            ToolUseBlock(
-                id="toolu_test",
-                input=tool_input,
-                name=tool_name,
-                type="tool_use",
-            )
-        ],
-        model="claude-haiku-4-5",
-        role="assistant",
-        stop_reason="tool_use",
-        stop_sequence=None,
-        type="message",
-        usage=Usage(
-            input_tokens=10,
-            output_tokens=10,
-            cache_creation=None,
-            cache_creation_input_tokens=None,
-            cache_read_input_tokens=None,
-            inference_geo=None,
-            server_tool_use=None,
-            service_tier="standard",
-        ),
-    )
-
-
-def _fake_client(
-    tool_input: Any, *, tool_name: str = "record_extraction"
-) -> anthropic.Anthropic:
-    fake = MagicMock()
-    fake.messages.create.return_value = _make_tool_response(
-        tool_input, tool_name=tool_name
-    )
-    return cast(anthropic.Anthropic, fake)
 
 
 def test_run_single_shot_extraction_happy_path(tmp_path: Path) -> None:

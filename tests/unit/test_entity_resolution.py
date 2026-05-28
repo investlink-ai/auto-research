@@ -7,12 +7,12 @@ keeps each test under a second.
 
 from __future__ import annotations
 
-from typing import Any, Literal, cast
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import anthropic
 import pytest
-from anthropic.types import Message, ToolUseBlock, Usage
+from anthropic.types import Message
 from pydantic import ValidationError
 
 from auto_research.extract import embeddings as embeddings_module
@@ -23,6 +23,7 @@ from auto_research.extract.entity_resolution import (
     EntityResolver,
 )
 from auto_research.universe import TickerEntry
+from tests.unit.conftest import make_tool_use_message as _make_tool_response
 
 
 def _entry(ticker: str, aliases: tuple[str, ...]) -> TickerEntry:
@@ -39,45 +40,6 @@ def _fixture_universe() -> tuple[TickerEntry, ...]:
         _entry("NVDA", ("NVIDIA", "Nvidia", "NVIDIA Corporation")),
         _entry("AMD", ("AMD", "Advanced Micro Devices")),
         _entry("TSM", ("TSMC", "Taiwan Semiconductor")),
-    )
-
-
-_StopReason = Literal[
-    "end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal"
-]
-
-
-def _make_tool_response(
-    *,
-    tool_input: Any,
-    stop_reason: _StopReason = "end_turn",
-    tool_name: str = "record_extraction",
-) -> Message:
-    return Message(
-        id="msg_test",
-        content=[
-            ToolUseBlock(
-                id="toolu_test",
-                input=tool_input,
-                name=tool_name,
-                type="tool_use",
-            )
-        ],
-        model="claude-haiku-4-5",
-        role="assistant",
-        stop_reason=stop_reason,
-        stop_sequence=None,
-        type="message",
-        usage=Usage(
-            input_tokens=100,
-            output_tokens=50,
-            cache_creation=None,
-            cache_creation_input_tokens=None,
-            cache_read_input_tokens=None,
-            inference_geo=None,
-            server_tool_use=None,
-            service_tier="standard",
-        ),
     )
 
 

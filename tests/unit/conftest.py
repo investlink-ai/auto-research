@@ -25,16 +25,24 @@ working-tree `data/quarantine/`.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Literal, cast
+from unittest.mock import MagicMock
 
+import anthropic
 import pytest
 from anthropic.types import Message, ToolUseBlock, Usage
+
+_StopReason = Literal[
+    "end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal"
+]
 
 
 def make_tool_use_message(
     *,
-    tool_input: dict,
+    tool_input: dict[str, Any],
     tool_name: str = "record_extraction",
     model: str = "claude-haiku-4-5-20251001",
+    stop_reason: _StopReason = "tool_use",
     input_tokens: int = 100,
     output_tokens: int = 50,
     cache_creation_input_tokens: int | None = None,
@@ -44,7 +52,9 @@ def make_tool_use_message(
 
     Mirrors the on-wire shape every extraction response carries: one
     tool_use block whose `.input` is the parsed dict — no text +
-    json.loads round-trip.
+    json.loads round-trip. `stop_reason` defaults to `tool_use` to
+    match the production shape; pass `max_tokens` to exercise the
+    truncation guard, or `refusal` for the refusal-collapse path.
     """
     return Message(
         id="msg_test",
@@ -59,7 +69,7 @@ def make_tool_use_message(
                 input=tool_input,
             )
         ],
-        stop_reason="tool_use",
+        stop_reason=stop_reason,
         stop_sequence=None,
         usage=Usage(
             input_tokens=input_tokens,
@@ -68,6 +78,42 @@ def make_tool_use_message(
             cache_read_input_tokens=cache_read_input_tokens,
         ),
     )
+
+
+def make_fake_anthropic_client(
+    tool_input: Any,
+    *,
+    tool_name: str = "record_extraction",
+    stop_reason: _StopReason = "tool_use",
+) -> anthropic.Anthropic:
+    """Wrap `make_tool_use_message` in a MagicMock-backed SDK stub.
+
+    Workers under test inject this via `anthropic_client=...`. Returns
+    a fake whose `messages.create(...)` yields the configured
+    tool_use response on every call. For sequence-of-responses use
+    `make_fake_anthropic_client_sequence`.
+    """
+    fake = MagicMock()
+    fake.messages.create.return_value = make_tool_use_message(
+        tool_input=tool_input, tool_name=tool_name, stop_reason=stop_reason
+    )
+    return cast(anthropic.Anthropic, fake)
+
+
+def make_fake_anthropic_client_sequence(
+    tool_inputs: list[Any],
+    *,
+    tool_name: str = "record_extraction",
+) -> anthropic.Anthropic:
+    """Fake whose `messages.create(...)` returns a different tool_use
+    response per call (used by multi-call workers like the 10-K RAG
+    path and the post-PR-B transcript binary split).
+    """
+    fake = MagicMock()
+    fake.messages.create.side_effect = [
+        make_tool_use_message(tool_input=t, tool_name=tool_name) for t in tool_inputs
+    ]
+    return cast(anthropic.Anthropic, fake)
 
 
 @pytest.fixture(scope="session", autouse=True)
