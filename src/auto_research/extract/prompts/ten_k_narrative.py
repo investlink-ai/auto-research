@@ -5,11 +5,9 @@ SINGLE_SHOT_TOKEN_CUTOFF`) AND the RAG branch. In the RAG branch the
 worker stuffs the top-5 reranked parents per field into the user-content
 turn; the prompt itself does not change between branches.
 
-The prompt covers ONLY narrative TenKOutput fields. `financials` (Item 8)
-is extracted by a separate worker path from `ParentChunk.table_html` and
-has its own prompt + schema (`ten_k_financials.py`). `language_novelty_
-score` is NOT requested in the prompt — it is computed downstream from
-the supplier/customer/risk-factor text vs the prior year's extraction.
+The prompt covers narrative TenKOutput fields. `language_novelty_score`
+is NOT requested in the prompt — it is computed downstream from the
+supplier/customer/risk-factor text vs the prior year's extraction.
 
 Version-pinned per INV-6.
 """
@@ -69,8 +67,8 @@ RiskFactorDelta is `{"change_type": "...", "text": "...",
 "citation": {"source_quote": "..."}}`. No other fields are allowed
 inside any of these objects.
 
-Example of a fully-formed narrative TenKOutput (financials and
-language_novelty_score omitted — see Constraints):
+Example of a fully-formed narrative TenKOutput (language_novelty_score
+omitted — see Constraints):
 
   {
     "cik": "0001045810",
@@ -111,7 +109,6 @@ Constraints (apply to every field unless noted):
 - Choose quotes long and specific enough to be unique unless
   intentionally emitting per-occurrence multiple citations.
 - DO NOT include `source_span`; character offsets are computed in code.
-- DO NOT populate `financials` (Item 8 is handled by a separate prompt).
 - DO NOT populate `language_novelty_score` (computed downstream; the
   schema defaults it to 0.0).
 - DO NOT invent quotes. If a field has no support, return an empty list.

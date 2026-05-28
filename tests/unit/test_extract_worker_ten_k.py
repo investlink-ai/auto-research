@@ -1,10 +1,8 @@
 """Unit tests for the 10-K extraction worker.
 
-Hermetic — the Anthropic SDK is mocked. Three branch-coverage tests
-satisfy AC bullet 3 ("Hybrid extraction policy: single-shot for
-< SINGLE_SHOT_TOKEN_CUTOFF tokens, RAG path for ≥") plus AC bullet 4
-("10-K Item 8 financials extracted from ParentChunk.table_html via
-typed Pydantic schema").
+Hermetic — the Anthropic SDK is mocked. Branch-coverage tests satisfy
+AC bullet 3 ("Hybrid extraction policy: single-shot for
+< SINGLE_SHOT_TOKEN_CUTOFF tokens, RAG path for ≥").
 
 The RAG path uses an injected `retrieve_fn` so the test doesn't have
 to stand up the full hybrid_retrieve + rerank stack.
@@ -20,21 +18,11 @@ from typing import Any
 import pytest
 
 from auto_research.extract.chunking import (
-    ChildChunk,
     ChunkMetadata,
     ChunkSet,
     ParentChunk,
 )
-from auto_research.extract.schemas import (
-    Citation,
-    FinancialLineItem,
-    TenKFinancials,
-)
-from auto_research.extract.workers.ten_k import (
-    _merge_financials,
-    _render_table_html_to_text,
-    extract_ten_k,
-)
+from auto_research.extract.workers.ten_k import extract_ten_k
 from tests.unit.conftest import (
     make_fake_anthropic_client as _fake_client_single,
 )
@@ -74,60 +62,9 @@ def _valid_narrative() -> dict[str, Any]:
     }
 
 
-def _valid_financials() -> dict[str, Any]:
-    return {
-        "revenue": {
-            "value_usd": 1234567.0,
-            "citation": {"source_quote": "Revenue"},
-            "confidence": "high",
-        },
-        "gross_profit": None,
-        "operating_income": None,
-        "net_income": {
-            "value_usd": 456789.0,
-            "citation": {"source_quote": "Net income"},
-            "confidence": "high",
-        },
-        "total_assets": None,
-        "total_liabilities": None,
-        "stockholders_equity": None,
-        "cash_from_operations": None,
-        "cash_from_investing": None,
-        "cash_from_financing": None,
-    }
-
-
-def _chunkset_with_table(table_html: str) -> ChunkSet:
-    meta = ChunkMetadata(
-        ticker="ACME",
-        filing_date=date(2026, 1, 30),
-        fiscal_period="FY2025",
-        doc_type="10-K",
-        doc_id="10k-table-001",
-    )
-    parent = ParentChunk(
-        text=table_html,
-        section_name="item_8",
-        char_span=(0, len(table_html)),
-        token_count=10,
-        table_html=table_html,
-        metadata=meta,
-    )
-    child = ChildChunk(
-        text=table_html,
-        char_span=(0, len(table_html)),
-        token_count=10,
-        parent_id="x",
-        section_name="item_8",
-        from_table=True,
-        metadata=meta,
-    )
-    return ChunkSet(parents=(parent,), children=(child,))
-
-
 def _chunkset_narrative_only() -> ChunkSet:
     """A chunkset whose parents have NO table_html — exercises the
-    'RAG narrative branch, no Item 8 financials' code path."""
+    RAG narrative branch code path."""
     meta = ChunkMetadata(
         ticker="ACME",
         filing_date=date(2026, 1, 30),
@@ -154,8 +91,7 @@ def _chunkset_narrative_only() -> ChunkSet:
 
 
 def test_ten_k_single_shot_branch_no_chunkset(tmp_path: Path) -> None:
-    """Short raw doc, no chunkset → single-shot. Exactly one LLM call;
-    financials remains None."""
+    """Short raw doc, no chunkset → single-shot. Exactly one LLM call."""
     client = _fake_client_single(_valid_narrative())
     out = extract_ten_k(
         raw_doc=_SAMPLE_10K,
@@ -165,7 +101,6 @@ def test_ten_k_single_shot_branch_no_chunkset(tmp_path: Path) -> None:
     )
     assert out is not None
     assert out.fiscal_period_end == date(2025, 12, 31)
-    assert out.financials is None
     assert out.supplier_mentions[0].mention_text == "TSMC"
     assert client.messages.create.call_count == 1  # type: ignore[attr-defined]
 
@@ -175,7 +110,7 @@ def test_ten_k_single_shot_branch_short_doc_with_narrative_chunkset(
 ) -> None:
     """Short raw doc + chunkset (no table parents) → still single-shot
     narrative (chunkset alone does NOT trigger the RAG path; the size
-    threshold does). Item 8 doesn't fire because there's no table parent."""
+    threshold does)."""
     client = _fake_client_single(_valid_narrative())
     out = extract_ten_k(
         raw_doc=_SAMPLE_10K,
@@ -185,7 +120,6 @@ def test_ten_k_single_shot_branch_short_doc_with_narrative_chunkset(
         chunkset=_chunkset_narrative_only(),
     )
     assert out is not None
-    assert out.financials is None
     assert client.messages.create.call_count == 1  # type: ignore[attr-defined]
 
 
@@ -334,8 +268,6 @@ def test_ten_k_rag_branch_fires_above_cutoff(tmp_path: Path) -> None:
     assert out is not None
     assert len(queries_seen) == 5  # one query per narrative field
     assert client.messages.create.call_count == 5  # type: ignore[attr-defined]
-    # No table parents → Item 8 doesn't fire.
-    assert out.financials is None
 
 
 def test_ten_k_rag_branch_requires_retrieve_fn(tmp_path: Path) -> None:
@@ -491,225 +423,6 @@ def test_ten_k_long_doc_without_chunkset_raises(tmp_path: Path) -> None:
         )
 
 
-# --- Item 8 path ------------------------------------------------------------
-
-
-def test_ten_k_item8_financials_extracted_from_table_html(tmp_path: Path) -> None:
-    """Chunkset with a table parent → two LLM calls: narrative + Item 8
-    financials. The resulting TenKOutput carries the financials data."""
-    table_html = (
-        "<table>"
-        "<tr><td>Revenue</td><td>$1,234,567</td></tr>"
-        "<tr><td>Net income</td><td>$456,789</td></tr>"
-        "</table>"
-    )
-    chunkset = _chunkset_with_table(table_html)
-    client = _fake_client_sequence(
-        [_valid_narrative(), _valid_financials()]
-    )
-    out = extract_ten_k(
-        raw_doc=_SAMPLE_10K,
-        doc_id="10k-table-001",
-        cache_root=tmp_path,
-        anthropic_client=client,
-        chunkset=chunkset,
-    )
-    assert out is not None
-    assert out.financials is not None
-    assert out.financials.revenue is not None
-    assert out.financials.revenue.value_usd == 1234567.0
-    assert out.financials.revenue.confidence == "high"
-    assert out.financials.gross_profit is None
-    assert out.financials.net_income is not None
-    assert client.messages.create.call_count == 2  # type: ignore[attr-defined]
-
-
-def test_render_table_html_strips_tags_and_bridges_cells() -> None:
-    """The LLM-prompted quote 'Total revenue $1,234' cannot bridge
-    `</td><td>` in raw HTML, but does in rendered text — so the worker
-    MUST render before passing to the LLM."""
-    import re
-
-    from auto_research.extract.workers._common import _quote_to_flex_regex
-
-    html = "<table><tr><td>Total revenue</td><td>$1,234</td></tr></table>"
-    rendered = _render_table_html_to_text(html)
-    assert "Total revenue" in rendered
-    assert "$1,234" in rendered
-    assert "<td>" not in rendered
-    pattern = _quote_to_flex_regex("Total revenue $1,234")
-    assert re.search(pattern, rendered) is not None
-
-
-def test_merge_financials_takes_first_non_none_per_field() -> None:
-    """Income statement provides revenue/net_income; balance sheet
-    provides total_assets; cash flow provides cash_from_*. First
-    non-None wins per field (document order ensures primary statements
-    win over later notes-table sub-aggregations)."""
-
-    def _line(value: float) -> FinancialLineItem:
-        return FinancialLineItem(
-            value_usd=value,
-            citation=Citation(source_span=(0, 4), source_quote="hell"),
-            confidence="high",
-        )
-
-    income = TenKFinancials.model_validate(
-        {
-            "revenue": _line(100.0).model_dump(),
-            "gross_profit": None,
-            "operating_income": None,
-            "net_income": _line(20.0).model_dump(),
-            "total_assets": None,
-            "total_liabilities": None,
-            "stockholders_equity": None,
-            "cash_from_operations": None,
-            "cash_from_investing": None,
-            "cash_from_financing": None,
-        }
-    )
-    balance = TenKFinancials.model_validate(
-        {
-            "revenue": None,
-            "gross_profit": None,
-            "operating_income": None,
-            "net_income": None,
-            "total_assets": _line(500.0).model_dump(),
-            "total_liabilities": _line(300.0).model_dump(),
-            "stockholders_equity": _line(200.0).model_dump(),
-            "cash_from_operations": None,
-            "cash_from_investing": None,
-            "cash_from_financing": None,
-        }
-    )
-    cashflow = TenKFinancials.model_validate(
-        {
-            "revenue": None,
-            "gross_profit": None,
-            "operating_income": None,
-            "net_income": None,
-            "total_assets": None,
-            "total_liabilities": None,
-            "stockholders_equity": None,
-            "cash_from_operations": _line(50.0).model_dump(),
-            "cash_from_investing": _line(-10.0).model_dump(),
-            "cash_from_financing": _line(-5.0).model_dump(),
-        }
-    )
-    merged = _merge_financials([income, balance, cashflow])
-    assert merged.revenue is not None and merged.revenue.value_usd == 100.0
-    assert merged.net_income is not None and merged.net_income.value_usd == 20.0
-    assert merged.total_assets is not None and merged.total_assets.value_usd == 500.0
-    assert merged.cash_from_operations is not None
-    assert merged.cash_from_operations.value_usd == 50.0
-
-
-def test_ten_k_item8_iterates_all_table_parents(tmp_path: Path) -> None:
-    """Real 10-K Item 8 emits income statement, balance sheet, cash flow
-    as separate <table> parents. Worker MUST run the financials prompt
-    against each and merge — taking only [0] silently drops balance
-    sheet + cash-flow line items."""
-    meta = ChunkMetadata(
-        ticker="ACME",
-        filing_date=date(2026, 1, 30),
-        fiscal_period="FY2025",
-        doc_type="10-K",
-        doc_id="10k-multi-table",
-    )
-    income_html = "<table><tr><td>Revenue</td><td>$100</td></tr></table>"
-    balance_html = (
-        "<table><tr><td>Total assets</td><td>$500</td></tr></table>"
-    )
-    parents = (
-        ParentChunk(
-            text=income_html,
-            section_name="item_8",
-            char_span=(0, len(income_html)),
-            token_count=10,
-            table_html=income_html,
-            metadata=meta,
-        ),
-        ParentChunk(
-            text=balance_html,
-            section_name="item_8",
-            char_span=(0, len(balance_html)),
-            token_count=10,
-            table_html=balance_html,
-            metadata=meta,
-        ),
-    )
-    chunkset = ChunkSet(parents=parents, children=())
-
-    income_response = {
-        "revenue": {
-            "value_usd": 100.0,
-            "citation": {"source_quote": "Revenue $100"},
-            "confidence": "high",
-        },
-        "gross_profit": None,
-        "operating_income": None,
-        "net_income": None,
-        "total_assets": None,
-        "total_liabilities": None,
-        "stockholders_equity": None,
-        "cash_from_operations": None,
-        "cash_from_investing": None,
-        "cash_from_financing": None,
-    }
-    balance_response = {
-        "revenue": None,
-        "gross_profit": None,
-        "operating_income": None,
-        "net_income": None,
-        "total_assets": {
-            "value_usd": 500.0,
-            "citation": {"source_quote": "Total assets $500"},
-            "confidence": "high",
-        },
-        "total_liabilities": None,
-        "stockholders_equity": None,
-        "cash_from_operations": None,
-        "cash_from_investing": None,
-        "cash_from_financing": None,
-    }
-    client = _fake_client_sequence(
-        [_valid_narrative(), income_response, balance_response]
-    )
-    out = extract_ten_k(
-        raw_doc=_SAMPLE_10K,
-        doc_id="10k-multi-table",
-        cache_root=tmp_path,
-        anthropic_client=client,
-        chunkset=chunkset,
-    )
-    assert out is not None
-    assert out.financials is not None
-    assert out.financials.revenue is not None
-    assert out.financials.revenue.value_usd == 100.0
-    assert out.financials.total_assets is not None
-    assert out.financials.total_assets.value_usd == 500.0
-    # 1 narrative + 2 financials = 3 LLM calls.
-    assert client.messages.create.call_count == 3  # type: ignore[attr-defined]
-
-
-def test_ten_k_item8_financials_skipped_when_no_table_parents(
-    tmp_path: Path,
-) -> None:
-    """Chunkset present but with no `table_html` parents → only the
-    narrative call runs; financials stays None."""
-    client = _fake_client_single(_valid_narrative())
-    out = extract_ten_k(
-        raw_doc=_SAMPLE_10K,
-        doc_id="10k-no-table",
-        cache_root=tmp_path,
-        anthropic_client=client,
-        chunkset=_chunkset_narrative_only(),
-    )
-    assert out is not None
-    assert out.financials is None
-    assert client.messages.create.call_count == 1  # type: ignore[attr-defined]
-
-
 # --- Failure routing --------------------------------------------------------
 
 
@@ -726,32 +439,6 @@ def test_ten_k_hallucinated_quote_quarantines(tmp_path: Path) -> None:
     )
     assert out is None
     assert (tmp_path / "q" / "ten_k" / "10k-bad.json").exists()
-
-
-def test_ten_k_item8_failure_does_not_drop_narrative(tmp_path: Path) -> None:
-    """If the financials call quarantines, the worker returns the
-    narrative output with `financials=None` — partial output is OK on
-    the Item 8 path because the table is a side payload, not the
-    primary signal."""
-    table_html = "<table><tr><td>Revenue</td><td>$100</td></tr></table>"
-    chunkset = _chunkset_with_table(table_html)
-    bad_financials = _valid_financials()
-    bad_financials["revenue"]["citation"]["source_quote"] = "not in the table"
-    client = _fake_client_sequence(
-        [_valid_narrative(), bad_financials]
-    )
-    out = extract_ten_k(
-        raw_doc=_SAMPLE_10K,
-        doc_id="10k-fin-bad",
-        cache_root=tmp_path,
-        quarantine_root=tmp_path / "q",
-        anthropic_client=client,
-        chunkset=chunkset,
-    )
-    assert out is not None
-    assert out.financials is None
-    # Quarantine record exists for the financials call.
-    assert (tmp_path / "q" / "ten_k" / "10k-fin-bad#item8.0.json").exists()
 
 
 # --- Cache --------------------------------------------------------------

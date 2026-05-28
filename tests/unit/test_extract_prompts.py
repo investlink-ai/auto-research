@@ -16,10 +16,6 @@ from auto_research.extract.prompts.s_filings_dilution import (
     S_FILINGS_DILUTION_PROMPT,
     S_FILINGS_DILUTION_PROMPT_VERSION,
 )
-from auto_research.extract.prompts.ten_k_financials import (
-    TEN_K_FINANCIALS_PROMPT,
-    TEN_K_FINANCIALS_PROMPT_VERSION,
-)
 from auto_research.extract.prompts.ten_k_narrative import (
     TEN_K_NARRATIVE_PROMPT,
     TEN_K_NARRATIVE_PROMPT_VERSION,
@@ -108,23 +104,6 @@ def test_ten_k_narrative_prompt_exports() -> None:
         "risk_factor_deltas",
     ):
         assert field in TEN_K_NARRATIVE_PROMPT, f"missing instruction for {field}"
-    # Item 8 / financials and language_novelty_score must be explicitly
-    # excluded from the narrative prompt — they're handled separately.
-    assert "financials" in TEN_K_NARRATIVE_PROMPT  # mentioned as "do not populate"
+    # language_novelty_score must be explicitly excluded from the
+    # narrative prompt — it is computed downstream.
     assert "language_novelty_score" in TEN_K_NARRATIVE_PROMPT
-
-
-# --- 10-K Item 8 financials prompt ------------------------------------------
-
-
-def test_ten_k_financials_prompt_exports() -> None:
-    assert re.fullmatch(r"v\d+", TEN_K_FINANCIALS_PROMPT_VERSION)
-    assert "source_quote" in TEN_K_FINANCIALS_PROMPT
-    assert "value_usd" in TEN_K_FINANCIALS_PROMPT
-    # Categorical confidence labels (per user-feedback memory).
-    assert "high" in TEN_K_FINANCIALS_PROMPT
-    assert "medium" in TEN_K_FINANCIALS_PROMPT
-    assert "low" in TEN_K_FINANCIALS_PROMPT
-    # Line-item coverage.
-    for line in ("revenue", "net_income", "total_assets", "cash_from_operations"):
-        assert line in TEN_K_FINANCIALS_PROMPT, f"missing line item {line}"
