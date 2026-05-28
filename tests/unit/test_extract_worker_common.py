@@ -79,6 +79,62 @@ def test_resolve_spans_flags_ambiguous_with_count() -> None:
     assert "3 matches" in problems[0]
 
 
+def test_resolve_spans_assigns_multiple_matches_in_document_order() -> None:
+    """A real 10-K names TSMC across multiple sections and the model emits
+    one SupplierMention per textual occurrence. When N citations share
+    the same source_quote text and raw has exactly N occurrences, pair
+    them in document order rather than rejecting all as AMBIGUOUS."""
+    parsed: dict[str, Any] = {
+        "supplier_mentions": [
+            {"source_quote": "TSMC"},
+            {"source_quote": "TSMC"},
+            {"source_quote": "TSMC"},
+        ]
+    }
+    raw = "Risk: TSMC supply. MD&A: TSMC pricing. Properties: TSMC fab 21."
+    resolved, problems = _resolve_spans(parsed, raw)
+    assert problems == []
+    sm = resolved["supplier_mentions"]
+    starts = [entry["source_span"][0] for entry in sm]
+    assert starts == sorted(starts)
+    for entry in sm:
+        start, end = entry["source_span"]
+        assert raw[start:end] == "TSMC"
+
+
+def test_resolve_spans_flags_insufficient_matches_when_citations_exceed_occurrences() -> None:
+    """N citations sharing a quote but raw has fewer occurrences →
+    model fabricated extras; quarantine."""
+    parsed: dict[str, Any] = {
+        "supplier_mentions": [
+            {"source_quote": "TSMC"},
+            {"source_quote": "TSMC"},
+        ]
+    }
+    raw = "Only one TSMC mention here."
+    _, problems = _resolve_spans(parsed, raw)
+    assert len(problems) == 1
+    assert "INSUFFICIENT" in problems[0]
+
+
+def test_resolve_spans_does_not_collide_distinct_quotes() -> None:
+    """Two distinct quote strings do not get merged into one quote_to_nodes
+    bucket even when one is a substring of the other — the dict key is
+    the full quote string, so 'TSMC' and 'TSMC supply' are tracked
+    independently."""
+    parsed: dict[str, Any] = {
+        "a": {"source_quote": "TSMC"},
+        "b": {"source_quote": "TSMC supply"},
+    }
+    raw = "TSMC and TSMC supply mentioned here."
+    resolved, problems = _resolve_spans(parsed, raw)
+    # "TSMC" alone has 2 occurrences (positions 0 and 9), one citation
+    # → AMBIGUOUS for that bucket; "TSMC supply" has 1 occurrence, one
+    # citation → resolves cleanly.
+    assert any("AMBIGUOUS" in p for p in problems)
+    assert resolved["b"]["source_span"][0] == raw.index("TSMC supply")
+
+
 def test_resolve_spans_does_not_mutate_input() -> None:
     parsed: dict[str, Any] = {"citation": {"source_quote": "hello"}}
     raw = "hello"

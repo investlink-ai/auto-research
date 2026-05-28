@@ -25,6 +25,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -83,9 +84,18 @@ def _resolve_spans(
 
     Walks a deep copy of `parsed` and assigns `source_span` to every
     Citation-shaped dict by whitespace-flexible regex match against
-    `raw`. A quote is a "problem" (route to quarantine) if it is empty,
-    not found in `raw`, or appears more than once — ambiguous matches
-    mean we cannot honestly assign one span over another.
+    `raw`. When N Citation-shaped dicts share the same `source_quote`
+    text and the raw doc has exactly N occurrences, they are paired
+    in document order (first citation → first occurrence). This is the
+    common case for entity mentions: a real 10-K names TSMC across
+    Risk Factors, MD&A, and Properties, and the model emits one
+    SupplierMention per textual occurrence.
+
+    A quote is a "problem" (route to quarantine) when it is empty, not
+    found in `raw`, has fewer occurrences than citations sharing it
+    (the model fabricated extras), or has more occurrences than
+    citations sharing it (we cannot honestly pick which occurrence
+    each citation refers to).
 
     The original `parsed` is preserved so the upstream quarantine path
     can snapshot exactly what the model returned, not what the worker
@@ -94,35 +104,56 @@ def _resolve_spans(
     resolved = copy.deepcopy(parsed)
     problems: list[str] = []
 
-    def _walk(node: object) -> None:
+    # First pass: collect every Citation-shaped dict, grouped by quote
+    # text, in document order (json.loads preserves dict insertion
+    # order and list ordering, so the traversal order matches the
+    # order the LLM emitted the citations).
+    quote_to_nodes: dict[str, list[dict[str, Any]]] = {}
+
+    def _collect(node: object) -> None:
         if isinstance(node, dict):
             if "source_quote" in node:
                 quote = node["source_quote"]
                 if not isinstance(quote, str) or not quote.strip():
                     problems.append(repr(quote))
                 else:
-                    pattern = _quote_to_flex_regex(quote)
-                    matches = list(re.finditer(pattern, raw))
-                    if len(matches) == 0:
-                        problems.append(quote)
-                    elif len(matches) > 1:
-                        problems.append(
-                            f"AMBIGUOUS ({len(matches)} matches): {quote}"
-                        )
-                    else:
-                        start, end = matches[0].span()
-                        node["source_span"] = [start, end]
-                        # Snap source_quote to the actual raw substring so
-                        # the guardrail's `source_text[span] == quote`
-                        # invariant holds literally.
-                        node["source_quote"] = raw[start:end]
+                    quote_to_nodes.setdefault(quote, []).append(node)
             for value in node.values():
-                _walk(value)
+                _collect(value)
         elif isinstance(node, list):
             for item in node:
-                _walk(item)
+                _collect(item)
 
-    _walk(resolved)
+    _collect(resolved)
+
+    # Second pass: for each unique quote, locate every occurrence in
+    # raw and pair with the collected nodes by document order.
+    for quote, nodes in quote_to_nodes.items():
+        pattern = _quote_to_flex_regex(quote)
+        matches = list(re.finditer(pattern, raw))
+        if len(matches) == 0:
+            problems.append(quote)
+            continue
+        if len(matches) < len(nodes):
+            problems.append(
+                f"INSUFFICIENT MATCHES ({len(matches)} matches for "
+                f"{len(nodes)} citations): {quote}"
+            )
+            continue
+        if len(matches) > len(nodes):
+            problems.append(
+                f"AMBIGUOUS ({len(matches)} matches for "
+                f"{len(nodes)} citations): {quote}"
+            )
+            continue
+        for node, match in zip(nodes, matches, strict=True):
+            start, end = match.span()
+            node["source_span"] = [start, end]
+            # Snap source_quote to the actual raw substring so the
+            # guardrail's `source_text[span] == quote` invariant holds
+            # literally.
+            node["source_quote"] = raw[start:end]
+
     return resolved, problems
 
 
@@ -183,6 +214,7 @@ def run_single_shot_extraction[OutputT: BaseModel](
     quarantine_root: Path,
     anthropic_client: anthropic.Anthropic | None = None,
     client_factory: ClientFactory | None = None,
+    cache_write_handler: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> OutputT | None:
     """One-shot LLM extraction with the shared scaffolding.
 
@@ -193,10 +225,19 @@ def run_single_shot_extraction[OutputT: BaseModel](
     client is built each call via `make_extraction_client` — acceptable
     only for tests that inject `anthropic_client` directly.
 
+    `cache_write_handler`: when provided, the function calls
+    `handler(cache_key, payload)` on a successful extraction INSTEAD of
+    writing to the on-disk cache. This is the stage-and-commit hook
+    used by multi-call composers (e.g., 10-K RAG) so a later-call
+    failure doesn't leave earlier calls' per-field results half-
+    persisted. Default `None` writes inline (the single-call workers'
+    expected behavior). Cache HITS still return the cached output
+    immediately and skip the handler — there is nothing to stage.
+
     Emits `extract.<worker>` OTel span with `extract.outcome` ∈
-    `{cache_hit, persisted, quarantined, error}`. Span status is set to
-    ERROR on every failure path so alerts wired on OTel status surface
-    guardrail failures (INV-2).
+    `{cache_hit, persisted, staged, quarantined, error}`. Span status
+    is set to ERROR on every failure path so alerts wired on OTel
+    status surface guardrail failures (INV-2).
     """
     model_id = route_model(worker, task)
     schema_version: str = output_model.SCHEMA_VERSION  # type: ignore[attr-defined]
@@ -296,6 +337,10 @@ def run_single_shot_extraction[OutputT: BaseModel](
             worker=worker,
             prompt_version=prompt_version,
             quarantine_root=quarantine_root,
+            # Pass the pre-_resolve_spans snapshot so a downstream
+            # CitationMismatch's QuarantineRecord shows what the model
+            # actually returned rather than the worker's snapped quotes.
+            original_output=parsed_snapshot,
         )
         if validated is None:
             span.set_attribute("extract.outcome", "quarantined")
@@ -304,10 +349,13 @@ def run_single_shot_extraction[OutputT: BaseModel](
             )
             return None
 
-        content_cache.write(
-            cache_root, worker, key, validated.model_dump(mode="json")
-        )
-        span.set_attribute("extract.outcome", "persisted")
+        payload = validated.model_dump(mode="json")
+        if cache_write_handler is not None:
+            cache_write_handler(key, payload)
+            span.set_attribute("extract.outcome", "staged")
+        else:
+            content_cache.write(cache_root, worker, key, payload)
+            span.set_attribute("extract.outcome", "persisted")
         return validated
 
 
