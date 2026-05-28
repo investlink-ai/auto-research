@@ -58,6 +58,9 @@ _ROUTING: Final[dict[tuple[str, str], str]] = {
     ("ten_k", "guidance_tone"): _HAIKU,
     ("ten_k", "accrual_flags"): _HAIKU,
     ("ten_k", "risk_factor_deltas"): _HAIKU,
+    # Item 8 financials: templated table → JSON; high-volume pattern
+    # recognition per §7.3 ⇒ Haiku.
+    ("ten_k", "financials"): _HAIKU,
     # Transcripts (TranscriptOutput): Q&A nuance ⇒ Sonnet; prepared remarks ⇒ Haiku.
     ("transcript", "q_and_a_evasiveness"): _SONNET,
     ("transcript", "prepared_remarks_tone"): _HAIKU,

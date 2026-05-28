@@ -1,0 +1,19 @@
+ACME Photonics Inc. Fiscal 2026 First Quarter Earnings Call
+January 30, 2026, 5:00 PM Eastern Time
+
+Operator: Welcome to the ACME Photonics fiscal 2026 first-quarter earnings call. Please stand by for the chief financial officer.
+
+Chief Financial Officer (prepared remarks):
+We delivered a strong first quarter, with revenue of $312 million, up 34% year over year, driven by data-center demand from our hyperscaler customers. Gross margin expanded by 240 basis points to 62.8 percent. We exited the quarter with $1.2 billion in cash and short-term investments.
+
+Looking ahead, we expect mid-to-high twenties revenue growth for fiscal 2026, with gross margin in the 62 to 64 percent range. We are seeing continued strength across our optical and electrical interconnect product lines.
+
+Q&A session:
+
+Analyst (Morgan Stanley): Could you provide more color on fiscal 2027 gross margin trajectory and pricing dynamics with your largest customers?
+
+Chief Financial Officer: We don't typically guide that far out and prefer not to break out customer-specific economics. What I will say is that we feel good about our long-term gross margin profile.
+
+Analyst (Goldman Sachs): Any update on supply with TSMC capacity allocation for advanced packaging?
+
+Chief Financial Officer: We continue to work closely with our manufacturing partners. Supply remains adequate for our fiscal 2026 plan.

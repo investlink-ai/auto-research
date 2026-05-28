@@ -129,6 +129,43 @@ def test_call_routes_sonnet_for_cross_doc_task() -> None:
     assert fake.messages.calls[0]["model"] == "claude-sonnet-4-6"
 
 
+def test_extended_thinking_auto_enabled_on_sonnet() -> None:
+    """Sonnet-tier extraction (cross-doc reasoning per §7.3) gets extended
+    thinking automatically — the worker doesn't have to remember it.
+    Haiku-tier templated extraction does NOT get thinking (no quality
+    benefit, pure latency cost)."""
+    fake = _FakeAnthropicClient(
+        response_factory=lambda **kw: _make_message(model=kw["model"]),
+    )
+    client = make_extraction_client(
+        worker="ten_k",
+        usd_cap=10.00,
+        anthropic_client=_as_sdk(fake),
+    )
+    # Sonnet route → thinking enabled
+    client(task="supplier_mentions", system_prompt="sys", user_content="doc")
+    sonnet_call = fake.messages.calls[0]
+    assert sonnet_call["model"] == "claude-sonnet-4-6"
+    assert "thinking" in sonnet_call
+    assert sonnet_call["thinking"]["type"] == "enabled"
+    assert sonnet_call["thinking"]["budget_tokens"] == 2048
+
+
+def test_extended_thinking_skipped_on_haiku() -> None:
+    fake = _FakeAnthropicClient(
+        response_factory=lambda **kw: _make_message(model=kw["model"]),
+    )
+    client = make_extraction_client(
+        worker="s_filings",
+        usd_cap=10.00,
+        anthropic_client=_as_sdk(fake),
+    )
+    client(task="dilution_event", system_prompt="sys", user_content="doc")
+    haiku_call = fake.messages.calls[0]
+    assert haiku_call["model"] == "claude-haiku-4-5"
+    assert "thinking" not in haiku_call
+
+
 def test_call_raises_on_unknown_task() -> None:
     client = make_extraction_client(
         worker="s_filings",
@@ -216,6 +253,66 @@ def test_emits_est_usd_to_active_span() -> None:
 
     # Haiku 4.5: \$1/MTok input + \$5/MTok output = 1 * 1.0 + 0.5 * 5.0 = \$3.50
     mock_span.set_attribute.assert_any_call("llm.cost.est_usd", pytest.approx(3.50))
+
+
+def test_emits_token_and_cache_attributes_to_active_span() -> None:
+    """Token counts + cache_creation/cache_read attributes are set on the
+    active span so dashboards can verify the system-prompt cache marker
+    is actually firing. Without `cache_read_input_tokens` visibility a
+    regression that strips `cache_control: ephemeral` would silently
+    triple per-call cost.
+    """
+    fake = _FakeAnthropicClient(
+        response_factory=lambda **kw: _make_message(
+            model=kw["model"],
+            input_tokens=500,
+            output_tokens=200,
+            cache_creation=0,
+            cache_read=1500,  # warm cache hit on the system prefix
+        ),
+    )
+    mock_span = MagicMock()
+    with patch(
+        "auto_research.extract.client.trace.get_current_span",
+        return_value=mock_span,
+    ):
+        client = make_extraction_client(
+            worker="s_filings",
+            usd_cap=1000.00,
+            anthropic_client=_as_sdk(fake),
+        )
+        client(task="dilution_event", system_prompt="sys", user_content="doc")
+
+    mock_span.set_attribute.assert_any_call("llm.input_tokens", 500)
+    mock_span.set_attribute.assert_any_call("llm.output_tokens", 200)
+    mock_span.set_attribute.assert_any_call("llm.cache_read_input_tokens", 1500)
+
+
+def test_omits_cache_attributes_when_sdk_reports_none() -> None:
+    """A response with no cache_read / cache_creation populated (cold
+    call, first within a window) must not set the attributes to a
+    spurious 0 — the absence is itself information that there was no
+    cache activity."""
+    fake = _FakeAnthropicClient(
+        response_factory=lambda **kw: _make_message(
+            model=kw["model"], cache_creation=0, cache_read=0
+        ),
+    )
+    mock_span = MagicMock()
+    with patch(
+        "auto_research.extract.client.trace.get_current_span",
+        return_value=mock_span,
+    ):
+        client = make_extraction_client(
+            worker="s_filings",
+            usd_cap=1000.00,
+            anthropic_client=_as_sdk(fake),
+        )
+        client(task="dilution_event", system_prompt="sys", user_content="doc")
+
+    keys_set = [c.args[0] for c in mock_span.set_attribute.call_args_list]
+    assert "llm.cache_read_input_tokens" not in keys_set
+    assert "llm.cache_creation_input_tokens" not in keys_set
 
 
 # --- reliability decorators (composed via @reliable_agent_node) ----------

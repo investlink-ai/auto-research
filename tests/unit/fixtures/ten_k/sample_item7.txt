@@ -1,0 +1,9 @@
+Item 7. Management's Discussion and Analysis of Financial Condition and Results of Operations.
+
+The following discussion summarizes the significant factors affecting our consolidated results of operations and financial condition for fiscal year 2026. Revenue grew 28% year over year, driven by sustained data-center demand and stronger-than-expected uptake of our enterprise platform.
+
+We expect cautious growth in fiscal 2027 as channel inventory normalizes. Gross margin headwinds remain a near-term risk, particularly from rising HBM3e memory costs and Taiwan Semiconductor Manufacturing Company (TSMC) advanced-node wafer pricing. Microsoft and Alphabet remain our largest customers by revenue, together accounting for more than 30% of fiscal 2026 net sales.
+
+Operating expenses grew faster than revenue due to elevated stock-based compensation and a one-time restructuring charge of $42 million recorded in the second quarter. We continue to invest in research and development, with capitalized software development costs of $118 million classified within property and equipment.
+
+Forward-looking statements in this section reflect management's current views and are subject to material change.

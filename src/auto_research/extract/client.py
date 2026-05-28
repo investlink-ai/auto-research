@@ -1,6 +1,6 @@
 """Anthropic-SDK wrapper for extraction workers (Issue #10).
 
-A thin layer on top of `anthropic.Anthropic` that bakes in the three
+A thin layer on top of `anthropic.Anthropic` that bakes in the four
 things workers shouldn't have to remember per-call:
 
 1. **Tiered model routing** — `route_model(worker, task)` picks the
@@ -17,6 +17,11 @@ things workers shouldn't have to remember per-call:
    instantiation means each worker gets its own state (cap, circuit
    counter), so blowing the 10-K worker's cap doesn't affect the 8-K
    worker.
+4. **Extended thinking auto-enable on Sonnet/Opus** — when the routed
+   model is a reasoning-tier model (Sonnet or Opus), the call enables
+   extended thinking with a fixed `EXTENDED_THINKING_BUDGET` token
+   budget. Haiku-tier calls (templated extraction, pattern matching)
+   skip thinking — no quality gain, pure latency cost.
 
 What the wrapper deliberately doesn't do:
 
@@ -49,7 +54,7 @@ Production callers compose:
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Final, Protocol
 
 import anthropic
 from anthropic.types import Message
@@ -59,6 +64,15 @@ from auto_research._models import route_model
 from auto_research._pricing import usd_for_message
 from auto_research.agents.reliability import reliable_agent_node
 from auto_research.extract._caching import cached_system_block
+
+# Token budget for extended thinking on Sonnet/Opus routes. 2048 is the
+# Anthropic-documented sweet spot for structured-extraction tasks where
+# the model benefits from reasoning before emitting JSON but doesn't
+# need the deeper budgets reserved for math/code. Per the API contract,
+# `max_tokens` must exceed this budget; the workers' default
+# `max_tokens=4096` leaves 2048 tokens for actual output, which is
+# more than enough for these schemas.
+EXTENDED_THINKING_BUDGET: Final[int] = 2048
 
 
 class ExtractionFn(Protocol):
@@ -133,6 +147,20 @@ def make_extraction_client(
         # message naming the bad (worker, task) pair.
         model = route_model(worker, task)
 
+        # Extended thinking on Sonnet/Opus only. Haiku-tier templated
+        # extraction is "high-volume pattern recognition" per §7.3 and
+        # gains nothing from a thinking budget — pure latency cost. The
+        # Anthropic-required precondition (max_tokens > budget_tokens)
+        # holds by construction: workers' default max_tokens=4096
+        # leaves 2048 for actual output, which fits every current
+        # output schema.
+        extra_kwargs: dict[str, Any] = {}
+        if model.startswith(("claude-sonnet-", "claude-opus-")):
+            extra_kwargs["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": EXTENDED_THINKING_BUDGET,
+            }
+
         # `cached_system_block` builds the structured-block form with
         # `cache_control: ephemeral` — same helper as the batch client
         # uses, so the W1 caching policy (system always cacheable, user
@@ -142,18 +170,38 @@ def make_extraction_client(
             max_tokens=max_tokens,
             system=cached_system_block(system_prompt),  # type: ignore[arg-type]
             messages=[{"role": "user", "content": user_content}],
+            **extra_kwargs,
         )
 
-        # Emit per-call USD on the active OTel span. OpenLLMetry's
-        # auto-instrumentation has already populated input/output/cache
-        # token counts; we add the USD figure because the SDK doesn't
-        # carry pricing. `get_current_span()` returns a no-op span when
-        # no tracer provider is configured, so this is safe in tests
-        # that don't set one up.
-        trace.get_current_span().set_attribute(
-            "llm.cost.est_usd",
-            usd_for_message(response),
-        )
+        # Emit per-call USD + token-count attributes on the active OTel
+        # span. OpenLLMetry auto-instruments token counts when its
+        # exporter is wired, but production OTel pipelines downstream
+        # (and our tests) don't always run auto-instrumentation — we
+        # set the attributes explicitly so the prompt-cache effect is
+        # visible in dashboards regardless. `get_current_span()`
+        # returns a no-op span when no tracer provider is configured,
+        # so this is safe in tests that don't set one up.
+        #
+        # The cache_* counters are how we verify the system-prompt
+        # cache marker is actually firing — `cache_read_input_tokens`
+        # > 0 on the second-and-later calls within a 5-minute window
+        # means the prefix hit the cache; a regression that strips
+        # `cache_control: ephemeral` would silently zero these out
+        # and triple our per-call cost without any other signal.
+        span = trace.get_current_span()
+        span.set_attribute("llm.cost.est_usd", usd_for_message(response))
+        usage = response.usage
+        span.set_attribute("llm.input_tokens", usage.input_tokens)
+        span.set_attribute("llm.output_tokens", usage.output_tokens)
+        if usage.cache_creation_input_tokens is not None:
+            span.set_attribute(
+                "llm.cache_creation_input_tokens",
+                usage.cache_creation_input_tokens,
+            )
+        if usage.cache_read_input_tokens is not None:
+            span.set_attribute(
+                "llm.cache_read_input_tokens", usage.cache_read_input_tokens
+            )
 
         return response
 

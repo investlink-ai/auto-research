@@ -148,6 +148,7 @@ def validate_or_quarantine[OutputT: BaseModel](
     worker: str,
     prompt_version: str,
     quarantine_root: Path | None = None,
+    original_output: dict[str, Any] | None = None,
 ) -> OutputT | None:
     """Production routing helper: workers call this after their LLM step.
 
@@ -165,6 +166,13 @@ def validate_or_quarantine[OutputT: BaseModel](
     `quarantine_root` defaults to `data/quarantine/` (gitignored, see
     `.claude/settings.json` deny rules); tests pass `tmp_path` to keep
     the suite hermetic.
+
+    `original_output`: when the worker mutated the model's parsed JSON
+    before constructing `output` (e.g., snapping `source_quote` to a
+    raw substring during span resolution), pass the pre-mutation dict
+    here. The QuarantineRecord then carries what the model actually
+    returned rather than the worker's rewrite — preserving auditability
+    when reviewers triage citation failures.
     """
     try:
         validate_citation_grounding(output, source_text)
@@ -174,7 +182,11 @@ def validate_or_quarantine[OutputT: BaseModel](
             doc_id=doc_id,
             worker=worker,
             prompt_version=prompt_version,
-            output=output.model_dump(mode="json"),
+            output=(
+                original_output
+                if original_output is not None
+                else output.model_dump(mode="json")
+            ),
             error=str(exc),
         )
         target = root / worker / f"{doc_id}.json"

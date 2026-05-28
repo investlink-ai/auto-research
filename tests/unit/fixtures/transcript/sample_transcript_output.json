@@ -1,0 +1,26 @@
+{
+  "ticker": "ACME",
+  "event_datetime": "2026-01-30T17:00:00-05:00",
+  "prepared_remarks_tone": {
+    "citation": {
+      "source_quote": "We delivered a strong first quarter, with revenue of $312 million, up 34% year over year"
+    },
+    "confidence": 0.8
+  },
+  "q_and_a_evasiveness": {
+    "citation": {
+      "source_quote": "We don't typically guide that far out and prefer not to break out customer-specific economics"
+    },
+    "confidence": 0.65
+  },
+  "forward_statements": [
+    {
+      "statement_text": "Expect mid-to-high twenties revenue growth for fiscal 2026, gross margin 62-64%.",
+      "citation": {
+        "source_quote": "we expect mid-to-high twenties revenue growth for fiscal 2026"
+      },
+      "mentioned_entities": [],
+      "horizon": "FY2026"
+    }
+  ]
+}

@@ -47,6 +47,12 @@ def test_route_model_returns_haiku_for_routine_extraction() -> None:
     )
 
 
+def test_route_model_routes_ten_k_financials_to_haiku() -> None:
+    # 10-K Item 8 financials: table → JSON is a templated, high-volume
+    # pattern-recognition task per §7.3 — Haiku, not Sonnet.
+    assert route_model("ten_k", "financials") == "claude-haiku-4-5"
+
+
 def test_route_model_returns_opus_for_hard_critique() -> None:
     # Spec §7.3: research agent / live critic default Sonnet, Opus for
     # hard critique moments.

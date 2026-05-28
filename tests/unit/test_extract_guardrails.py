@@ -244,6 +244,39 @@ def test_quarantine_writes_record_and_returns_none_on_mismatch(tmp_path: Path) -
     assert "FAKE" in record["error"]
 
 
+def test_quarantine_uses_original_output_when_supplied(tmp_path: Path) -> None:
+    """When the worker passes `original_output=parsed_snapshot`, the
+    QuarantineRecord captures what the model returned — not the
+    worker-rewritten Pydantic dump. This preserves the audit invariant
+    'every quarantine path captures what the model actually said' even
+    when _resolve_spans snapped source_quote to a raw substring."""
+    source = "Real source text."
+    bad_claim = Claim(
+        citation=Citation(source_span=(0, 4), source_quote="FAKE"),
+        confidence=0.5,
+    )
+    output = _minimal_eight_k(bad_claim)
+    original = {
+        "milestone_mentions": [
+            {"citation": {"source_quote": "model's original quote"}, "confidence": 0.5}
+        ],
+        "marker": "from-the-model",
+    }
+    result = validate_or_quarantine(
+        output,
+        source,
+        doc_id="acc-orig",
+        worker="eight_k",
+        prompt_version="v1",
+        quarantine_root=tmp_path,
+        original_output=original,
+    )
+    assert result is None
+    record = json.loads((tmp_path / "eight_k" / "acc-orig.json").read_text())
+    assert record["output"] == original
+    assert record["output"]["marker"] == "from-the-model"
+
+
 def test_quarantine_record_is_frozen() -> None:
     record = QuarantineRecord(
         doc_id="x",
