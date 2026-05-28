@@ -1,6 +1,6 @@
-"""Unit tests for the S-1/S-3 extraction worker (Issue #11).
+"""Unit tests for the S-1/S-3 extraction worker.
 
-End-to-end of `extract_s_filing`: prompt -> Anthropic -> JSON parse ->
+End-to-end of `extract_s_filing`: prompt -> Anthropic tool_use ->
 SFilingOutput -> citation grounding -> cache. The Anthropic SDK is mocked
 to keep the test hermetic.
 
@@ -9,9 +9,7 @@ Coverage focus per the PR's code-review pass:
 - Hallucinated quote (not findable in raw) -> quarantine.
 - Ambiguous quote (multiple matches) -> quarantine.
 - Empty quote -> quarantine (not uncaught ValidationError).
-- Malformed JSON / prose response -> quarantine (not uncaught JSONDecodeError).
 - Schema violation (extra field, wrong shape) -> quarantine.
-- Markdown fence (with or without newline) is stripped.
 - QuarantineRecord captures the original parsed dict, not the worker's
   mutated copy.
 - Resolved source_span aligns with raw_doc, not a normalized form.
@@ -26,7 +24,7 @@ from unittest.mock import MagicMock
 
 import anthropic
 import pytest
-from anthropic.types import Message, TextBlock, Usage
+from anthropic.types import Message, ToolUseBlock, Usage
 
 from auto_research.extract.workers.s_filings import extract_s_filing
 from tests._otel_helpers import SpanRecorder
@@ -40,13 +38,20 @@ _SAMPLE_S3 = (
 )
 
 
-def _make_response(text: str) -> Message:
+def _make_tool_response(tool_input: Any) -> Message:
     return Message(
         id="msg_test",
-        content=[TextBlock(type="text", text=text, citations=None)],
+        content=[
+            ToolUseBlock(
+                id="toolu_test",
+                input=tool_input,
+                name="record_extraction",
+                type="tool_use",
+            )
+        ],
         model="claude-haiku-4-5",
         role="assistant",
-        stop_reason="end_turn",
+        stop_reason="tool_use",
         stop_sequence=None,
         type="message",
         usage=Usage(
@@ -80,14 +85,14 @@ def _valid_output() -> dict[str, Any]:
     }
 
 
-def _fake_client(text: str) -> anthropic.Anthropic:
+def _fake_client(tool_input: Any) -> anthropic.Anthropic:
     fake = MagicMock()
-    fake.messages.create.return_value = _make_response(text)
+    fake.messages.create.return_value = _make_tool_response(tool_input)
     return cast(anthropic.Anthropic, fake)
 
 
 def test_extract_s_filing_returns_validated_output(tmp_path: Path) -> None:
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     out = extract_s_filing(
         raw_doc=_SAMPLE_S3,
         doc_id="test-001",
@@ -102,7 +107,7 @@ def test_extract_s_filing_returns_validated_output(tmp_path: Path) -> None:
 def test_resolved_span_indexes_into_raw_doc(tmp_path: Path) -> None:
     """Citation.source_span must index into `raw_doc` (not a normalized
     form); slicing raw with the span must equal source_quote."""
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     out = extract_s_filing(
         raw_doc=_SAMPLE_S3,
         doc_id="test-001",
@@ -116,7 +121,7 @@ def test_resolved_span_indexes_into_raw_doc(tmp_path: Path) -> None:
 
 
 def test_cache_hit_skips_llm_call(tmp_path: Path) -> None:
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     first = extract_s_filing(
         raw_doc=_SAMPLE_S3,
         doc_id="test-001",
@@ -139,7 +144,7 @@ def test_hallucinated_quote_routes_to_quarantine(tmp_path: Path) -> None:
     bad["dilution_event"]["citation"]["source_quote"] = (
         "shelf takedown of $999 trillion of common stock"
     )
-    client = _fake_client(json.dumps(bad))
+    client = _fake_client(bad)
     out = extract_s_filing(
         raw_doc=_SAMPLE_S3,
         doc_id="bad-001",
@@ -158,7 +163,7 @@ def test_ambiguous_quote_routes_to_quarantine(tmp_path: Path) -> None:
     raw = "general corporate purposes. ... general corporate purposes."
     bad = _valid_output()
     bad["dilution_event"]["citation"]["source_quote"] = "general corporate purposes"
-    client = _fake_client(json.dumps(bad))
+    client = _fake_client(bad)
     out = extract_s_filing(
         raw_doc=raw,
         doc_id="amb-001",
@@ -178,7 +183,7 @@ def test_empty_quote_routes_to_quarantine(tmp_path: Path) -> None:
     `start < end` ValidationError because raw.find('') returned 0."""
     bad = _valid_output()
     bad["dilution_event"]["citation"]["source_quote"] = ""
-    client = _fake_client(json.dumps(bad))
+    client = _fake_client(bad)
     out = extract_s_filing(
         raw_doc=_SAMPLE_S3,
         doc_id="empty-001",
@@ -190,28 +195,11 @@ def test_empty_quote_routes_to_quarantine(tmp_path: Path) -> None:
     assert (tmp_path / "quarantine" / "s_filings" / "empty-001.json").exists()
 
 
-def test_malformed_json_routes_to_quarantine(tmp_path: Path) -> None:
-    """Prose / non-JSON model output must quarantine, not crash."""
-    client = _fake_client("Here is the JSON you asked for: it's empty.")
-    out = extract_s_filing(
-        raw_doc=_SAMPLE_S3,
-        doc_id="prose-001",
-        cache_root=tmp_path,
-        quarantine_root=tmp_path / "quarantine",
-        anthropic_client=client,
-    )
-    assert out is None
-    qfile = tmp_path / "quarantine" / "s_filings" / "prose-001.json"
-    assert qfile.exists()
-    record = json.loads(qfile.read_text())
-    assert "json decode failed" in record["error"]
-
-
 def test_schema_violation_routes_to_quarantine(tmp_path: Path) -> None:
     """An extra/invalid field must quarantine, not crash with ValidationError."""
     bad = _valid_output()
     bad["unexpected_field"] = "boom"
-    client = _fake_client(json.dumps(bad))
+    client = _fake_client(bad)
     out = extract_s_filing(
         raw_doc=_SAMPLE_S3,
         doc_id="schema-001",
@@ -224,20 +212,6 @@ def test_schema_violation_routes_to_quarantine(tmp_path: Path) -> None:
     assert qfile.exists()
     record = json.loads(qfile.read_text())
     assert "schema validation failed" in record["error"]
-
-
-def test_markdown_fence_is_stripped(tmp_path: Path) -> None:
-    """Both multi-line and single-line markdown fences must be stripped."""
-    body = json.dumps(_valid_output())
-    for wrapped in (f"```json\n{body}\n```", f"```{body}```"):
-        client = _fake_client(wrapped)
-        out = extract_s_filing(
-            raw_doc=_SAMPLE_S3,
-            doc_id=f"fence-{wrapped[3:7]}",
-            cache_root=tmp_path / wrapped[3:7],
-            anthropic_client=client,
-        )
-        assert out is not None, f"failed for fence form: {wrapped[:20]!r}"
 
 
 def test_production_client_is_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,7 +263,7 @@ def test_quarantine_captures_original_parsed_not_mutated(tmp_path: Path) -> None
     # Intentionally include source_span as the model might (forbidden but
     # tolerated for audit purposes); the snapshot should preserve it.
     bad["dilution_event"]["citation"]["source_span"] = [99, 100]
-    client = _fake_client(json.dumps(bad))
+    client = _fake_client(bad)
     out = extract_s_filing(
         raw_doc=_SAMPLE_S3,
         doc_id="audit-001",
@@ -315,7 +289,7 @@ def test_extract_s_filing_emits_span_persisted(
 ) -> None:
     """Successful extraction → outcome=persisted (parents the existing
     llm.cost.est_usd attribute set by extract/client.py:151)."""
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     extract_s_filing(
         raw_doc=_SAMPLE_S3,
         doc_id="doc-persist",
@@ -333,7 +307,7 @@ def test_extract_s_filing_emits_span_cache_hit(
     span_recorder: SpanRecorder, tmp_path: Path
 ) -> None:
     """A second invocation should record outcome=cache_hit."""
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     # Seed the cache via a first call.
     extract_s_filing(
         raw_doc=_SAMPLE_S3,
@@ -358,14 +332,16 @@ def test_extract_s_filing_emits_span_cache_hit(
     assert spans[1].attributes["extract.outcome"] == "cache_hit"
 
 
-def test_extract_s_filing_emits_span_quarantined_on_bad_json(
+def test_extract_s_filing_emits_span_quarantined_on_schema_violation(
     span_recorder: SpanRecorder, tmp_path: Path
 ) -> None:
-    """JSON-decode failure → outcome=quarantined."""
-    client = _fake_client("this is not JSON, it is prose")
+    """A tool_use.input that fails pydantic validation → outcome=quarantined."""
+    bad = _valid_output()
+    bad["unexpected_field"] = "boom"  # extra='forbid' rejects this
+    client = _fake_client(bad)
     out = extract_s_filing(
         raw_doc=_SAMPLE_S3,
-        doc_id="doc-bad-json",
+        doc_id="doc-bad-schema",
         cache_root=tmp_path,
         quarantine_root=tmp_path / "quar",
         anthropic_client=client,
@@ -375,7 +351,7 @@ def test_extract_s_filing_emits_span_quarantined_on_bad_json(
     assert attrs["extract.outcome"] == "quarantined"
     # Every quarantine branch must also set span.status=ERROR so
     # alerting wired against OTel status surfaces guardrail failures
-    # (INV-2). Refs #52 review.
+    # (INV-2).
     from opentelemetry.trace import StatusCode
 
     span = span_recorder.one("extract.s_filings")

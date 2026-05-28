@@ -45,7 +45,6 @@ unverifiable mapping.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
@@ -56,7 +55,11 @@ from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from auto_research.extract.client import ExtractionFn, make_extraction_client
+from auto_research.extract.client import (
+    RECORD_EXTRACTION_TOOL_NAME,
+    ExtractionFn,
+    make_extraction_client,
+)
 from auto_research.extract.embeddings import EmbeddingAdapter
 from auto_research.extract.prompts.entity_resolution import (
     ENTITY_RESOLUTION_PROMPT,
@@ -165,22 +168,6 @@ class _IndexEntry:
     ticker: str
     alias_text: str
     primary_name: str
-
-
-# Find the JSON object inside the response. Prefer the simple case (the
-# whole response is `{...}`); fall back to slicing from first `{` to last
-# `}` so a stray prelude or fence doesn't quarantine an otherwise-good
-# payload. Regex-anchored fence stripping was too strict — partial fences
-# like `"Here is the JSON:\n```{...}```"` slipped through.
-def _strip_fence(text: str) -> str:
-    stripped = text.strip()
-    if stripped.startswith("{") and stripped.endswith("}"):
-        return stripped
-    start = stripped.find("{")
-    end = stripped.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        return stripped  # let json.loads fail naturally
-    return stripped[start : end + 1]
 
 
 # Patterns the LLM occasionally uses for "null" instead of JSON null —
@@ -322,12 +309,15 @@ class EntityResolver:
                 task=_TASK,
                 system_prompt=ENTITY_RESOLUTION_PROMPT,
                 user_content=_build_user_content(stripped, candidates),
+                output_schema=_DisambiguatorResponse,
                 max_tokens=_MAX_TOKENS,
             )
 
-            # Detect truncation BEFORE attempting to parse — a partial JSON
-            # is indistinguishable from a malformed one once we hit
-            # JSONDecodeError, and conflating the two misdirects operators.
+            # Detect truncation BEFORE attempting to parse — a tool_use
+            # block that hit max_tokens mid-emission arrives with a
+            # truncated `input` dict that fails schema validation
+            # downstream; conflating those failures with "the model
+            # emitted a wrong-shape object" misdirects operators.
             if response.stop_reason == "max_tokens":
                 span.set_attribute("extract.outcome", "truncated_disambiguator")
                 span.set_status(
@@ -342,39 +332,60 @@ class EntityResolver:
                     reasoning=(
                         f"disambiguator response was truncated at "
                         f"max_tokens={_MAX_TOKENS} (stop_reason='max_tokens'); "
-                        "the JSON object was cut mid-stream and is unparseable"
+                        "the tool_use block was cut mid-stream and is unparseable"
                     ),
                     considered=candidates,
                 )
 
-            # Drop non-text blocks (refusals, tool-use). An all-tool-use
-            # response collapses to "" and falls through to the malformed
-            # branch below with an explicit "no text" note in reasoning.
-            text_blocks = [b.text for b in response.content if b.type == "text"]
-            if not text_blocks:
-                span.set_attribute("extract.outcome", "no_text_block")
+            # Forced `tool_choice` should guarantee a tool_use block;
+            # treat its absence as a "no answer" outcome with the same
+            # `unknown` collapse as a malformed response.
+            tool_use_blocks = [
+                b
+                for b in response.content
+                if b.type == "tool_use" and b.name == RECORD_EXTRACTION_TOOL_NAME
+            ]
+            if not tool_use_blocks:
+                span.set_attribute("extract.outcome", "no_tool_use_block")
                 span.set_status(
-                    Status(StatusCode.ERROR, "disambiguator returned no text block")
+                    Status(
+                        StatusCode.ERROR,
+                        "disambiguator returned no tool_use block",
+                    )
                 )
                 return self._build_unknown(
                     reasoning=(
-                        "disambiguator response contained no text block "
-                        "(likely a refusal or tool-use-only response)"
+                        "disambiguator response contained no "
+                        f"{RECORD_EXTRACTION_TOOL_NAME} tool_use block "
+                        "(likely a refusal)"
                     ),
                     considered=candidates,
                 )
 
-            text = _strip_fence("".join(text_blocks).strip())
-            parsed = self._parse_disambiguator(text)
-            if parsed is None:
+            tool_input = tool_use_blocks[0].input
+            if not isinstance(tool_input, dict):
                 span.set_attribute("extract.outcome", "malformed_disambiguator")
                 span.set_status(
-                    Status(StatusCode.ERROR, "disambiguator returned malformed JSON")
+                    Status(StatusCode.ERROR, "tool_use.input is not a dict")
                 )
                 return self._build_unknown(
                     reasoning=(
-                        "disambiguator response could not be parsed as JSON "
-                        f"matching the expected schema: {text!r}"
+                        "disambiguator tool_use.input was not a JSON object "
+                        f"(got {type(tool_input).__name__}): {tool_input!r}"
+                    ),
+                    considered=candidates,
+                )
+            try:
+                parsed = _DisambiguatorResponse.model_validate(tool_input)
+            except ValidationError as exc:
+                span.set_attribute("extract.outcome", "malformed_disambiguator")
+                span.set_status(
+                    Status(StatusCode.ERROR, "disambiguator schema validation failed")
+                )
+                return self._build_unknown(
+                    reasoning=(
+                        "disambiguator tool_use.input failed schema validation: "
+                        f"{exc}"
                     ),
                     considered=candidates,
                 )
@@ -463,18 +474,6 @@ class EntityResolver:
             )
             for ticker, (score, entry) in ranked
         )
-
-    @staticmethod
-    def _parse_disambiguator(text: str) -> _DisambiguatorResponse | None:
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            return None
-        try:
-            return _DisambiguatorResponse.model_validate(payload)
-        except ValidationError:
-            return None
-
 
 def _flatten_aliases(entries: Iterable[TickerEntry]) -> list[_IndexEntry]:
     """Expand each (ticker, alias) pair into one index row.

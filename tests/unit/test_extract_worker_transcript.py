@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import anthropic
 import pytest
-from anthropic.types import Message, TextBlock, Usage
+from anthropic.types import Message, ToolUseBlock, Usage
 
 from auto_research.extract.workers.transcript import extract_transcript
 
@@ -26,13 +26,20 @@ _SAMPLE_TRANSCRIPT = (
 )
 
 
-def _make_response(text: str) -> Message:
+def _make_tool_response(tool_input: Any) -> Message:
     return Message(
         id="msg_test",
-        content=[TextBlock(type="text", text=text, citations=None)],
+        content=[
+            ToolUseBlock(
+                id="toolu_test",
+                input=tool_input,
+                name="record_extraction",
+                type="tool_use",
+            )
+        ],
         model="claude-sonnet-4-6",
         role="assistant",
-        stop_reason="end_turn",
+        stop_reason="tool_use",
         stop_sequence=None,
         type="message",
         usage=Usage(
@@ -48,9 +55,9 @@ def _make_response(text: str) -> Message:
     )
 
 
-def _fake_client(text: str) -> anthropic.Anthropic:
+def _fake_client(tool_input: Any) -> anthropic.Anthropic:
     fake = MagicMock()
-    fake.messages.create.return_value = _make_response(text)
+    fake.messages.create.return_value = _make_tool_response(tool_input)
     return cast(anthropic.Anthropic, fake)
 
 
@@ -75,7 +82,7 @@ def _valid_output() -> dict[str, Any]:
 
 
 def test_extract_transcript_returns_validated_output(tmp_path: Path) -> None:
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     out = extract_transcript(
         raw_doc=_SAMPLE_TRANSCRIPT,
         doc_id="trn-001",
@@ -90,7 +97,7 @@ def test_extract_transcript_returns_validated_output(tmp_path: Path) -> None:
 
 
 def test_extract_transcript_resolves_spans_into_raw_doc(tmp_path: Path) -> None:
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     out = extract_transcript(
         raw_doc=_SAMPLE_TRANSCRIPT,
         doc_id="trn-002",
@@ -107,7 +114,7 @@ def test_extract_transcript_resolves_spans_into_raw_doc(tmp_path: Path) -> None:
 
 
 def test_extract_transcript_cache_hit_skips_llm(tmp_path: Path) -> None:
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     extract_transcript(
         raw_doc=_SAMPLE_TRANSCRIPT,
         doc_id="trn-cache",
@@ -133,7 +140,7 @@ def test_extract_transcript_quarantines_hallucinated_quote(tmp_path: Path) -> No
             "horizon": "long-term",
         }
     ]
-    client = _fake_client(json.dumps(bad))
+    client = _fake_client(bad)
     out = extract_transcript(
         raw_doc=_SAMPLE_TRANSCRIPT,
         doc_id="trn-bad",
@@ -158,7 +165,7 @@ def test_transcript_real_fixture_passes_citation_grounding(tmp_path: Path) -> No
 
     fixture_dir = Path(__file__).parent / "fixtures" / "transcript"
     raw = (fixture_dir / "sample_transcript.txt").read_text()
-    frozen = (fixture_dir / "sample_transcript_output.json").read_text()
+    frozen = json.loads((fixture_dir / "sample_transcript_output.json").read_text())
     client = _fake_client(frozen)
     out = extract_transcript(
         raw_doc=raw,

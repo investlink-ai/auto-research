@@ -23,7 +23,6 @@ but defeats production cost-cap / circuit-breaker state accumulation.
 from __future__ import annotations
 
 import copy
-import json
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -37,7 +36,11 @@ from pydantic import BaseModel, ValidationError
 from auto_research._io import atomic_write_text
 from auto_research._models import route_model
 from auto_research.extract import cache as content_cache
-from auto_research.extract.client import ExtractionFn, make_extraction_client
+from auto_research.extract.client import (
+    RECORD_EXTRACTION_TOOL_NAME,
+    ExtractionFn,
+    make_extraction_client,
+)
 from auto_research.extract.guardrails import (
     QuarantineRecord,
     validate_or_quarantine,
@@ -45,17 +48,6 @@ from auto_research.extract.guardrails import (
 from auto_research.telemetry import truncate_status_description as _truncate
 
 _tracer = trace.get_tracer(__name__)
-
-
-# Markdown-fence strip: handles both ```json\n{...}\n``` and the
-# no-newline single-line form ```json{...}```. Captures the JSON body
-# in group 1. Defensive only — prompts forbid fences.
-_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*(.*?)\s*```\s*$", re.DOTALL)
-
-
-def _strip_fence(text: str) -> str:
-    match = _FENCE_RE.match(text)
-    return match.group(1) if match else text
 
 
 def _quote_to_flex_regex(quote: str) -> str:
@@ -271,6 +263,7 @@ def run_single_shot_extraction[OutputT: BaseModel](
                 task=task,
                 system_prompt=prompt,
                 user_content=raw_doc,
+                output_schema=output_model,
                 max_tokens=max_tokens,
             )
         except Exception as exc:
@@ -278,23 +271,53 @@ def run_single_shot_extraction[OutputT: BaseModel](
             span.set_status(Status(StatusCode.ERROR, _truncate(str(exc))))
             raise
 
-        text = _strip_fence(
-            "".join(b.text for b in response.content if b.type == "text").strip()
-        )
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError as exc:
+        # Forced `tool_choice={'type':'tool','name':'record_extraction'}`
+        # guarantees the model emits exactly one matching tool_use block
+        # alongside any optional thinking blocks. Quarantine the response
+        # if the contract is violated rather than silently coercing a
+        # partial answer.
+        tool_use_blocks = [
+            b
+            for b in response.content
+            if b.type == "tool_use" and b.name == RECORD_EXTRACTION_TOOL_NAME
+        ]
+        if not tool_use_blocks:
             _write_quarantine(
                 quarantine_root=quarantine_root,
                 worker=worker,
                 prompt_version=prompt_version,
                 doc_id=doc_id,
-                parsed={"raw_text": text},
-                error=f"json decode failed: {exc}",
+                parsed={
+                    "raw_response_block_types": [
+                        b.type for b in response.content
+                    ]
+                },
+                error=(
+                    f"no {RECORD_EXTRACTION_TOOL_NAME} tool_use block in "
+                    "model response"
+                ),
             )
             span.set_attribute("extract.outcome", "quarantined")
             span.set_status(
-                Status(StatusCode.ERROR, _truncate(f"json decode failed: {exc}"))
+                Status(StatusCode.ERROR, "no tool_use block")
+            )
+            return None
+        parsed = tool_use_blocks[0].input
+        if not isinstance(parsed, dict):
+            _write_quarantine(
+                quarantine_root=quarantine_root,
+                worker=worker,
+                prompt_version=prompt_version,
+                doc_id=doc_id,
+                parsed={"raw": parsed},
+                error=(
+                    f"tool_use.input is not a dict (got "
+                    f"{type(parsed).__name__})"
+                ),
+            )
+            span.set_attribute("extract.outcome", "quarantined")
+            span.set_status(
+                Status(StatusCode.ERROR, "tool_use.input not dict")
             )
             return None
 
@@ -363,7 +386,6 @@ __all__ = [
     "ClientFactory",
     "_quote_to_flex_regex",
     "_resolve_spans",
-    "_strip_fence",
     "_write_quarantine",
     "run_single_shot_extraction",
 ]

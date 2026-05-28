@@ -14,7 +14,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import anthropic
-from anthropic.types import Message, TextBlock, Usage
+from anthropic.types import Message, ToolUseBlock, Usage
 
 from auto_research.extract.enums import EventClassification
 from auto_research.extract.workers.eight_k import extract_eight_k
@@ -26,13 +26,20 @@ _SAMPLE_8K = (
 )
 
 
-def _make_response(text: str) -> Message:
+def _make_tool_response(tool_input: Any) -> Message:
     return Message(
         id="msg_test",
-        content=[TextBlock(type="text", text=text, citations=None)],
+        content=[
+            ToolUseBlock(
+                id="toolu_test",
+                input=tool_input,
+                name="record_extraction",
+                type="tool_use",
+            )
+        ],
         model="claude-haiku-4-5",
         role="assistant",
-        stop_reason="end_turn",
+        stop_reason="tool_use",
         stop_sequence=None,
         type="message",
         usage=Usage(
@@ -48,9 +55,9 @@ def _make_response(text: str) -> Message:
     )
 
 
-def _fake_client(text: str) -> anthropic.Anthropic:
+def _fake_client(tool_input: Any) -> anthropic.Anthropic:
     fake = MagicMock()
-    fake.messages.create.return_value = _make_response(text)
+    fake.messages.create.return_value = _make_tool_response(tool_input)
     return cast(anthropic.Anthropic, fake)
 
 
@@ -70,7 +77,7 @@ def _valid_output() -> dict[str, Any]:
 
 
 def test_extract_eight_k_returns_validated_output(tmp_path: Path) -> None:
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     out = extract_eight_k(
         raw_doc=_SAMPLE_8K,
         doc_id="8k-001",
@@ -83,7 +90,7 @@ def test_extract_eight_k_returns_validated_output(tmp_path: Path) -> None:
 
 
 def test_extract_eight_k_resolves_span_into_raw_doc(tmp_path: Path) -> None:
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     out = extract_eight_k(
         raw_doc=_SAMPLE_8K,
         doc_id="8k-002",
@@ -97,7 +104,7 @@ def test_extract_eight_k_resolves_span_into_raw_doc(tmp_path: Path) -> None:
 
 
 def test_extract_eight_k_cache_hit_skips_llm(tmp_path: Path) -> None:
-    client = _fake_client(json.dumps(_valid_output()))
+    client = _fake_client(_valid_output())
     first = extract_eight_k(
         raw_doc=_SAMPLE_8K,
         doc_id="8k-cache",
@@ -122,7 +129,7 @@ def test_extract_eight_k_quarantines_hallucinated_quote(tmp_path: Path) -> None:
             "confidence": 0.9,
         }
     ]
-    client = _fake_client(json.dumps(bad))
+    client = _fake_client(bad)
     out = extract_eight_k(
         raw_doc=_SAMPLE_8K,
         doc_id="8k-bad",
@@ -139,7 +146,7 @@ def test_extract_eight_k_rejects_invalid_event_classification(tmp_path: Path) ->
     silently round-trip."""
     bad = _valid_output()
     bad["event_classification"] = "not-a-real-classification"
-    client = _fake_client(json.dumps(bad))
+    client = _fake_client(bad)
     out = extract_eight_k(
         raw_doc=_SAMPLE_8K,
         doc_id="8k-enum",
@@ -164,7 +171,7 @@ def test_eight_k_real_fixture_passes_citation_grounding(tmp_path: Path) -> None:
 
     fixture_dir = Path(__file__).parent / "fixtures" / "eight_k"
     raw = (fixture_dir / "sample_8k.txt").read_text()
-    frozen = (fixture_dir / "sample_8k_output.json").read_text()
+    frozen = json.loads((fixture_dir / "sample_8k_output.json").read_text())
     client = _fake_client(frozen)
     out = extract_eight_k(
         raw_doc=raw,

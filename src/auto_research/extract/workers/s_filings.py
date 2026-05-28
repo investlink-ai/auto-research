@@ -1,8 +1,8 @@
 """S-1 / S-3 extraction worker.
 
 Composes `_common.run_single_shot_extraction` with the dilution prompt
-and `SFilingOutput` schema. The original `_strip_fence` / `_resolve_spans`
-/ `_write_quarantine` helpers now live in `_common.py` and are shared
+and `SFilingOutput` schema. The original `_resolve_spans` /
+`_write_quarantine` helpers now live in `_common.py` and are shared
 by the 10-K / transcript / 8-K workers, so the four workers route INV-2
 the same way.
 

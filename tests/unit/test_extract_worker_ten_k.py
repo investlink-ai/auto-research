@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 
 import anthropic
 import pytest
-from anthropic.types import Message, TextBlock, Usage
+from anthropic.types import Message, ToolUseBlock, Usage
 
 from auto_research.extract.chunking import (
     ChildChunk,
@@ -46,13 +46,20 @@ _SAMPLE_10K = (
 )
 
 
-def _make_response(text: str) -> Message:
+def _make_tool_response(tool_input: Any) -> Message:
     return Message(
         id="msg_test",
-        content=[TextBlock(type="text", text=text, citations=None)],
+        content=[
+            ToolUseBlock(
+                id="toolu_test",
+                input=tool_input,
+                name="record_extraction",
+                type="tool_use",
+            )
+        ],
         model="claude-sonnet-4-6",
         role="assistant",
-        stop_reason="end_turn",
+        stop_reason="tool_use",
         stop_sequence=None,
         type="message",
         usage=Usage(
@@ -68,20 +75,20 @@ def _make_response(text: str) -> Message:
     )
 
 
-def _fake_client_single(text: str) -> anthropic.Anthropic:
+def _fake_client_single(tool_input: Any) -> anthropic.Anthropic:
     fake = MagicMock()
-    fake.messages.create.return_value = _make_response(text)
+    fake.messages.create.return_value = _make_tool_response(tool_input)
     return cast(anthropic.Anthropic, fake)
 
 
-def _fake_client_sequence(texts: list[str]) -> anthropic.Anthropic:
+def _fake_client_sequence(tool_inputs: list[Any]) -> anthropic.Anthropic:
     """A client that returns a different response on each call.
 
     Used for the multi-call paths (RAG: one call per narrative field;
     Item 8: narrative + financials).
     """
     fake = MagicMock()
-    fake.messages.create.side_effect = [_make_response(t) for t in texts]
+    fake.messages.create.side_effect = [_make_tool_response(t) for t in tool_inputs]
     return cast(anthropic.Anthropic, fake)
 
 
@@ -192,7 +199,7 @@ def _chunkset_narrative_only() -> ChunkSet:
 def test_ten_k_single_shot_branch_no_chunkset(tmp_path: Path) -> None:
     """Short raw doc, no chunkset → single-shot. Exactly one LLM call;
     financials remains None."""
-    client = _fake_client_single(json.dumps(_valid_narrative()))
+    client = _fake_client_single(_valid_narrative())
     out = extract_ten_k(
         raw_doc=_SAMPLE_10K,
         doc_id="10k-001",
@@ -212,7 +219,7 @@ def test_ten_k_single_shot_branch_short_doc_with_narrative_chunkset(
     """Short raw doc + chunkset (no table parents) → still single-shot
     narrative (chunkset alone does NOT trigger the RAG path; the size
     threshold does). Item 8 doesn't fire because there's no table parent."""
-    client = _fake_client_single(json.dumps(_valid_narrative()))
+    client = _fake_client_single(_valid_narrative())
     out = extract_ten_k(
         raw_doc=_SAMPLE_10K,
         doc_id="10k-002",
@@ -302,7 +309,7 @@ def test_ten_k_rag_branch_fires_above_cutoff(tmp_path: Path) -> None:
     # is insertion order: guidance_tone, accrual_flags, supplier_mentions,
     # customer_mentions, risk_factor_deltas.
     responses_in_order = [
-        json.dumps(_response_for(f))
+        _response_for(f)
         for f in (
             "guidance_tone",
             "accrual_flags",
@@ -332,7 +339,7 @@ def test_ten_k_rag_branch_requires_retrieve_fn(tmp_path: Path) -> None:
     not a silent fallback to single-shot."""
     long_raw = "word " * 200_000
     chunkset = _chunkset_narrative_only()
-    client = _fake_client_single(json.dumps(_valid_narrative()))
+    client = _fake_client_single(_valid_narrative())
     with pytest.raises(ValueError, match="retrieve_fn"):
         extract_ten_k(
             raw_doc=long_raw,
@@ -377,9 +384,9 @@ def test_ten_k_rag_partial_failure_does_not_persist_earlier_fields(
     bad["guidance_tone"]["citation"]["source_quote"] = "not in any parent"
     client = _fake_client_sequence(
         [
-            json.dumps(valid),  # guidance_tone — succeeds, stages
-            json.dumps(valid),  # accrual_flags — succeeds, stages
-            json.dumps(bad),  # supplier_mentions — fails, quarantines
+            valid,  # guidance_tone — succeeds, stages
+            valid,  # accrual_flags — succeeds, stages
+            bad,  # supplier_mentions — fails, quarantines
         ]
     )
     out = extract_ten_k(
@@ -406,13 +413,7 @@ def test_ten_k_rag_identity_disagreement_quarantines(tmp_path: Path) -> None:
     base = _rag_grounded_narrative(cik="0000000001")
     diverged = _rag_grounded_narrative(cik="0000999999")
     client = _fake_client_sequence(
-        [
-            json.dumps(base),
-            json.dumps(diverged),
-            json.dumps(base),
-            json.dumps(base),
-            json.dumps(base),
-        ]
+        [base, diverged, base, base, base]
     )
     out = extract_ten_k(
         raw_doc=long_raw,
@@ -440,7 +441,7 @@ def test_ten_k_long_doc_without_chunkset_raises(tmp_path: Path) -> None:
     full 100K+ tokens as fresh input every call and likely exceed the
     model's input window."""
     long_raw = "word " * 200_000  # ~200K tokens, well above SINGLE_SHOT cutoff
-    client = _fake_client_single(json.dumps(_valid_narrative()))
+    client = _fake_client_single(_valid_narrative())
     with pytest.raises(ValueError, match="cutoff"):
         extract_ten_k(
             raw_doc=long_raw,
@@ -464,7 +465,7 @@ def test_ten_k_item8_financials_extracted_from_table_html(tmp_path: Path) -> Non
     )
     chunkset = _chunkset_with_table(table_html)
     client = _fake_client_sequence(
-        [json.dumps(_valid_narrative()), json.dumps(_valid_financials())]
+        [_valid_narrative(), _valid_financials()]
     )
     out = extract_ten_k(
         raw_doc=_SAMPLE_10K,
@@ -632,11 +633,7 @@ def test_ten_k_item8_iterates_all_table_parents(tmp_path: Path) -> None:
         "cash_from_financing": None,
     }
     client = _fake_client_sequence(
-        [
-            json.dumps(_valid_narrative()),
-            json.dumps(income_response),
-            json.dumps(balance_response),
-        ]
+        [_valid_narrative(), income_response, balance_response]
     )
     out = extract_ten_k(
         raw_doc=_SAMPLE_10K,
@@ -660,7 +657,7 @@ def test_ten_k_item8_financials_skipped_when_no_table_parents(
 ) -> None:
     """Chunkset present but with no `table_html` parents → only the
     narrative call runs; financials stays None."""
-    client = _fake_client_single(json.dumps(_valid_narrative()))
+    client = _fake_client_single(_valid_narrative())
     out = extract_ten_k(
         raw_doc=_SAMPLE_10K,
         doc_id="10k-no-table",
@@ -679,7 +676,7 @@ def test_ten_k_item8_financials_skipped_when_no_table_parents(
 def test_ten_k_hallucinated_quote_quarantines(tmp_path: Path) -> None:
     bad = _valid_narrative()
     bad["guidance_tone"]["citation"]["source_quote"] = "not in the filing at all"
-    client = _fake_client_single(json.dumps(bad))
+    client = _fake_client_single(bad)
     out = extract_ten_k(
         raw_doc=_SAMPLE_10K,
         doc_id="10k-bad",
@@ -701,7 +698,7 @@ def test_ten_k_item8_failure_does_not_drop_narrative(tmp_path: Path) -> None:
     bad_financials = _valid_financials()
     bad_financials["revenue"]["citation"]["source_quote"] = "not in the table"
     client = _fake_client_sequence(
-        [json.dumps(_valid_narrative()), json.dumps(bad_financials)]
+        [_valid_narrative(), bad_financials]
     )
     out = extract_ten_k(
         raw_doc=_SAMPLE_10K,
@@ -721,7 +718,7 @@ def test_ten_k_item8_failure_does_not_drop_narrative(tmp_path: Path) -> None:
 
 
 def test_ten_k_single_shot_cache_hit_skips_llm(tmp_path: Path) -> None:
-    client = _fake_client_single(json.dumps(_valid_narrative()))
+    client = _fake_client_single(_valid_narrative())
     first = extract_ten_k(
         raw_doc=_SAMPLE_10K,
         doc_id="10k-cache",
@@ -751,7 +748,7 @@ def test_ten_k_real_fixture_passes_citation_grounding(tmp_path: Path) -> None:
 
     fixture_dir = Path(__file__).parent / "fixtures" / "ten_k"
     raw = (fixture_dir / "sample_item7.txt").read_text()
-    frozen = (fixture_dir / "sample_item7_output.json").read_text()
+    frozen = json.loads((fixture_dir / "sample_item7_output.json").read_text())
     client = _fake_client_single(frozen)
     out = extract_ten_k(
         raw_doc=raw,

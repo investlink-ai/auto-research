@@ -7,13 +7,12 @@ keeps each test under a second.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Literal, cast
 from unittest.mock import MagicMock
 
 import anthropic
 import pytest
-from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
+from anthropic.types import Message, ToolUseBlock, Usage
 from pydantic import ValidationError
 
 from auto_research.extract import embeddings as embeddings_module
@@ -48,10 +47,22 @@ _StopReason = Literal[
 ]
 
 
-def _make_response(text: str, *, stop_reason: _StopReason = "end_turn") -> Message:
+def _make_tool_response(
+    *,
+    tool_input: Any,
+    stop_reason: _StopReason = "end_turn",
+    tool_name: str = "record_extraction",
+) -> Message:
     return Message(
         id="msg_test",
-        content=[TextBlock(type="text", text=text, citations=None)],
+        content=[
+            ToolUseBlock(
+                id="toolu_test",
+                input=tool_input,
+                name=tool_name,
+                type="tool_use",
+            )
+        ],
         model="claude-haiku-4-5",
         role="assistant",
         stop_reason=stop_reason,
@@ -70,37 +81,18 @@ def _make_response(text: str, *, stop_reason: _StopReason = "end_turn") -> Messa
     )
 
 
-def _make_tool_only_response() -> Message:
-    return Message(
-        id="msg_test",
-        content=[
-            ToolUseBlock(
-                id="tu_1",
-                input={"foo": "bar"},
-                name="some_tool",
-                type="tool_use",
-            )
-        ],
-        model="claude-haiku-4-5",
-        role="assistant",
-        stop_reason="tool_use",
-        stop_sequence=None,
-        type="message",
-        usage=Usage(
-            input_tokens=100,
-            output_tokens=50,
-            cache_creation=None,
-            cache_creation_input_tokens=None,
-            cache_read_input_tokens=None,
-            inference_geo=None,
-            server_tool_use=None,
-            service_tier="standard",
-        ),
+def _make_wrong_tool_response() -> Message:
+    """tool_use block emitted under a different name than `record_extraction`
+    — exercises the no-record_extraction-block fallback in `resolve`."""
+    return _make_tool_response(tool_input={"foo": "bar"}, tool_name="some_other_tool")
+
+
+def _fake_client(message: Message | dict[str, Any]) -> anthropic.Anthropic:
+    msg = (
+        message
+        if isinstance(message, Message)
+        else _make_tool_response(tool_input=message)
     )
-
-
-def _fake_client(message: Message | str) -> anthropic.Anthropic:
-    msg = _make_response(message) if isinstance(message, str) else message
     fake = MagicMock()
     fake.messages.create.return_value = msg
     return cast(anthropic.Anthropic, fake)
@@ -112,20 +104,14 @@ def _bge_adapter() -> EmbeddingAdapter:
 
 def _resolver(
     *,
-    response_json: dict[str, Any] | str | Message,
+    response_json: dict[str, Any] | Message,
     top_k: int = 3,
     universe: tuple[TickerEntry, ...] | None = None,
 ) -> EntityResolver:
-    if isinstance(response_json, Message):
-        message: Message | str = response_json
-    elif isinstance(response_json, str):
-        message = response_json
-    else:
-        message = json.dumps(response_json)
     return EntityResolver(
         adapter=_bge_adapter(),
         universe=universe if universe is not None else _fixture_universe(),
-        anthropic_client=_fake_client(message),
+        anthropic_client=_fake_client(response_json),
         top_k=top_k,
     )
 
@@ -171,11 +157,15 @@ def test_resolve_downgrades_off_list_ticker_to_unknown() -> None:
     assert "not in" in result.reasoning.lower()
 
 
-def test_resolve_downgrades_malformed_json_to_unknown() -> None:
-    resolver = _resolver(response_json="not valid json at all")
+def test_resolve_downgrades_malformed_tool_input_to_unknown() -> None:
+    """A `tool_use.input` dict missing required fields fails Pydantic
+    validation and collapses to unknown — the equivalent of the old
+    json-decode-failed branch under tool_use server-side enforcement.
+    """
+    resolver = _resolver(response_json={"ticker": "NVDA"})  # missing reasoning
     result = resolver.resolve("NVIDIA H100 GPUs")
     assert result.resolved_ticker is None
-    assert "could not be parsed" in result.reasoning.lower()
+    assert "schema validation" in result.reasoning.lower()
 
 
 def test_resolve_short_circuits_empty_mention() -> None:
@@ -250,7 +240,7 @@ def test_resolve_rejects_extra_fields_from_llm() -> None:
     )
     result = resolver.resolve("NVIDIA GPUs")
     assert result.resolved_ticker is None
-    assert "could not be parsed" in result.reasoning.lower()
+    assert "schema validation" in result.reasoning.lower()
 
 
 def test_resolve_downgrades_empty_reasoning() -> None:
@@ -261,13 +251,19 @@ def test_resolve_downgrades_empty_reasoning() -> None:
     result = resolver.resolve("NVIDIA chips")
     assert result.resolved_ticker is None
     assert result.reasoning  # the resolver's own reasoning is non-empty
-    assert "could not be parsed" in result.reasoning.lower()
+    assert "schema validation" in result.reasoning.lower()
 
 
 def test_resolve_handles_truncated_response_distinctly() -> None:
-    """stop_reason='max_tokens' is reported as a truncation, not malformed."""
-    truncated = _make_response(
-        '{"ticker": "NVDA", "reaso',
+    """stop_reason='max_tokens' is reported as a truncation, not malformed.
+
+    Under tool_use, a truncation surfaces as an incomplete tool_use block
+    whose `input` may be partial or empty; the resolver's pre-parse
+    `stop_reason` guard is what keeps that case distinguishable from
+    "model emitted a wrong shape".
+    """
+    truncated = _make_tool_response(
+        tool_input={"ticker": "NVDA"},  # truncated before reasoning
         stop_reason="max_tokens",
     )
     resolver = _resolver(response_json=truncated)
@@ -277,29 +273,13 @@ def test_resolve_handles_truncated_response_distinctly() -> None:
     assert "max_tokens" in result.reasoning
 
 
-def test_resolve_handles_no_text_block_distinctly() -> None:
-    """A tool-use-only response collapses to unknown with a clear cause string."""
-    resolver = _resolver(response_json=_make_tool_only_response())
+def test_resolve_handles_no_record_extraction_block_distinctly() -> None:
+    """A response whose tool_use blocks are all under a different tool
+    name collapses to unknown with a clear cause string."""
+    resolver = _resolver(response_json=_make_wrong_tool_response())
     result = resolver.resolve("NVIDIA chips")
     assert result.resolved_ticker is None
-    assert "no text block" in result.reasoning.lower()
-
-
-def test_resolve_extracts_json_from_partial_fence_with_prelude() -> None:
-    """LLM prepending prose + fenced JSON shouldn't quarantine the response."""
-    body = json.dumps({"ticker": "NVDA", "reasoning": "ok"})
-    text = f"Here is the JSON:\n```json\n{body}\n```"
-    resolver = _resolver(response_json=text)
-    result = resolver.resolve("NVIDIA chips")
-    assert result.resolved_ticker == "NVDA"
-
-
-def test_resolve_extracts_json_from_unfenced_response_with_prelude() -> None:
-    body = json.dumps({"ticker": "NVDA", "reasoning": "ok"})
-    text = f"Sure! {body} (let me know if you have questions)"
-    resolver = _resolver(response_json=text)
-    result = resolver.resolve("NVIDIA chips")
-    assert result.resolved_ticker == "NVDA"
+    assert "no record_extraction" in result.reasoning.lower()
 
 
 # ---------- construction-time guards ----------
@@ -311,9 +291,7 @@ def test_constructor_rejects_universe_with_no_aliases() -> None:
         EntityResolver(
             adapter=_bge_adapter(),
             universe=empty,
-            anthropic_client=_fake_client(
-                '{"ticker": null, "reasoning": "n/a"}'
-            ),
+            anthropic_client=_fake_client({"ticker": None, "reasoning": "n/a"}),
         )
 
 
@@ -325,9 +303,7 @@ def test_constructor_rejects_empty_alias_string() -> None:
         EntityResolver(
             adapter=_bge_adapter(),
             universe=bad,
-            anthropic_client=_fake_client(
-                '{"ticker": null, "reasoning": "n/a"}'
-            ),
+            anthropic_client=_fake_client({"ticker": None, "reasoning": "n/a"}),
         )
 
 
@@ -337,9 +313,7 @@ def test_constructor_rejects_whitespace_only_alias() -> None:
         EntityResolver(
             adapter=_bge_adapter(),
             universe=bad,
-            anthropic_client=_fake_client(
-                '{"ticker": null, "reasoning": "n/a"}'
-            ),
+            anthropic_client=_fake_client({"ticker": None, "reasoning": "n/a"}),
         )
 
 
@@ -353,15 +327,6 @@ def test_top_k_controls_candidate_slate_size() -> None:
     )
     result = resolver.resolve("NVIDIA chips")
     assert len(result.considered) == 2
-
-
-def test_markdown_fence_stripped_from_response() -> None:
-    fenced = "```json\n" + json.dumps(
-        {"ticker": "NVDA", "reasoning": "fenced response"}
-    ) + "\n```"
-    resolver = _resolver(response_json=fenced)
-    result = resolver.resolve("NVIDIA H100")
-    assert result.resolved_ticker == "NVDA"
 
 
 def test_universe_size_returns_distinct_ticker_count() -> None:

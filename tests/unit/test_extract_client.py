@@ -26,9 +26,24 @@ from unittest.mock import MagicMock, patch
 import anthropic
 import pytest
 from anthropic.types import Message, TextBlock, Usage
+from pydantic import BaseModel
 
 from auto_research.agents.reliability import CircuitOpen, CostCapExceeded
-from auto_research.extract.client import make_extraction_client
+from auto_research.extract.client import (
+    RECORD_EXTRACTION_TOOL_NAME,
+    make_extraction_client,
+)
+
+
+class _TinyOutput(BaseModel):
+    """Minimal pydantic model used as `output_schema=` in client tests.
+
+    Production callers pass their real Pydantic output schema; the
+    client only uses it to build `tools[input_schema]`, so any model
+    works for the request-shape assertions in this file.
+    """
+
+    answer: str
 
 # --- fakes -----------------------------------------------------------------
 
@@ -111,7 +126,7 @@ def test_call_routes_model_via_route_model() -> None:
         usd_cap=10.00,
         anthropic_client=_as_sdk(fake),
     )
-    client(task="dilution_event", system_prompt="sys", user_content="doc")
+    client(task="dilution_event", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
     # `s_filings.dilution_language` ⇒ Haiku 4.5 per spec §7.3.
     assert fake.messages.calls[0]["model"] == "claude-haiku-4-5"
 
@@ -125,7 +140,7 @@ def test_call_routes_sonnet_for_cross_doc_task() -> None:
         usd_cap=10.00,
         anthropic_client=_as_sdk(fake),
     )
-    client(task="supplier_mentions", system_prompt="sys", user_content="doc")
+    client(task="supplier_mentions", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
     assert fake.messages.calls[0]["model"] == "claude-sonnet-4-6"
 
 
@@ -143,7 +158,7 @@ def test_extended_thinking_auto_enabled_on_sonnet() -> None:
         anthropic_client=_as_sdk(fake),
     )
     # Sonnet route → thinking enabled
-    client(task="supplier_mentions", system_prompt="sys", user_content="doc")
+    client(task="supplier_mentions", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
     sonnet_call = fake.messages.calls[0]
     assert sonnet_call["model"] == "claude-sonnet-4-6"
     assert "thinking" in sonnet_call
@@ -160,10 +175,45 @@ def test_extended_thinking_skipped_on_haiku() -> None:
         usd_cap=10.00,
         anthropic_client=_as_sdk(fake),
     )
-    client(task="dilution_event", system_prompt="sys", user_content="doc")
+    client(task="dilution_event", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
     haiku_call = fake.messages.calls[0]
     assert haiku_call["model"] == "claude-haiku-4-5"
     assert "thinking" not in haiku_call
+
+
+def test_call_sends_tool_use_payload_from_output_schema() -> None:
+    """The client forwards `output_schema` as the tool's `input_schema`
+    and forces `tool_choice={'type':'tool','name':'record_extraction'}`.
+    Without this the worker's response-parser (which extracts
+    `tool_use.input` directly) has nothing to read.
+    """
+    fake = _FakeAnthropicClient()
+    client = make_extraction_client(
+        worker="s_filings",
+        usd_cap=10.00,
+        anthropic_client=_as_sdk(fake),
+    )
+    client(
+        task="dilution_event",
+        system_prompt="sys",
+        user_content="doc",
+        output_schema=_TinyOutput,
+    )
+    call = fake.messages.calls[0]
+    assert call["tools"] == [
+        {
+            "name": RECORD_EXTRACTION_TOOL_NAME,
+            "description": (
+                "Emit the structured extraction result. Call this tool "
+                "exactly once; its input is the full output object."
+            ),
+            "input_schema": _TinyOutput.model_json_schema(),
+        }
+    ]
+    assert call["tool_choice"] == {
+        "type": "tool",
+        "name": RECORD_EXTRACTION_TOOL_NAME,
+    }
 
 
 def test_call_raises_on_unknown_task() -> None:
@@ -173,7 +223,7 @@ def test_call_raises_on_unknown_task() -> None:
         anthropic_client=_as_sdk(_FakeAnthropicClient()),
     )
     with pytest.raises(ValueError) as exc_info:
-        client(task="not_a_task", system_prompt="sys", user_content="doc")
+        client(task="not_a_task", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
     # The error from `route_model` names both the worker and the bad task
     # so a typo at the call site is obvious from the traceback.
     assert "not_a_task" in str(exc_info.value)
@@ -197,7 +247,7 @@ def test_system_prompt_marked_ephemeral_by_default() -> None:
         usd_cap=10.00,
         anthropic_client=_as_sdk(fake),
     )
-    client(task="dilution_event", system_prompt="long stable prompt", user_content="doc")
+    client(task="dilution_event", system_prompt="long stable prompt", user_content="doc", output_schema=_TinyOutput)
     system = fake.messages.calls[0]["system"]
     # Shape: list[{"type": "text", "text": "...", "cache_control": {"type": "ephemeral"}}]
     assert isinstance(system, list)
@@ -214,7 +264,7 @@ def test_user_content_not_marked_cacheable() -> None:
         usd_cap=10.00,
         anthropic_client=_as_sdk(fake),
     )
-    client(task="dilution_event", system_prompt="sys", user_content="doc text")
+    client(task="dilution_event", system_prompt="sys", user_content="doc text", output_schema=_TinyOutput)
     messages = fake.messages.calls[0]["messages"]
     # User message is plain — caching it would be wasteful because each
     # doc differs.
@@ -249,7 +299,7 @@ def test_emits_est_usd_to_active_span() -> None:
             usd_cap=1000.00,  # don't care about cap here
             anthropic_client=_as_sdk(fake),
         )
-        client(task="dilution_event", system_prompt="sys", user_content="doc")
+        client(task="dilution_event", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
 
     # Haiku 4.5: \$1/MTok input + \$5/MTok output = 1 * 1.0 + 0.5 * 5.0 = \$3.50
     mock_span.set_attribute.assert_any_call("llm.cost.est_usd", pytest.approx(3.50))
@@ -281,7 +331,7 @@ def test_emits_token_and_cache_attributes_to_active_span() -> None:
             usd_cap=1000.00,
             anthropic_client=_as_sdk(fake),
         )
-        client(task="dilution_event", system_prompt="sys", user_content="doc")
+        client(task="dilution_event", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
 
     mock_span.set_attribute.assert_any_call("llm.input_tokens", 500)
     mock_span.set_attribute.assert_any_call("llm.output_tokens", 200)
@@ -308,7 +358,7 @@ def test_omits_cache_attributes_when_sdk_reports_none() -> None:
             usd_cap=1000.00,
             anthropic_client=_as_sdk(fake),
         )
-        client(task="dilution_event", system_prompt="sys", user_content="doc")
+        client(task="dilution_event", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
 
     keys_set = [c.args[0] for c in mock_span.set_attribute.call_args_list]
     assert "llm.cache_read_input_tokens" not in keys_set
@@ -333,9 +383,9 @@ def test_cost_cap_trips_after_threshold_exceeded() -> None:
         usd_cap=5.00,
         anthropic_client=_as_sdk(fake),
     )
-    client(task="supplier_mentions", system_prompt="sys", user_content="doc")
+    client(task="supplier_mentions", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
     with pytest.raises(CostCapExceeded):
-        client(task="supplier_mentions", system_prompt="sys", user_content="doc")
+        client(task="supplier_mentions", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
 
 
 def test_circuit_breaker_opens_after_consecutive_failures() -> None:
@@ -356,9 +406,9 @@ def test_circuit_breaker_opens_after_consecutive_failures() -> None:
     )
     for _ in range(2):
         with pytest.raises(RuntimeError):
-            client(task="dilution_event", system_prompt="sys", user_content="doc")
+            client(task="dilution_event", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
     with pytest.raises(CircuitOpen):
-        client(task="dilution_event", system_prompt="sys", user_content="doc")
+        client(task="dilution_event", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
 
 
 # --- factory ergonomics ----------------------------------------------------
@@ -382,9 +432,9 @@ def test_factory_per_worker_state_is_isolated() -> None:
         worker="s_filings", usd_cap=5.00, anthropic_client=_as_sdk(fake_s_filings)
     )
     # Blow ten_k's cap.
-    ten_k(task="supplier_mentions", system_prompt="sys", user_content="doc")
+    ten_k(task="supplier_mentions", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
     with pytest.raises(CostCapExceeded):
-        ten_k(task="supplier_mentions", system_prompt="sys", user_content="doc")
+        ten_k(task="supplier_mentions", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
     # s_filings is unaffected.
-    s_filings(task="dilution_event", system_prompt="sys", user_content="doc")
+    s_filings(task="dilution_event", system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
     assert len(fake_s_filings.messages.calls) == 1
