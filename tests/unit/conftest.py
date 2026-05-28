@@ -14,9 +14,17 @@ sockets are still real) so subsequent hermetic tests can monkey-patch
 the network without triggering a lazy model download. If the
 underlying model isn't installed/cached the warmup raises
 `RuntimeError` with a clear remediation pointing at `make setup-nlp`.
+
+A third function-scoped autouse fixture redirects
+`DEFAULT_QUARANTINE_ROOT` (used by every extraction worker when the
+caller omits `quarantine_root`) to a per-test temp dir so a regression
+that quarantines on a "happy path" test does NOT leak a record into the
+working-tree `data/quarantine/`.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -126,3 +134,29 @@ def _warm_qwen3_reranker() -> None:
         # would also swallow unrelated errors mentioning those words.
         if "`transformers` / `torch` could not be imported" not in str(exc):
             raise
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_default_quarantine_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Redirect every worker's `DEFAULT_QUARANTINE_ROOT` to tmp_path.
+
+    The default is `Path("data/quarantine")` — a relative path that
+    resolves to the repo's working tree. A happy-path test that omits
+    `quarantine_root=` and then quarantines (because of a regression)
+    would silently write into the live repo. Each worker imports the
+    name into its own module namespace, so we monkeypatch each one
+    individually rather than only `guardrails.DEFAULT_QUARANTINE_ROOT`.
+
+    Tests that pass `quarantine_root` explicitly are unaffected — the
+    override only changes what callers receive when they omit the arg.
+    """
+    target = tmp_path / "default_quarantine"
+    from auto_research.extract import guardrails
+    from auto_research.extract.workers import eight_k, s_filings, ten_k, transcript
+
+    monkeypatch.setattr(guardrails, "DEFAULT_QUARANTINE_ROOT", target)
+    for module in (eight_k, s_filings, ten_k, transcript):
+        if hasattr(module, "DEFAULT_QUARANTINE_ROOT"):
+            monkeypatch.setattr(module, "DEFAULT_QUARANTINE_ROOT", target)
