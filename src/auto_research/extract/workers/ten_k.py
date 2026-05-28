@@ -53,7 +53,20 @@ from auto_research.extract.prompts.ten_k_narrative import (
     TEN_K_NARRATIVE_PROMPT,
     TEN_K_NARRATIVE_PROMPT_VERSION,
 )
-from auto_research.extract.schemas import TenKFinancials, TenKOutput
+from auto_research.extract.prompts.ten_k_narrative_field import (
+    TEN_K_NARRATIVE_FIELD_CONFIGS,
+    TEN_K_NARRATIVE_FIELD_PROMPT,
+    TEN_K_NARRATIVE_FIELD_PROMPT_VERSION,
+)
+from auto_research.extract.schemas import (
+    TenKAccrualFlagsPartial,
+    TenKCustomerMentionsPartial,
+    TenKFinancials,
+    TenKGuidanceTonePartial,
+    TenKOutput,
+    TenKRiskFactorDeltasPartial,
+    TenKSupplierMentionsPartial,
+)
 from auto_research.extract.workers._common import run_single_shot_extraction
 
 _WORKER = "ten_k"
@@ -65,30 +78,20 @@ _FINANCIALS_TASK = "financials"
 _NARRATIVE_MAX_TOKENS = 8192
 _FINANCIALS_MAX_TOKENS = 4096
 
-# Per-field RAG queries. Tuned at writing time; expected to evolve under
-# eval (#20) — the prompt itself is frozen at v1, the query strings are
-# orchestration code.
-_NARRATIVE_RAG_QUERIES: dict[str, str] = {
-    "guidance_tone": (
-        "What is management's tone on forward growth, gross margin, and "
-        "demand in the MD&A section?"
-    ),
-    "accrual_flags": (
-        "What are the accrual-quality concerns: unbilled receivables, "
-        "deferred revenue swings, capitalized R&D, restructuring resets?"
-    ),
-    "supplier_mentions": (
-        "Which specific named suppliers (e.g., TSMC, Foxconn, Samsung, "
-        "ASML) does the company rely on?"
-    ),
-    "customer_mentions": (
-        "Which specific named customers — hyperscalers, large enterprises "
-        "— are explicitly called out by name?"
-    ),
-    "risk_factor_deltas": (
-        "What new, removed, or modified Item 1A risk factors does this "
-        "filing disclose?"
-    ),
+# Per-field partial schema map. Each field has its own
+# pydantic schema (identity + ONE narrative field) so the tool_use
+# input_schema is tight and Anthropic's server-side validation rejects
+# any cross-field bleed. The model emits exactly that field — no
+# unused TenKOutput slots cost output tokens, which is where the
+# unified-call path leaked ~5x output cost. The dict order matches
+# `TEN_K_NARRATIVE_FIELD_CONFIGS`; the worker iterates that ordering so
+# cache namespaces are stable.
+_NARRATIVE_FIELD_SCHEMAS: dict[str, type[Any]] = {
+    "guidance_tone": TenKGuidanceTonePartial,
+    "accrual_flags": TenKAccrualFlagsPartial,
+    "supplier_mentions": TenKSupplierMentionsPartial,
+    "customer_mentions": TenKCustomerMentionsPartial,
+    "risk_factor_deltas": TenKRiskFactorDeltasPartial,
 }
 
 RetrieveFn = Callable[[str], list[ParentChunk]]
@@ -179,7 +182,6 @@ def _merge_financials(parts: list[TenKFinancials]) -> TenKFinancials:
 
 def _extract_ten_k_rag(
     *,
-    raw_doc: str,
     doc_id: str,
     chunkset: ChunkSet,
     retrieve_fn: RetrieveFn,
@@ -189,35 +191,40 @@ def _extract_ten_k_rag(
 ) -> TenKOutput | None:
     """Per-field RAG narrative extraction.
 
-    For each TenKOutput narrative field, retrieve the top parents via
-    `retrieve_fn`, format them as user content, and run the narrative
-    prompt. The prompt asks for the full narrative output; the worker
-    takes only the relevant field from each call and merges into one
-    TenKOutput.
+    For each narrative field, retrieve the top parents via
+    `retrieve_fn`, format them as user content, and run a
+    field-scoped prompt against a partial schema that carries exactly
+    that field plus the identity columns. The worker assembles the
+    five partials into a full `TenKOutput` at the end.
 
     Per-field calls stage their cache writes; the worker commits all
-    staged writes only AFTER the full 5-field loop succeeds. A mid-loop
-    quarantine returns None without persisting ANY of the earlier
-    fields' results — so re-runs see a consistent cache state rather
-    than half-cached partial output.
+    staged writes only AFTER the full 5-field loop succeeds AND the
+    cross-partial identity check passes. A mid-loop quarantine returns
+    `None` without persisting ANY of the earlier fields' results — so
+    re-runs see a consistent cache state rather than half-cached
+    partial output.
 
-    Identity-field disagreement is treated as a quarantine: when the
-    5 calls return different cik / accession_number / fiscal_period_end
-    values, the worker has no way to pick honestly. Option A (follow-up
-    PR) eliminates this by extracting identity once from the cover-page
-    chunk; until then the interim quarantine is correct.
+    Each per-field call uses the model tier the routing table actually
+    declares (3 of 5 are Haiku) — the unified pre-split call routed
+    everything to Sonnet via `_NARRATIVE_DEFAULT_TASK = supplier_mentions`,
+    paying for the wrong tier on guidance_tone / accrual_flags /
+    risk_factor_deltas. The partial schemas eliminate the dual-output
+    waste from emitting the full TenKOutput shape on every call and
+    discarding all but one field downstream — the unified-call path
+    paid ~5x output cost for this waste.
 
-    Per-field LLM calls trade higher cost for per-field reranker
-    selectivity, which is the spec §8.1 pattern ("for each Pydantic
-    schema field, retrieve top-k child chunks → resolve to parents →
-    extraction call from retrieved context"). The five-call cost is
-    accepted because long 10-Ks are ~20% of the corpus and the per-field
-    selectivity gain on accrual_flags + risk_factor_deltas is large.
+    `chunkset` is currently unused inside the loop — `retrieve_fn`
+    abstracts the chunkset-to-parent pipeline behind the
+    field-keyed query. Kept on the signature because the caller
+    (`extract_ten_k`) already has it and a future identity-from-cover-
+    page-chunk pass will need it directly.
     """
     pending_writes: list[tuple[str, dict[str, Any]]] = []
 
     def _stage(cache_key: str, payload: dict[str, Any]) -> None:
         pending_writes.append((cache_key, payload))
+
+    del chunkset  # currently consumed by `retrieve_fn`; keep on signature.
 
     partials: dict[str, Any] = {}
     identity_seen: dict[str, list[Any]] = {
@@ -225,17 +232,21 @@ def _extract_ten_k_rag(
         "accession_number": [],
         "fiscal_period_end": [],
     }
-    for field, query in _NARRATIVE_RAG_QUERIES.items():
+    for field, field_description, query in TEN_K_NARRATIVE_FIELD_CONFIGS:
         parents = retrieve_fn(query)
         user_content = _format_parents_as_context(parents)
+        partial_schema = _NARRATIVE_FIELD_SCHEMAS[field]
+        field_prompt = TEN_K_NARRATIVE_FIELD_PROMPT.format(
+            field_name=field, field_description=field_description
+        )
         per_field = run_single_shot_extraction(
             raw_doc=user_content,
             doc_id=f"{doc_id}#{field}",  # distinct cache key per field
             worker=_WORKER,
             task=field,
-            prompt=TEN_K_NARRATIVE_PROMPT,
-            prompt_version=TEN_K_NARRATIVE_PROMPT_VERSION,
-            output_model=TenKOutput,
+            prompt=field_prompt,
+            prompt_version=TEN_K_NARRATIVE_FIELD_PROMPT_VERSION,
+            output_model=partial_schema,
             max_tokens=_NARRATIVE_MAX_TOKENS,
             cache_root=cache_root,
             quarantine_root=quarantine_root,
@@ -257,11 +268,10 @@ def _extract_ten_k_rag(
         partials.setdefault("accession_number", per_field.accession_number)
         partials.setdefault("fiscal_period_end", per_field.fiscal_period_end)
 
-    # Identity-field consistency check: the 5 per-field calls each
-    # return a full TenKOutput with cik / accession_number /
-    # fiscal_period_end. If they disagree, the model hallucinated on
-    # at least one call and silently keeping the first value would
-    # corrupt downstream attribution. Quarantine instead.
+    # Identity-field consistency check: each per-field partial carries
+    # cik / accession_number / fiscal_period_end. If they disagree, the
+    # model hallucinated on at least one call and silently keeping the
+    # first value would corrupt downstream attribution. Quarantine.
     for field_name, values in identity_seen.items():
         unique = set(values)
         if len(unique) > 1:
@@ -270,7 +280,7 @@ def _extract_ten_k_rag(
             _write_quarantine(
                 quarantine_root=quarantine_root,
                 worker=_WORKER,
-                prompt_version=TEN_K_NARRATIVE_PROMPT_VERSION,
+                prompt_version=TEN_K_NARRATIVE_FIELD_PROMPT_VERSION,
                 doc_id=f"{doc_id}#identity-disagreement",
                 parsed={
                     "field": field_name,
@@ -348,7 +358,6 @@ def extract_ten_k(
             )
         assert chunkset is not None  # narrow for mypy
         narrative = _extract_ten_k_rag(
-            raw_doc=raw_doc,
             doc_id=doc_id,
             chunkset=chunkset,
             retrieve_fn=retrieve_fn,

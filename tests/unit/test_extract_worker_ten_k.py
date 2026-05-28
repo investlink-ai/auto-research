@@ -247,20 +247,67 @@ def test_ten_k_rag_branch_fires_above_cutoff(tmp_path: Path) -> None:
 
     def _response_for(field: str) -> dict[str, Any]:
         sentinel = f"FIELD-{field}"
-        return {
+        base = {
             "cik": "0000000001",
             "accession_number": "0000000001-26-000001",
             "fiscal_period_end": "2025-12-31",
-            "guidance_tone": {
-                "citation": {"source_quote": sentinel},
-                "confidence": "high",
-            },
-            "accrual_flags": [],
-            "supplier_mentions": [],
-            "customer_mentions": [],
-            "language_novelty_score": 0.0,
-            "risk_factor_deltas": [],
         }
+        if field == "guidance_tone":
+            return {
+                **base,
+                "guidance_tone": {
+                    "citation": {"source_quote": sentinel},
+                    "confidence": "high",
+                },
+            }
+        if field == "accrual_flags":
+            return {
+                **base,
+                "accrual_flags": [
+                    {
+                        "citation": {"source_quote": sentinel},
+                        "confidence": "medium",
+                    }
+                ],
+            }
+        if field == "supplier_mentions":
+            return {
+                **base,
+                "supplier_mentions": [
+                    {
+                        "mention_text": "Sentinel Supplier Inc.",
+                        "citation": {"source_quote": sentinel},
+                        "resolved_ticker": None,
+                        "resolver_confidence": None,
+                        "resolver_reasoning": None,
+                    }
+                ],
+            }
+        if field == "customer_mentions":
+            return {
+                **base,
+                "customer_mentions": [
+                    {
+                        "mention_text": "Sentinel Customer Corp.",
+                        "citation": {"source_quote": sentinel},
+                        "resolved_ticker": None,
+                        "resolver_confidence": None,
+                        "resolver_reasoning": None,
+                    }
+                ],
+            }
+        if field == "risk_factor_deltas":
+            return {
+                **base,
+                "risk_factor_deltas": [
+                    {
+                        "change_type": "added",
+                        "text": "new risk factor language",
+                        "citation": {"source_quote": sentinel},
+                    }
+                ],
+            }
+        raise ValueError(f"unknown field {field!r}")
 
     # The worker iterates `_NARRATIVE_RAG_QUERIES` in dict order, which
     # is insertion order: guidance_tone, accrual_flags, supplier_mentions,
@@ -307,23 +354,35 @@ def test_ten_k_rag_branch_requires_retrieve_fn(tmp_path: Path) -> None:
         )
 
 
-def _rag_grounded_narrative(cik: str = "0000000001") -> dict[str, Any]:
-    """A TenKOutput shape whose only citation quote ('cautious growth in
-    fiscal 2026') is present in `_chunkset_narrative_only`'s parent
-    text — so the response validates cleanly for RAG-path tests."""
-    return {
+def _rag_partials_in_order(cik: str = "0000000001") -> list[dict[str, Any]]:
+    """Five partial-schema dicts (one per narrative field) whose
+    citation quote ('cautious growth in fiscal 2026') is present in
+    `_chunkset_narrative_only`'s parent text — so each per-field
+    response validates cleanly against its respective Pydantic partial.
+
+    Order matches `TEN_K_NARRATIVE_FIELD_CONFIGS`: guidance_tone,
+    accrual_flags, supplier_mentions, customer_mentions,
+    risk_factor_deltas.
+    """
+    base = {
         "cik": cik,
         "accession_number": "0000000001-26-000001",
         "fiscal_period_end": "2025-12-31",
-        "guidance_tone": {
-            "citation": {"source_quote": "cautious growth in fiscal 2026"},
-            "confidence": "high",
-        },
-        "accrual_flags": [],
-        "supplier_mentions": [],
-        "customer_mentions": [],
-        "risk_factor_deltas": [],
     }
+    quote = "cautious growth in fiscal 2026"
+    return [
+        {
+            **base,
+            "guidance_tone": {
+                "citation": {"source_quote": quote},
+                "confidence": "high",
+            },
+        },
+        {**base, "accrual_flags": []},
+        {**base, "supplier_mentions": []},
+        {**base, "customer_mentions": []},
+        {**base, "risk_factor_deltas": []},
+    ]
 
 
 def test_ten_k_rag_partial_failure_does_not_persist_earlier_fields(
@@ -336,14 +395,26 @@ def test_ten_k_rag_partial_failure_does_not_persist_earlier_fields(
     long_raw = "word " * 200_000
     chunkset = _chunkset_narrative_only()
 
-    valid = _rag_grounded_narrative()
-    bad = _rag_grounded_narrative()
-    bad["guidance_tone"]["citation"]["source_quote"] = "not in any parent"
+    valid_in_order = _rag_partials_in_order()
+    bad_supplier = {
+        "cik": "0000000001",
+        "accession_number": "0000000001-26-000001",
+        "fiscal_period_end": "2025-12-31",
+        "supplier_mentions": [
+            {
+                "mention_text": "Phantom Co.",
+                "citation": {"source_quote": "not in any parent"},
+                "resolved_ticker": None,
+                "resolver_confidence": None,
+                "resolver_reasoning": None,
+            }
+        ],
+    }
     client = _fake_client_sequence(
         [
-            valid,  # guidance_tone — succeeds, stages
-            valid,  # accrual_flags — succeeds, stages
-            bad,  # supplier_mentions — fails, quarantines
+            valid_in_order[0],  # guidance_tone — succeeds, stages
+            valid_in_order[1],  # accrual_flags — succeeds, stages
+            bad_supplier,  # supplier_mentions — fails, quarantines
         ]
     )
     out = extract_ten_k(
@@ -367,10 +438,12 @@ def test_ten_k_rag_identity_disagreement_quarantines(tmp_path: Path) -> None:
     keep the first call's value."""
     long_raw = "word " * 200_000
     chunkset = _chunkset_narrative_only()
-    base = _rag_grounded_narrative(cik="0000000001")
-    diverged = _rag_grounded_narrative(cik="0000999999")
+    base = _rag_partials_in_order(cik="0000000001")
+    diverged = _rag_partials_in_order(cik="0000999999")
+    # Swap the second call (accrual_flags) for a partial with a
+    # diverged cik. The remaining 4 keep the agreed cik.
     client = _fake_client_sequence(
-        [base, diverged, base, base, base]
+        [base[0], diverged[1], base[2], base[3], base[4]]
     )
     out = extract_ten_k(
         raw_doc=long_raw,

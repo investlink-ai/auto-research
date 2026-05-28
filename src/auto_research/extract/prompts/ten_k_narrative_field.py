@@ -1,0 +1,168 @@
+"""Per-field 10-K narrative extraction prompt (Option A / PR-B).
+
+The RAG path runs one Anthropic call per narrative field so each call
+uses the model tier the routing table actually declares: three of the
+five fields are Haiku-tier (`guidance_tone`, `accrual_flags`,
+`risk_factor_deltas`); only `supplier_mentions` and `customer_mentions`
+genuinely need the Sonnet cross-doc tier. The unified pre-split call
+forced everything through `_NARRATIVE_DEFAULT_TASK = "supplier_mentions"`
+(Sonnet) — 3 of 5 fields paid the wrong tier.
+
+Cache-prefix discipline: the parameterized blocks (`{field_name}`,
+`{field_description}`) sit at the END of the template so the long
+preamble (constraints, identity-field rules, citation discipline) is
+the cached prefix across all five fields. With the per-worker
+ephemeral-cache marker on the system block, this keeps the
+~80%-cached prefix economics intact across the field loop.
+"""
+
+from __future__ import annotations
+
+TEN_K_NARRATIVE_FIELD_PROMPT_VERSION = "v1"
+
+
+TEN_K_NARRATIVE_FIELD_PROMPT = """\
+You are extracting ONE narrative signal from an SEC 10-K annual report.
+The retrieved top passages (Item 1A Risk Factors, Item 7 MD&A, Item 7A
+Market Risk) will be supplied in the next user message.
+
+This call extracts EXACTLY ONE narrative field — do not populate any
+other narrative fields. The output schema's `extra="forbid"` enforces
+this; emitting another field will fail validation and quarantine the
+call.
+
+Always populate these identity fields on every call so downstream can
+verify the per-field calls agree on which filing they extracted from:
+
+- cik: the issuer's CIK (10-digit, leading zeros).
+- accession_number: the filing's SEC accession number.
+- fiscal_period_end: the period-end date in ISO format (YYYY-MM-DD).
+
+Constraints (apply to every citation in this output):
+
+- source_quote MUST be a verbatim substring of the supplied passages —
+  preserve original whitespace and punctuation; do NOT collapse runs of
+  whitespace. The substring is located by whitespace-flexible match;
+  ZERO matches or AMBIGUOUS matches (more occurrences than citations
+  sharing the same quote) quarantine the entire output. When a quote
+  naturally repeats (e.g., a recurring entity name across Risk
+  Factors, MD&A, and Properties), emit one citation per textual
+  occurrence so counts match — the worker pairs them in document
+  order.
+- Choose quotes long and specific enough to be unique unless
+  intentionally emitting per-occurrence multiple citations.
+- DO NOT include `source_span`; character offsets are computed in code.
+- DO NOT invent quotes. If the field has no support in the retrieved
+  passages, emit the empty list (or, for single-Claim fields, you
+  MUST still cite — silent omission is not an option; if the
+  passages truly carry no signal, cite the strongest available
+  hedging language).
+
+Confidence on every Claim is EXACTLY one of "high", "medium", or "low"
+— float confidence is rejected.
+
+Now extract the field `{field_name}` from this filing:
+
+{field_description}
+"""
+
+
+# Per-field configuration consumed by the RAG worker loop. Each entry
+# is `(field_name, field_description, retrieval_query)`. The
+# `retrieval_query` drives the per-field rerank — the prompt is silent
+# about retrieval and the worker is silent about the prompt-level
+# field semantics, so changing one of the three doesn't require
+# coordinated edits across the others.
+#
+# The order of this list is load-bearing: the RAG worker iterates in
+# this order and stages per-field cache writes; reordering changes the
+# observable per-field cache namespace. New fields go at the end.
+TEN_K_NARRATIVE_FIELD_CONFIGS: tuple[tuple[str, str, str], ...] = (
+    (
+        "guidance_tone",
+        (
+            "A single Claim describing the tone of forward-looking language "
+            "in MD&A (e.g., 'cautious; gross-margin headwinds called out "
+            "twice'). Quote the passage in MD&A that most strongly carries "
+            "the tone, not a generic disclaimer."
+        ),
+        (
+            "What is management's tone on forward growth, gross margin, and "
+            "demand in the MD&A section?"
+        ),
+    ),
+    (
+        "accrual_flags",
+        (
+            "A list of Claims flagging accrual-quality concerns — large "
+            "unbilled receivables, deferred revenue swings, capitalized R&D "
+            "growing faster than revenue, restructuring-charge resets. One "
+            "Claim per distinct concern. Empty list when none surface in "
+            "the retrieved passages."
+        ),
+        (
+            "What are the accrual-quality concerns: unbilled receivables, "
+            "deferred revenue swings, capitalized R&D, restructuring resets?"
+        ),
+    ),
+    (
+        "supplier_mentions",
+        (
+            "A list of SupplierMention objects naming specific named "
+            "suppliers (e.g., TSMC, Foxconn, Samsung, ASML). Each "
+            "SupplierMention has:\n"
+            "  - mention_text: the verbatim name as it appears in the "
+            "filing.\n"
+            "  - citation: {source_quote: '...'}.\n"
+            "  - resolved_ticker, resolver_confidence, resolver_reasoning: "
+            "ALL null — a separate resolver step runs later. Do NOT "
+            "fabricate or guess.\n"
+            "Empty list when no specific named supplier is called out."
+        ),
+        (
+            "Which specific named suppliers (e.g., TSMC, Foxconn, Samsung, "
+            "ASML) does the company rely on?"
+        ),
+    ),
+    (
+        "customer_mentions",
+        (
+            "A list of CustomerMention objects (same shape as "
+            "SupplierMention). Include named customers — typically "
+            "hyperscaler or enterprise customers explicitly called out "
+            "(NVDA, MSFT, GOOGL, AMZN, META) — NOT vague references like "
+            "'certain large customers' or 'our key customer'. Same "
+            "null-resolver-fields discipline as supplier mentions. Empty "
+            "list when no specific named customer is called out."
+        ),
+        (
+            "Which specific named customers — hyperscalers, large "
+            "enterprises — are explicitly called out by name?"
+        ),
+    ),
+    (
+        "risk_factor_deltas",
+        (
+            "A list of RiskFactorDelta objects, each:\n"
+            "  - change_type: EXACTLY one of 'added', 'removed', or "
+            "'modified' (vs the prior year's 10-K).\n"
+            "  - text: the new (or removed, or modified) risk-factor "
+            "language.\n"
+            "  - citation: {source_quote: '...'} anchoring the text in "
+            "THIS filing.\n"
+            "When the prior year is not available in the supplied passages, "
+            "treat all Item 1A risk factors as 'added'."
+        ),
+        (
+            "What new, removed, or modified Item 1A risk factors does this "
+            "filing disclose?"
+        ),
+    ),
+)
+
+
+__all__ = [
+    "TEN_K_NARRATIVE_FIELD_CONFIGS",
+    "TEN_K_NARRATIVE_FIELD_PROMPT",
+    "TEN_K_NARRATIVE_FIELD_PROMPT_VERSION",
+]
