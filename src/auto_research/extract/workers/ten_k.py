@@ -25,7 +25,8 @@ stack — the backfill orchestrator owns wiring it to the real
 stub.
 
 Production callers omit `cache_root` / `quarantine_root` (package
-defaults) and rely on `_CLIENT`'s singleton state across docs.
+defaults) and rely on `_common._CLIENTS["ten_k"]`'s singleton state
+across docs.
 """
 
 from __future__ import annotations
@@ -43,7 +44,6 @@ from auto_research.extract.chunking import (
     ParentChunk,
     count_tokens,
 )
-from auto_research.extract.client import ExtractionFn, make_extraction_client
 from auto_research.extract.guardrails import DEFAULT_QUARANTINE_ROOT
 from auto_research.extract.prompts.ten_k_financials import (
     TEN_K_FINANCIALS_PROMPT,
@@ -64,8 +64,6 @@ _NARRATIVE_DEFAULT_TASK = "supplier_mentions"
 _FINANCIALS_TASK = "financials"
 _NARRATIVE_MAX_TOKENS = 8192
 _FINANCIALS_MAX_TOKENS = 4096
-
-_CLIENT: ExtractionFn | None = None
 
 # Per-field RAG queries. Tuned at writing time; expected to evolve under
 # eval (#20) — the prompt itself is frozen at v1, the query strings are
@@ -94,18 +92,6 @@ _NARRATIVE_RAG_QUERIES: dict[str, str] = {
 }
 
 RetrieveFn = Callable[[str], list[ParentChunk]]
-
-
-def _get_client(anthropic_client: anthropic.Anthropic | None) -> ExtractionFn:
-    """Return the production singleton, or a fresh client for test injection."""
-    global _CLIENT
-    if anthropic_client is not None:
-        return make_extraction_client(
-            worker=_WORKER, anthropic_client=anthropic_client
-        )
-    if _CLIENT is None:
-        _CLIENT = make_extraction_client(worker=_WORKER)
-    return _CLIENT
 
 
 def _format_parents_as_context(parents: list[ParentChunk]) -> str:
@@ -164,7 +150,6 @@ def _extract_item8_financials(
         cache_root=cache_root,
         quarantine_root=quarantine_root,
         anthropic_client=anthropic_client,
-        client_factory=_get_client,
     )
 
 
@@ -255,7 +240,6 @@ def _extract_ten_k_rag(
             cache_root=cache_root,
             quarantine_root=quarantine_root,
             anthropic_client=anthropic_client,
-            client_factory=_get_client,
             cache_write_handler=_stage,
         )
         if per_field is None:
@@ -385,7 +369,6 @@ def extract_ten_k(
             cache_root=cache_root_resolved,
             quarantine_root=quarantine_root_resolved,
             anthropic_client=anthropic_client,
-            client_factory=_get_client,
         )
     if narrative is None:
         return None
