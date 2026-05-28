@@ -5,13 +5,13 @@
     "citation": {
       "source_quote": "We delivered a strong first quarter, with revenue of $312 million, up 34% year over year"
     },
-    "confidence": 0.8
+    "confidence": "high"
   },
   "q_and_a_evasiveness": {
     "citation": {
       "source_quote": "We don't typically guide that far out and prefer not to break out customer-specific economics"
     },
-    "confidence": 0.65
+    "confidence": "medium"
   },
   "forward_statements": [
     {

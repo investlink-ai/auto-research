@@ -29,11 +29,13 @@ Fields to populate:
   silently corrupts every time-windowed downstream signal.
 - prepared_remarks_tone: a single Claim describing the overall tone of
   the prepared remarks portion (e.g., "cautious bullish on FY26
-  demand; gross-margin headwinds called out twice"). Confidence in [0, 1].
+  demand; gross-margin headwinds called out twice"). Confidence
+  categorical (one of "high", "medium", or "low").
 - q_and_a_evasiveness: a single Claim describing how evasive management
   was during the Q&A — whether they answered analyst questions
   directly or deflected with phrases like "we don't comment on that"
-  or "we'll cover that at the next investor day." Confidence in [0, 1].
+  or "we'll cover that at the next investor day." Confidence
+  categorical (one of "high", "medium", or "low").
 - forward_statements: list of ForwardStatement objects, each describing
   a forward-looking claim management made. Each ForwardStatement has:
   - statement_text: the paraphrased forward statement (e.g., "expect
@@ -46,7 +48,8 @@ Fields to populate:
     "FY26", "long-term", "by end of 2026", "over the next 18 months".
 
 A Claim is `{"citation": {"source_quote": "..."}, "confidence":
-0.0-1.0}`. A ForwardStatement is `{"statement_text": "...",
+"high"|"medium"|"low"}` — float confidence is rejected. A
+ForwardStatement is `{"statement_text": "...",
 "citation": {"source_quote": "..."}, "mentioned_entities": [...],
 "horizon": "..."}`. No other fields are allowed inside any of these
 objects.
@@ -58,11 +61,11 @@ Example of a fully-formed TranscriptOutput:
     "event_datetime": "2026-01-30T17:00:00-05:00",
     "prepared_remarks_tone": {
       "citation": {"source_quote": "We delivered a strong first quarter"},
-      "confidence": 0.8
+      "confidence": "high"
     },
     "q_and_a_evasiveness": {
       "citation": {"source_quote": "We don't typically guide that far out"},
-      "confidence": 0.65
+      "confidence": "medium"
     },
     "forward_statements": [
       {

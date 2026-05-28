@@ -35,7 +35,7 @@ Fields to populate:
 - fiscal_period_end: the period-end date in ISO format (YYYY-MM-DD).
 - guidance_tone: a single Claim describing the tone of forward-looking
   language in MD&A (e.g., "cautious; gross-margin headwinds called out
-  twice"). Confidence in [0, 1].
+  twice"). Confidence categorical (one of "high", "medium", or "low").
 - accrual_flags: list of Claims flagging accrual-quality concerns —
   large unbilled receivables, deferred revenue swings, capitalized R&D
   growing faster than revenue, restructuring-charge resets.
@@ -61,7 +61,8 @@ Fields to populate:
   Item 1A risk factors as "added".
 
 A Claim is `{"citation": {"source_quote": "..."}, "confidence":
-0.0-1.0}`. A SupplierMention or CustomerMention is `{"mention_text":
+"high"|"medium"|"low"}` — float confidence is rejected. A
+SupplierMention or CustomerMention is `{"mention_text":
 "...", "citation": {"source_quote": "..."}, "resolved_ticker": null,
 "resolver_confidence": null, "resolver_reasoning": null}`. A
 RiskFactorDelta is `{"change_type": "...", "text": "...",
@@ -77,12 +78,12 @@ language_novelty_score omitted — see Constraints):
     "fiscal_period_end": "2026-01-31",
     "guidance_tone": {
       "citation": {"source_quote": "We expect cautious growth in fiscal 2027"},
-      "confidence": 0.75
+      "confidence": "high"
     },
     "accrual_flags": [
       {
         "citation": {"source_quote": "capitalized software development costs of $118 million"},
-        "confidence": 0.6
+        "confidence": "medium"
       }
     ],
     "supplier_mentions": [

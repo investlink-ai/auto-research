@@ -99,7 +99,7 @@ def _valid_narrative() -> dict[str, Any]:
         "fiscal_period_end": "2025-12-31",
         "guidance_tone": {
             "citation": {"source_quote": "cautious growth in fiscal 2026"},
-            "confidence": 0.7,
+            "confidence": "high",
         },
         "accrual_flags": [],
         "supplier_mentions": [
@@ -296,7 +296,7 @@ def test_ten_k_rag_branch_fires_above_cutoff(tmp_path: Path) -> None:
             "fiscal_period_end": "2025-12-31",
             "guidance_tone": {
                 "citation": {"source_quote": sentinel},
-                "confidence": 0.7,
+                "confidence": "high",
             },
             "accrual_flags": [],
             "supplier_mentions": [],
@@ -360,7 +360,7 @@ def _rag_grounded_narrative(cik: str = "0000000001") -> dict[str, Any]:
         "fiscal_period_end": "2025-12-31",
         "guidance_tone": {
             "citation": {"source_quote": "cautious growth in fiscal 2026"},
-            "confidence": 0.7,
+            "confidence": "high",
         },
         "accrual_flags": [],
         "supplier_mentions": [],

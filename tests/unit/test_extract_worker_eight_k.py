@@ -70,7 +70,7 @@ def _valid_output() -> dict[str, Any]:
         "dilution_language_flags": [
             {
                 "citation": {"source_quote": "Material Definitive Agreement"},
-                "confidence": 0.85,
+                "confidence": "high",
             }
         ],
     }
@@ -126,7 +126,7 @@ def test_extract_eight_k_quarantines_hallucinated_quote(tmp_path: Path) -> None:
     bad["milestone_mentions"] = [
         {
             "citation": {"source_quote": "not in the filing at all"},
-            "confidence": 0.9,
+            "confidence": "high",
         }
     ]
     client = _fake_client(bad)

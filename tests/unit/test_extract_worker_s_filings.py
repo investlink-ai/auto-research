@@ -78,7 +78,7 @@ def _valid_output() -> dict[str, Any]:
             "citation": {
                 "source_quote": "shelf takedown of $200 million of common stock"
             },
-            "confidence": 0.9,
+            "confidence": "high",
         },
         "capital_raise_language": [],
         "use_of_proceeds": [],
@@ -101,7 +101,7 @@ def test_extract_s_filing_returns_validated_output(tmp_path: Path) -> None:
     )
     assert out is not None
     assert out.form_type == "S-3"
-    assert out.dilution_event.confidence == pytest.approx(0.9)
+    assert out.dilution_event.confidence == "high"
 
 
 def test_resolved_span_indexes_into_raw_doc(tmp_path: Path) -> None:

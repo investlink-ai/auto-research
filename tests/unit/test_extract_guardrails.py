@@ -53,10 +53,12 @@ from auto_research.extract.schemas import (
 # --- helpers ----------------------------------------------------------------
 
 
-def _claim_for(start: int, end: int, source_text: str, *, confidence: float = 0.5) -> Claim:
+def _claim_for(
+    start: int, end: int, source_text: str, *, confidence: str = "medium"
+) -> Claim:
     return Claim(
         citation=Citation(source_span=(start, end), source_quote=source_text[start:end]),
-        confidence=confidence,
+        confidence=confidence,  # type: ignore[arg-type]
     )
 
 
@@ -78,7 +80,7 @@ def _minimal_ten_k_with_supplier(supplier: SupplierMention) -> TenKOutput:
     placeholder_quote = "x"  # one valid char; this claim isn't being validated against any source.
     placeholder = Claim(
         citation=Citation(source_span=(0, 1), source_quote=placeholder_quote),
-        confidence=0.5,
+        confidence="medium",
     )
     return TenKOutput(
         cik="0001045810",
@@ -122,7 +124,7 @@ def test_validator_raises_citation_mismatch_for_wrong_quote() -> None:
     source = "Acme Corp grew revenue 30% YoY in Q3."
     bad_claim = Claim(
         citation=Citation(source_span=(0, 9), source_quote="Different"),
-        confidence=0.5,
+        confidence="medium",
     )
     output = _minimal_eight_k(bad_claim)
     with pytest.raises(CitationMismatch):
@@ -133,7 +135,7 @@ def test_citation_mismatch_subclasses_value_error() -> None:
     source = "Acme Corp"
     bad_claim = Claim(
         citation=Citation(source_span=(0, 4), source_quote="XXXX"),
-        confidence=0.5,
+        confidence="medium",
     )
     output = _minimal_eight_k(bad_claim)
     with pytest.raises(ValueError) as exc_info:
@@ -168,7 +170,7 @@ def test_validator_walks_lists_of_claims() -> None:
     good = _claim_for(0, 13, source)  # "Revenue rose."
     bad = Claim(
         citation=Citation(source_span=(14, 26), source_quote="HALLUCINATED"),
-        confidence=0.5,
+        confidence="medium",
     )
     output = _minimal_eight_k(good)
     # Manually rebuild with the corrupt claim appended.
@@ -187,7 +189,7 @@ def test_validator_mismatch_message_includes_field_path() -> None:
     source = "Some text."
     bad_claim = Claim(
         citation=Citation(source_span=(0, 4), source_quote="NOPE"),
-        confidence=0.5,
+        confidence="medium",
     )
     output = _minimal_eight_k(bad_claim)
     with pytest.raises(CitationMismatch) as exc_info:
@@ -221,7 +223,7 @@ def test_quarantine_writes_record_and_returns_none_on_mismatch(tmp_path: Path) -
     source = "Real source text."
     bad_claim = Claim(
         citation=Citation(source_span=(0, 4), source_quote="FAKE"),
-        confidence=0.5,
+        confidence="medium",
     )
     output = _minimal_eight_k(bad_claim)
     result = validate_or_quarantine(
@@ -253,12 +255,12 @@ def test_quarantine_uses_original_output_when_supplied(tmp_path: Path) -> None:
     source = "Real source text."
     bad_claim = Claim(
         citation=Citation(source_span=(0, 4), source_quote="FAKE"),
-        confidence=0.5,
+        confidence="medium",
     )
     output = _minimal_eight_k(bad_claim)
     original = {
         "milestone_mentions": [
-            {"citation": {"source_quote": "model's original quote"}, "confidence": 0.5}
+            {"citation": {"source_quote": "model's original quote"}, "confidence": "medium"}
         ],
         "marker": "from-the-model",
     }
@@ -344,7 +346,7 @@ def test_property_corrupted_citation_routes_to_quarantine(
     qroot = tmp_path_factory.mktemp("qroot")
     bad_claim = Claim(
         citation=Citation(source_span=(start, end), source_quote=bad_quote),
-        confidence=0.5,
+        confidence="medium",
     )
     output = _minimal_eight_k(bad_claim)
     result = validate_or_quarantine(

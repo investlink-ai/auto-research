@@ -13,7 +13,6 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import anthropic
-import pytest
 from anthropic.types import Message, ToolUseBlock, Usage
 
 from auto_research.extract.workers.transcript import extract_transcript
@@ -69,13 +68,13 @@ def _valid_output() -> dict[str, Any]:
             "citation": {
                 "source_quote": "We had a strong quarter with revenue up 30%"
             },
-            "confidence": 0.75,
+            "confidence": "high",
         },
         "q_and_a_evasiveness": {
             "citation": {
                 "source_quote": "we can't comment on that beyond what's in our guidance"
             },
-            "confidence": 0.6,
+            "confidence": "medium",
         },
         "forward_statements": [],
     }
@@ -93,7 +92,7 @@ def test_extract_transcript_returns_validated_output(tmp_path: Path) -> None:
     assert out.ticker == "ACME"
     assert out.event_datetime is not None
     assert out.event_datetime.year == 2026
-    assert out.prepared_remarks_tone.confidence == pytest.approx(0.75)
+    assert out.prepared_remarks_tone.confidence == "high"
 
 
 def test_extract_transcript_resolves_spans_into_raw_doc(tmp_path: Path) -> None:
