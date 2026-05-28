@@ -45,6 +45,19 @@ _SONNET: Final = "claude-sonnet-4-6"
 _HAIKU: Final = "claude-haiku-4-5"
 _OPUS: Final = "claude-opus-4-7"
 
+# Local OSS-model routes served via an OpenAI-compatible HTTP backend
+# (Ollama / vLLM / MLX-server). The `local/` prefix is the dispatch
+# hint that `extract.workers._common._get_or_build_client` reads to
+# pick `make_openai_compat_extraction_client` instead of the Anthropic
+# `make_extraction_client`. The bare-model portion (`qwen3.5:9b`) is
+# the server-native ID — Ollama tag form here; the wrapper strips the
+# prefix before forwarding to the API. No `_ROUTING` rows resolve to
+# these constants today; route flips ship per-worker as eval validates
+# the substitution (cost-model doc §10.5).
+_LOCAL_QWEN_9B: Final = "local/qwen3.5:9b"
+_LOCAL_QWEN_27B: Final = "local/qwen3.5:27b"
+_LOCAL_QWEN_35B_MOE: Final = "local/qwen3.5:35b-a3b"
+
 # (worker, task) → model id. Sourced from `docs/specs/2026-05-22-design.md`
 # §7.3. `task` keys match the schema field names in `extract/schemas.py`
 # verbatim (e.g., `supplier_mentions`, not `supplier_mapping`), so a

@@ -205,8 +205,8 @@ def test_production_client_is_singleton_per_worker(
 
     monkeypatch.setattr(_common, "make_extraction_client", counting_factory)
 
-    a = _common._get_or_build_client("s_filings", None)
-    b = _common._get_or_build_client("s_filings", None)
+    a = _common._get_or_build_client("s_filings", "dilution_event", None)
+    b = _common._get_or_build_client("s_filings", "dilution_event", None)
     assert a is b, "production path must return the same client instance"
     assert factory_calls == 1, "factory must build exactly one production client"
 
@@ -227,8 +227,8 @@ def test_singleton_table_is_keyed_by_worker(monkeypatch: pytest.MonkeyPatch) -> 
         ),
     )
 
-    s = _common._get_or_build_client("s_filings", None)
-    t = _common._get_or_build_client("ten_k", None)
+    s = _common._get_or_build_client("s_filings", "dilution_event", None)
+    t = _common._get_or_build_client("ten_k", "supplier_mentions", None)
     assert s is not t
 
 
@@ -239,8 +239,8 @@ def test_injected_client_bypasses_singleton() -> None:
 
     fake1 = cast(anthropic.Anthropic, MagicMock())
     fake2 = cast(anthropic.Anthropic, MagicMock())
-    a = _common._get_or_build_client("s_filings", fake1)
-    b = _common._get_or_build_client("s_filings", fake2)
+    a = _common._get_or_build_client("s_filings", "dilution_event", fake1)
+    b = _common._get_or_build_client("s_filings", "dilution_event", fake2)
     assert a is not b
 
 

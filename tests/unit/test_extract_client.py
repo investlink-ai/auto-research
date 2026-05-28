@@ -25,7 +25,7 @@ from unittest.mock import MagicMock, patch
 
 import anthropic
 import pytest
-from anthropic.types import Message, TextBlock, Usage
+from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
 from pydantic import BaseModel
 
 from auto_research.agents.reliability import CircuitOpen, CostCapExceeded
@@ -424,6 +424,122 @@ def test_circuit_breaker_opens_after_consecutive_failures() -> None:
 
 
 # --- factory ergonomics ----------------------------------------------------
+
+
+# --- tuple-return shape (Protocol contract) -------------------------------
+
+
+def _make_tool_use_message(
+    *,
+    tool_input: dict[str, Any],
+    model: str = "claude-haiku-4-5",
+    input_tokens: int = 100,
+    output_tokens: int = 50,
+) -> Message:
+    """Build a Message carrying a forced `record_extraction` tool_use
+    block — what the Anthropic SDK actually returns once
+    `tool_choice={'type':'tool','name':'record_extraction'}` is set."""
+    from auto_research.extract.client import RECORD_EXTRACTION_TOOL_NAME
+
+    return Message(
+        id="msg_test_tool",
+        content=[
+            ToolUseBlock(
+                type="tool_use",
+                id="toolu_test",
+                name=RECORD_EXTRACTION_TOOL_NAME,
+                input=tool_input,
+            )
+        ],
+        model=model,
+        role="assistant",
+        stop_reason="tool_use",
+        stop_sequence=None,
+        type="message",
+        usage=Usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation=None,
+            cache_creation_input_tokens=None,
+            cache_read_input_tokens=None,
+            inference_geo=None,
+            server_tool_use=None,
+            service_tier="standard",
+        ),
+    )
+
+
+def test_structured_call_returns_dict_and_usage_tuple() -> None:
+    """`output_schema=` set: the wrapper unwraps `tool_use.input` and
+    returns `(dict, UsageDict)`. Token counts + `stop_reason` flow
+    through `UsageDict`; `response_block_types` carries the structural
+    fingerprint that worker quarantine records read on the no-payload
+    path."""
+    fake = _FakeAnthropicClient(
+        response_factory=lambda **kw: _make_tool_use_message(
+            tool_input={"answer": "structured-result"},
+            model=kw["model"],
+        )
+    )
+    client = make_extraction_client(
+        worker="s_filings",
+        usd_cap=1000.00,
+        anthropic_client=_as_sdk(fake),
+    )
+    parsed, usage = client(
+        task="dilution_event",
+        system_prompt="sys",
+        user_content="doc",
+        output_schema=_TinyOutput,
+    )
+    assert parsed == {"answer": "structured-result"}
+    assert usage["input_tokens"] == 100
+    assert usage["output_tokens"] == 50
+    assert usage.get("stop_reason") == "tool_use"
+    assert usage.get("response_block_types") == ["tool_use"]
+
+
+def test_structured_call_returns_none_when_no_tool_use_block() -> None:
+    """A response with text-only content (model refused, content filter
+    stripped the tool_use block) parses to `None` on the first tuple
+    element — the worker's quarantine signal."""
+    fake = _FakeAnthropicClient()  # default factory builds a text-only Message
+    client = make_extraction_client(
+        worker="s_filings",
+        usd_cap=1000.00,
+        anthropic_client=_as_sdk(fake),
+    )
+    parsed, usage = client(
+        task="dilution_event",
+        system_prompt="sys",
+        user_content="doc",
+        output_schema=_TinyOutput,
+    )
+    assert parsed is None
+    # Block-type fingerprint surfaces the refusal-with-text shape so
+    # the worker's quarantine record can distinguish it from a
+    # thinking-budget-exhausted response.
+    assert usage.get("response_block_types") == ["text"]
+
+
+def test_freeform_call_returns_joined_text_and_usage_tuple() -> None:
+    """`output_schema=None` is the contextual-chunker path: the
+    wrapper joins text blocks into a string and returns
+    `(str, UsageDict)`."""
+    fake = _FakeAnthropicClient()
+    client = make_extraction_client(
+        worker="s_filings",
+        usd_cap=1000.00,
+        anthropic_client=_as_sdk(fake),
+    )
+    text, usage = client(
+        task="dilution_event",
+        system_prompt="sys",
+        user_content="doc",
+    )
+    assert text == "ok"
+    assert usage["input_tokens"] == 100
+    assert usage["output_tokens"] == 50
 
 
 def test_factory_per_worker_state_is_isolated() -> None:

@@ -108,22 +108,7 @@ interactions:
     uri: https://api.anthropic.com/v1/messages
   response:
     body:
-      string: '{"model":"claude-haiku-4-5-20251001","id":"msg_0144fP3AyGNfqoDp4uvmz7tW","type":"message","role":"assistant","content":[{"type":"text","text":"```json\n{\n  \"cik\":
-        \"0001234567\",\n  \"accession_number\": \"0001234567-25-000042\",\n  \"form_type\":
-        \"S-3\",\n  \"dilution_event\": {\n    \"citation\": {\n      \"source_quote\":
-        \"We may offer and sell from time to time, in one or more offerings, up to
-        $300 million in aggregate offering amount of our common stock, preferred stock,
-        debt securities, warrants, and units.\"\n    },\n    \"confidence\": 0.95\n  },\n  \"capital_raise_language\":
-        [\n    {\n      \"citation\": {\n        \"source_quote\": \"at-the-market
-        offerings as defined in Rule 415(a)(4) under the Securities Act\"\n      },\n      \"confidence\":
-        0.95\n    },\n    {\n      \"citation\": {\n        \"source_quote\": \"registered
-        direct offerings or at-the-market offerings\"\n      },\n      \"confidence\":
-        0.9\n    }\n  ],\n  \"use_of_proceeds\": [\n    {\n      \"citation\": {\n        \"source_quote\":
-        \"we intend to use the net proceeds from the sale of the securities for general
-        corporate purposes, including working capital, research and development activities,
-        capital expenditures, and to fund the Phase II clinical trial of our lead
-        therapeutic candidate ACM-101 in patients with relapsed multiple myeloma\"\n      },\n      \"confidence\":
-        0.95\n    }\n  ]\n}\n```"}],"stop_reason":"end_turn","stop_sequence":null,"stop_details":null,"usage":{"input_tokens":1195,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":351,"service_tier":"standard","inference_geo":"not_available"}}'
+      string: '{"model":"claude-haiku-4-5-20251001","id":"msg_0144fP3AyGNfqoDp4uvmz7tW","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_01H3VCRrecordextractionS3test","name":"record_extraction","input":{"cik":"0001234567","accession_number":"0001234567-25-000042","form_type":"S-3","dilution_event":{"citation":{"source_quote":"We may offer and sell from time to time, in one or more offerings, up to $300 million in aggregate offering amount of our common stock, preferred stock, debt securities, warrants, and units."},"confidence":"high"},"capital_raise_language":[{"citation":{"source_quote":"at-the-market offerings as defined in Rule 415(a)(4) under the Securities Act"},"confidence":"high"},{"citation":{"source_quote":"registered direct offerings or at-the-market offerings"},"confidence":"high"}],"use_of_proceeds":[{"citation":{"source_quote":"we intend to use the net proceeds from the sale of the securities for general corporate purposes, including working capital, research and development activities, capital expenditures, and to fund the Phase II clinical trial of our lead therapeutic candidate ACM-101 in patients with relapsed multiple myeloma"},"confidence":"high"}]}}],"stop_reason":"tool_use","stop_sequence":null,"stop_details":null,"usage":{"input_tokens":1195,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":351,"service_tier":"standard","inference_geo":"not_available"}}'
     headers:
       CF-RAY:
       - a00b1c9fad3b41c5-MEL

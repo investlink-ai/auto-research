@@ -57,7 +57,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from auto_research.extract.client import (
     ExtractionFn,
-    extract_tool_use_input,
     make_extraction_client,
 )
 from auto_research.extract.embeddings import EmbeddingAdapter
@@ -305,7 +304,7 @@ class EntityResolver:
             candidates = self._top_candidates(stripped)
             span.set_attribute("entity.candidate_count", len(candidates))
 
-            response = self._client(
+            tool_input, usage = self._client(
                 task=_TASK,
                 system_prompt=ENTITY_RESOLUTION_PROMPT,
                 user_content=_build_user_content(stripped, candidates),
@@ -313,12 +312,16 @@ class EntityResolver:
                 max_tokens=_MAX_TOKENS,
             )
 
-            # Detect truncation BEFORE attempting to parse — a tool_use
-            # block that hit max_tokens mid-emission arrives with a
-            # truncated `input` dict that fails schema validation
-            # downstream; conflating those failures with "the model
-            # emitted a wrong-shape object" misdirects operators.
-            if response.stop_reason == "max_tokens":
+            # Detect truncation BEFORE checking for the tool_use payload —
+            # a structured response that hit max_tokens mid-emission would
+            # arrive with a truncated `input` dict that fails schema
+            # validation downstream; conflating those failures with "the
+            # model emitted a wrong-shape object" misdirects operators.
+            # Provider-raw stop_reason flows through `UsageDict`; on the
+            # Anthropic backend (`max_tokens`) or its OpenAI synonym
+            # (`length`), surface explicitly.
+            stop_reason = usage.get("stop_reason")
+            if stop_reason in {"max_tokens", "length"}:
                 span.set_attribute("extract.outcome", "truncated_disambiguator")
                 span.set_status(
                     Status(
@@ -331,20 +334,19 @@ class EntityResolver:
                 return self._build_unknown(
                     reasoning=(
                         f"disambiguator response was truncated at "
-                        f"max_tokens={_MAX_TOKENS} (stop_reason='max_tokens'); "
-                        "the tool_use block was cut mid-stream and is unparseable"
+                        f"max_tokens={_MAX_TOKENS} (stop_reason={stop_reason!r}); "
+                        "the structured payload was cut mid-stream and is unparseable"
                     ),
                     considered=candidates,
                 )
 
-            # Forced `tool_choice` should guarantee a record_extraction
-            # tool_use block; treat its absence as a "no answer" outcome
-            # with the same `unknown` collapse as a malformed response.
-            # The SDK enforces `tool_use.input: dict` at parse-time, so
-            # `extract_tool_use_input` returns either a real dict or
-            # None — no separate isinstance check needed.
-            tool_input = extract_tool_use_input(response)
-            if tool_input is None:
+            # Forced `tool_choice` (Anthropic) / `response_format=json_schema`
+            # (OpenAI-compat) should guarantee a structured payload; treat
+            # its absence as a "no answer" outcome with the same `unknown`
+            # collapse as a malformed response. The wrapper enforces
+            # `dict | None` on the `output_schema=`-set path; a non-dict
+            # shape (e.g., a stray string) is also unusable.
+            if tool_input is None or not isinstance(tool_input, dict):
                 span.set_attribute("extract.outcome", "no_tool_use_block")
                 span.set_status(
                     Status(

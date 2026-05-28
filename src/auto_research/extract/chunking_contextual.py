@@ -28,11 +28,13 @@ constraints of the rest of `extract/`:
    forces fresh generation and never silently reuses stale text. Empty
    contexts (drops) are NOT cached — a transient model glitch can recover
    on the next batch instead of being baked into the cache forever.
-4. **Output-token cap via Anthropic's own count.** `response.usage.
-   output_tokens` is Anthropic's tokenizer; cl100k_base (used elsewhere
-   for chunk-size budgeting) can disagree by 10-15% on tickers and jargon.
-   Validating with the SDK's own count is the only way to honor the
-   "≤100 tokens" AC the prompt promises the model.
+4. **Output-token cap via the provider's own count.** `UsageDict.output_tokens`
+   is lifted from the provider response (`Message.usage.output_tokens` on
+   Anthropic; `completion.usage.completion_tokens` on OpenAI-compat) —
+   not cl100k_base (used elsewhere for chunk-size budgeting), which can
+   disagree by 10-15% on tickers and jargon. Validating with the
+   wrapper's own count is the only way to honor the "≤100 tokens" AC
+   the prompt promises the model.
 
 Failure modes:
 - Anthropic returns >100 output_tokens, OR `stop_reason` not in
@@ -62,12 +64,12 @@ from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape
 
 import anthropic
-from anthropic.types import Message
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
 from auto_research._models import route_model
 from auto_research.extract import cache as content_cache
+from auto_research.extract._response import UsageDict
 from auto_research.extract.chunking import (
     CHUNKER_VERSION,
     ChildChunk,
@@ -236,21 +238,21 @@ def _cache_payload_key(
     )
 
 
-def _extract_text(response: Message) -> str:
-    """Pull the text blocks off an Anthropic Message and normalize whitespace.
+def _normalize_text(text: str) -> str:
+    """Collapse whitespace runs in a joined text response to single spaces.
 
-    Multi-block responses are joined with a single space and all whitespace
-    runs (including embedded newlines) collapse to one space. This enforces
-    the "one short sentence" contract documented on `ContextualChildChunk`
-    — without it, a multi-block or multi-line model response leaks
-    irregular newline runs into `embedding_text`.
+    Multi-block / multi-line responses get joined by the
+    `ExtractionFn` wrapper; this enforces the "one short sentence"
+    contract documented on `ContextualChildChunk` — without it,
+    irregular newline runs leak into `embedding_text` and corrupt
+    downstream similarity scores by tokenizer-quirk.
     """
-    raw = " ".join(b.text for b in response.content if b.type == "text")
-    return _WHITESPACE_RE.sub(" ", raw).strip()
+    return _WHITESPACE_RE.sub(" ", text).strip()
 
 
 def _validate_response(
-    response: Message,
+    text: str,
+    usage: UsageDict,
     *,
     child: ChildChunk,
     span: trace.Span,
@@ -263,14 +265,17 @@ def _validate_response(
 
     - Empty / whitespace-only text (model refusal-with-no-text, content-
       policy strip, or pure tool-use response).
-    - `stop_reason` not in {end_turn, stop_sequence}: catches max_tokens
+    - `stop_reason` not in `_VALID_STOP_REASONS`: catches max_tokens
       (truncated fragment), refusal (model refusal sentence — would
       otherwise be cached as the embedding context forever), and
       pause_turn / tool_use (response not intended as a final answer).
-    - Anthropic `output_tokens` > `_MAX_CONTEXT_TOKENS`: the model
-      overshot the 100-token directive; result is too long to prepend.
+      Provider-raw value carried through `UsageDict`; when the route
+      flips to a local backend the allow-set widens to admit OpenAI's
+      synonyms (`stop`).
+    - `output_tokens` > `_MAX_CONTEXT_TOKENS`: the model overshot the
+      100-token directive; result is too long to prepend.
     """
-    raw = _extract_text(response)
+    raw = _normalize_text(text)
     if not raw:
         _log.warning(
             "contextual_chunk: empty response for doc_id=%s parent_id=%s",
@@ -282,8 +287,9 @@ def _validate_response(
         span.set_status(Status(StatusCode.ERROR, "dropped:empty"))
         return ""
 
-    if response.stop_reason not in _VALID_STOP_REASONS:
-        reason = response.stop_reason or "none"
+    stop_reason = usage.get("stop_reason")
+    if stop_reason not in _VALID_STOP_REASONS:
+        reason = stop_reason or "none"
         _log.warning(
             "contextual_chunk: bad stop_reason=%s for doc_id=%s parent_id=%s",
             reason,
@@ -295,11 +301,12 @@ def _validate_response(
         span.set_status(Status(StatusCode.ERROR, f"dropped:{reason}"))
         return ""
 
-    if response.usage.output_tokens > _MAX_CONTEXT_TOKENS:
+    output_tokens = usage["output_tokens"]
+    if output_tokens > _MAX_CONTEXT_TOKENS:
         _log.warning(
             "contextual_chunk: dropped %d-token context for doc_id=%s "
             "parent_id=%s (cap=%d)",
-            response.usage.output_tokens,
+            output_tokens,
             child.metadata.doc_id,
             child.parent_id,
             _MAX_CONTEXT_TOKENS,
@@ -371,14 +378,16 @@ def contextualize_chunks(
 
             # Free-form text mode: deliberately omit `output_schema=` so
             # the extraction client skips tool_use plumbing and the model
-            # emits ordinary text blocks. `_validate_response` joins the
-            # text blocks via `_extract_text`; a regression that adds
-            # `output_schema=...` here would shift the response to a
-            # tool_use block, collapse `_extract_text` to "", and silently
-            # drop every contextual chunk's context — degrading retrieval
-            # quality with no test failure. Keep this call schemaless.
+            # emits ordinary text blocks (Anthropic) or text content
+            # (OpenAI-compat). The wrapper joins those into a string and
+            # surfaces stop_reason via `UsageDict`. A regression that
+            # adds `output_schema=...` here would shift the response to
+            # a structured payload, collapse the text path to `""`, and
+            # silently drop every contextual chunk's context — degrading
+            # retrieval quality with no test failure. Keep this call
+            # schemaless.
             try:
-                response = client(
+                text, usage = client(
                     task=_TASK,
                     system_prompt=_system_block_text(parent),
                     user_content=child.text,
@@ -402,7 +411,26 @@ def contextualize_chunks(
                 out.append(ContextualChildChunk(child=child, context=""))
                 continue
 
-            context = _validate_response(response, child=child, span=span)
+            if not isinstance(text, str):
+                # Defensive: `output_schema=None` should always give back
+                # a string from the wrapper. A non-string here is a
+                # wrapper bug (or `None` from a structured path leaking
+                # in), not a model failure — emit empty and continue.
+                _log.warning(
+                    "contextual_chunk: wrapper returned non-string for doc_id=%s "
+                    "parent_id=%s (type=%s)",
+                    child.metadata.doc_id,
+                    child.parent_id,
+                    type(text).__name__,
+                )
+                span.set_attribute("extract.outcome", "error")
+                span.set_status(
+                    Status(StatusCode.ERROR, "wrapper returned non-string text")
+                )
+                out.append(ContextualChildChunk(child=child, context=""))
+                continue
+
+            context = _validate_response(text, usage, child=child, span=span)
 
             if not context:
                 # Drop path — span attrs already set by _validate_response.

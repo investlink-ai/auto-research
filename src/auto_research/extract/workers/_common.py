@@ -39,12 +39,14 @@ from auto_research._models import route_model
 from auto_research.extract import cache as content_cache
 from auto_research.extract.client import (
     ExtractionFn,
-    extract_tool_use_input,
     make_extraction_client,
 )
 from auto_research.extract.guardrails import (
     QuarantineRecord,
     validate_or_quarantine,
+)
+from auto_research.extract.openai_compat_client import (
+    get_or_build_local_client,
 )
 from auto_research.telemetry import truncate_status_description as _truncate
 
@@ -184,21 +186,56 @@ def _write_quarantine(
 # reuse one client per worker so `@cost_cap` / `@circuit_breaker` state
 # accumulates across docs; tests reset the dict per-test via a conftest
 # fixture and bypass it entirely when injecting `anthropic_client`.
+#
+# The Anthropic singleton table lives here; the parallel OpenAI-compat
+# singleton table is owned by `openai_compat_client._LOCAL_CLIENTS` so
+# `(worker, local_model_id)` pairs key independently — a future routing
+# flip from `local/qwen3.5:9b` to `local/qwen3.5:27b` builds a fresh
+# client rather than reusing a stale entry.
 _CLIENTS: dict[str, ExtractionFn] = {}
 
 
 def _get_or_build_client(
-    worker: str, anthropic_client: anthropic.Anthropic | None
+    worker: str,
+    task: str,
+    anthropic_client: anthropic.Anthropic | None,
 ) -> ExtractionFn:
-    """Return the production singleton, or a fresh client for test injection.
+    """Return the right extraction client for `(worker, task)`.
 
-    `anthropic_client` is the test-injection escape hatch: when provided,
-    each call builds a fresh client around the duck-typed stub so per-test
-    state stays isolated. When omitted (the production path), the
-    worker-name-keyed singleton in `_CLIENTS` is created on first use and
-    reused thereafter so `@cost_cap` and `@circuit_breaker` state
-    accumulates across documents within a process.
+    Dispatches on the routed model id: `local/...` ⇒ the OpenAI-compat
+    HTTP wrapper (Ollama / vLLM / MLX-server); anything else ⇒ the
+    Anthropic SDK wrapper. The dispatch is what makes the rest of the
+    extraction pipeline provider-agnostic — workers call this helper
+    and get back an `ExtractionFn`; whether the bytes leave the machine
+    is decided by the routing table, not by per-worker code.
+
+    `anthropic_client` is the test-injection escape hatch for the
+    Anthropic path: when provided, each call builds a fresh wrapper
+    around the duck-typed stub so per-test state stays isolated. When
+    omitted (the production path), the worker-name-keyed singleton in
+    `_CLIENTS` is created on first use and reused thereafter so
+    `@cost_cap` and `@circuit_breaker` state accumulates across docs
+    within a process. The local path's test-injection happens at the
+    `make_openai_compat_extraction_client` level and is exercised by
+    `tests/unit/test_extract_openai_compat_client.py`; production
+    callers route through `get_or_build_local_client` here.
+
+    Today no `_ROUTING` row resolves to a `local/*` model id; the
+    dispatch infrastructure lands first per the cost-model doc §10.5
+    Phase 1, and route flips ship per-worker as the eval suite
+    validates the substitution.
     """
+    model_id = route_model(worker, task)
+    if model_id.startswith("local/"):
+        # Test-injection on the local path is at the factory level
+        # (`openai_client=` kwarg on `make_openai_compat_extraction_client`),
+        # not threaded through this helper — keeps the Anthropic-only
+        # `anthropic_client` parameter from leaking into the local
+        # wrapper's signature. The `anthropic_client` arg is silently
+        # ignored on the local branch; a worker that needs to inject a
+        # local fake constructs the wrapper directly.
+        return get_or_build_local_client(worker, model_id)
+
     if anthropic_client is not None:
         return make_extraction_client(
             worker=worker, anthropic_client=anthropic_client
@@ -269,10 +306,10 @@ def run_single_shot_extraction[OutputT: BaseModel](
             span.set_attribute("extract.outcome", "cache_hit")
             return output_model.model_validate(cached)
 
-        client = _get_or_build_client(worker, anthropic_client)
+        client = _get_or_build_client(worker, task, anthropic_client)
 
         try:
-            response = client(
+            parsed, usage = client(
                 task=task,
                 system_prompt=prompt,
                 user_content=raw_doc,
@@ -306,23 +343,47 @@ def run_single_shot_extraction[OutputT: BaseModel](
             span.set_attribute("extract.outcome", "quarantined")
             span.set_status(Status(StatusCode.ERROR, _truncate(status_msg)))
 
-        # Forced `tool_choice={'type':'tool','name':'record_extraction'}`
-        # guarantees the model emits one matching tool_use block alongside
-        # any optional thinking blocks; `extract_tool_use_input` filters
-        # by tool name. Quarantine if the contract is violated rather
-        # than silently coercing a partial answer. The SDK enforces
-        # `tool_use.input: dict` at parse-time, so an emitted block is
-        # always a dict here — no defensive isinstance check needed.
-        parsed = extract_tool_use_input(response)
+        # The wrapper surfaces the structured payload directly: Anthropic
+        # `tool_use.input` (forced via `tool_choice=record_extraction`)
+        # and OpenAI-compat `response_format=json_schema` content both
+        # parse to a `dict` on success, or `None` when the provider
+        # returned no usable structured payload (refusal, mid-emission
+        # truncation, content-filter strip). Either way we quarantine
+        # rather than silently coerce a partial answer; the original
+        # provider response shape never escapes the wrapper. The
+        # diagnostic payload preserves the structural fingerprint the
+        # pre-tuple code captured — `response_block_types` for
+        # Anthropic (e.g., `["text"]` vs `["thinking", "text"]`,
+        # distinguishing refusal from thinking-budget exhaustion);
+        # `stop_reason` for the OpenAI-compat side (`content_filter`
+        # vs `length` etc.). Operators triaging a `5% of S-1 docs
+        # quarantine with the same error` debugging session need this.
         if parsed is None:
+            diagnostic: dict[str, Any] = {
+                "raw_response": "no structured payload",
+            }
+            block_types = usage.get("response_block_types")
+            if block_types is not None:
+                diagnostic["response_block_types"] = block_types
+            stop_reason = usage.get("stop_reason")
+            if stop_reason is not None:
+                diagnostic["stop_reason"] = stop_reason
             _quarantine(
-                parsed_payload={
-                    "raw_response_block_types": [
-                        b.type for b in response.content
-                    ]
-                },
-                error="no record_extraction tool_use block in model response",
-                status_msg="no tool_use block",
+                parsed_payload=diagnostic,
+                error="provider returned no structured payload (no tool_use / json_schema content)",
+                status_msg="no structured payload",
+            )
+            return None
+        if not isinstance(parsed, dict):
+            # The `output_schema` branch of the Protocol returns
+            # `dict | None`; a `str` here would signal a wrapper bug
+            # returning the wrong arm of the union rather than a
+            # model failure — surface it as quarantine with a precise
+            # error so the bug is auditable.
+            _quarantine(
+                parsed_payload={"raw_response": repr(parsed)},
+                error=f"wrapper returned non-dict structured payload: {type(parsed).__name__}",
+                status_msg="non-dict structured payload",
             )
             return None
 

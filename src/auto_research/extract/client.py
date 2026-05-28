@@ -1,4 +1,4 @@
-"""Anthropic-SDK wrapper for extraction workers (Issue #10).
+"""Anthropic-SDK wrapper for extraction workers.
 
 A thin layer on top of `anthropic.Anthropic` that bakes in the four
 things workers shouldn't have to remember per-call:
@@ -31,26 +31,38 @@ What the wrapper deliberately doesn't do:
 - **LangChain `ChatAnthropic` integration** — would force cost
   accounting through `AIMessage.usage_metadata` (different shape) and
   obscure `cache_control` behind `additional_kwargs`. The LangGraph
-  research agent (Issue #28) calls this wrapper from its node bodies
-  directly; node functions are just Python functions.
-- **Cost logging plumbing** — OpenLLMetry / traceloop-sdk
-  auto-instruments the Anthropic SDK and captures token counts on the
-  active OTel span. We add only the missing piece: `llm.cost.est_usd`,
-  computed from `usage_for_message` (the same pricing table cost_cap
-  uses). No new logging system.
+  research agent calls this wrapper from its node bodies directly;
+  node functions are just Python functions.
+- **A normalized cross-provider response dataclass** — see
+  `learning/2026-05-28-extraction-pipeline-cost-model.md` §10 for the
+  full discussion. The `(text | dict | None, UsageDict)` tuple shape
+  is the smallest abstraction that lets the same Protocol back both
+  Anthropic and OpenAI-compat (Ollama / vLLM) without leaking
+  provider-specific types across the wrapper boundary.
+
+The reliability decorators wrap a Message-returning *inner* call so
+`cost_cap` continues to read `Message.usage` for per-call USD
+accounting. The public `ExtractionFn` callable wraps that inner with
+a tuple-conversion outer that lifts `tool_use.input` / text-block
+content + `usage.*` into the provider-agnostic shape.
 
 Production callers compose:
 
     _CLIENT = make_extraction_client(worker="s_filings", usd_cap=10.0)
 
     def extract_s_filing(raw_doc, prompt_version):
-        response = _CLIENT(
+        parsed, usage = _CLIENT(
             task="dilution_event",
             system_prompt=PROMPT.text,
             user_content=raw_doc.text,
             output_schema=SFilingOutput,
         )
-        return validate_or_quarantine(parse(response), raw_doc.text, ...)
+        if parsed is None:
+            return None  # no tool_use block — quarantine
+        return validate_or_quarantine(
+            SFilingOutput.model_validate(parsed),
+            raw_doc.text, ...,
+        )
 """
 
 from __future__ import annotations
@@ -66,23 +78,22 @@ from auto_research._models import route_model
 from auto_research._pricing import usd_for_message
 from auto_research.agents.reliability import reliable_agent_node
 from auto_research.extract._caching import cached_system_block
+from auto_research.extract._response import UsageDict
 
 # The tool name every worker forces via `tool_choice`. Single value
-# (not a per-worker name) so the response-parsing branch in
-# `workers/_common.py` can match by literal without threading the
-# worker name through.
+# (not a per-worker name) so the wrapper's response-parsing branch
+# can match by literal without threading the worker name through.
 RECORD_EXTRACTION_TOOL_NAME: Final[str] = "record_extraction"
 
 
-def extract_tool_use_input(message: Message) -> dict[str, Any] | None:
+def _extract_tool_use_input(message: Message) -> dict[str, Any] | None:
     """Return the first `record_extraction` tool_use block's `.input`.
 
     Returns `None` when the response carries no matching tool_use block
     (e.g., model refused, or the call ran in free-form text mode).
-    Callers route the `None` outcome to their own quarantine /
-    fallback path. Co-located with the tool name + tool_choice setup
-    in `_call` so the producer and consumer of the tool_use envelope
-    live in one module.
+    The wrapper surfaces `None` to the caller through the tuple's
+    first element so workers can quarantine without parsing Message
+    themselves.
 
     The SDK's `ToolUseBlock.input` is typed and validated as a `dict`
     at parse-time — non-dict inputs are rejected by the SDK before
@@ -93,6 +104,53 @@ def extract_tool_use_input(message: Message) -> dict[str, Any] | None:
         if block.type == "tool_use" and block.name == RECORD_EXTRACTION_TOOL_NAME:
             return block.input
     return None
+
+
+def _join_text_blocks(message: Message) -> str:
+    """Concatenate every text block in `message.content` with single spaces.
+
+    Free-form text callers (today: the contextual chunker, which omits
+    `output_schema=`) receive the joined string as the tuple's first
+    element. Whitespace normalization (collapsing internal runs) is
+    caller-specific and stays in the caller; this helper preserves the
+    raw text faithfully.
+    """
+    return " ".join(b.text for b in message.content if b.type == "text")
+
+
+def _message_to_usage_dict(message: Message) -> UsageDict:
+    """Lift `Message.usage` + `Message.stop_reason` into the provider-agnostic
+    `UsageDict`.
+
+    `cache_*` fields are only set when the SDK reports a populated value —
+    a `None` from the SDK means the cache wasn't touched on this call
+    (cold first call, no `cache_control` block, or pre-cache model
+    version), and a spurious `0` would lie to dashboards about cache
+    activity. `stop_reason` is always carried for free-form callers
+    that gate on it.
+    """
+    usage = message.usage
+    out: UsageDict = {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+    }
+    if usage.cache_read_input_tokens is not None:
+        out["cache_read_input_tokens"] = usage.cache_read_input_tokens
+    if usage.cache_creation_input_tokens is not None:
+        out["cache_creation_input_tokens"] = usage.cache_creation_input_tokens
+    if message.stop_reason is not None:
+        out["stop_reason"] = message.stop_reason
+    # Block-type fingerprint preserves the structural signal that an
+    # operator triaging a quarantined no-payload record needs to tell
+    # `["text"]` (model refused with prose) apart from
+    # `["thinking", "text"]` (extended-thinking budget burned, no
+    # tool_use). The list is short (1-3 entries per Anthropic
+    # response shape), so we set it on every call rather than only on
+    # the no-payload outcome — callers that don't quarantine simply
+    # ignore it.
+    out["response_block_types"] = [b.type for b in message.content]
+    return out
+
 
 # Token budget for extended thinking on Sonnet/Opus routes. 2048 is the
 # Anthropic-documented sweet spot for structured-extraction tasks where
@@ -105,22 +163,27 @@ EXTENDED_THINKING_BUDGET: Final[int] = 2048
 
 
 class ExtractionFn(Protocol):
-    """Type of the callable returned by `make_extraction_client`.
+    """Type of the callable returned by `make_extraction_client` (and by
+    the OpenAI-compat factory). Workers annotate `_CLIENT: ExtractionFn`
+    without spelling the kwargs out at every reference.
 
-    Documented as a Protocol so workers can annotate `_CLIENT: ExtractionFn`
-    without having to spell out the kwargs each time.
+    Return shape: `tuple[dict[str, Any] | str | None, UsageDict]`.
 
-    `output_schema` switches the response shape:
+    - When `output_schema` is provided (default for extraction
+      workers), the first element is the structured output as a
+      `dict` parsed from the provider-native structured-output channel
+      (Anthropic `tool_use.input`; OpenAI `response_format=json_schema`
+      content). `None` means the provider returned no usable
+      structured payload — model refused, mid-emission truncation, or
+      a free-form text response from a provider that doesn't honor
+      `output_schema=`; callers route this to quarantine.
 
-    - When provided (default for extraction workers), the schema is
-      forwarded as the `record_extraction` tool's `input_schema` and
-      `tool_choice` forces the model to emit exactly one tool_use
-      block whose `.input` is the parsed dict. The worker reads it
-      directly without a text/json.loads round-trip.
-    - When `None` (default for callers that want free-form text — e.g.,
-      the contextual-chunker writing a one-line context per child),
-      the call omits `tools` / `tool_choice` and the response carries
-      ordinary `text` content blocks.
+    - When `output_schema=None` (default for free-form text callers —
+      e.g., the contextual chunker emitting a one-line context), the
+      first element is the joined text content as a `str`.
+
+    `UsageDict` carries token counts + cache markers + provider-raw
+    `stop_reason`. See `_response.py` for the full shape.
     """
 
     def __call__(
@@ -131,7 +194,7 @@ class ExtractionFn(Protocol):
         user_content: str,
         output_schema: type[BaseModel] | None = None,
         max_tokens: int = ...,
-    ) -> Message: ...
+    ) -> tuple[dict[str, Any] | str | None, UsageDict]: ...
 
 
 def make_extraction_client(
@@ -161,7 +224,10 @@ def make_extraction_client(
         worker: feeds `route_model(worker, task)`; also tags the
             reliability decorators' state for debugging.
         usd_cap: hard USD spend cap enforced by `@cost_cap` across all
-            calls through this client.
+            calls through this client. The decorator reads
+            `Message.usage` on the *inner* call (which still returns
+            a Message) so per-call USD accounting works unchanged
+            despite the public callable's tuple return.
         failures: consecutive-failure threshold for `@circuit_breaker`.
         max_retries: additional attempts after the first for
             `@retry_with_backoff` on 429 / 5xx / transient httpx errors.
@@ -192,7 +258,7 @@ def make_extraction_client(
         initial_wait=initial_wait,
         max_wait=max_wait,
     )
-    def _call(
+    def _call_inner(
         *,
         task: str,
         system_prompt: str,
@@ -225,11 +291,11 @@ def make_extraction_client(
         # whose tool_use.input doesn't conform, cutting json-decode and
         # schema-noncompliance quarantines from ~5-15% to <1%. The
         # forced `tool_choice` makes the model emit exactly one
-        # `record_extraction` tool_use block; the worker's
-        # response-parser pulls `tool_use.input` directly without a
-        # json.loads round-trip. When `output_schema` is None
-        # (contextual-chunker and similar free-form text callers), the
-        # call falls back to ordinary text content with no tool plumbing.
+        # `record_extraction` tool_use block; the outer wrapper pulls
+        # `tool_use.input` directly without a json.loads round-trip.
+        # When `output_schema` is None (contextual-chunker and similar
+        # free-form text callers), the call falls back to ordinary text
+        # content with no tool plumbing.
         if output_schema is not None:
             tool: ToolParam = {
                 "name": RECORD_EXTRACTION_TOOL_NAME,
@@ -290,12 +356,36 @@ def make_extraction_client(
 
         return response
 
+    def _call(
+        *,
+        task: str,
+        system_prompt: str,
+        user_content: str,
+        output_schema: type[BaseModel] | None = None,
+        max_tokens: int = 4096,
+    ) -> tuple[dict[str, Any] | str | None, UsageDict]:
+        # The reliability stack wraps `_call_inner` (Message return) so
+        # `cost_cap` keeps reading `Message.usage` for per-call USD
+        # accounting; the public callable handles tuple conversion
+        # here. CostCapExceeded / CircuitOpen / route-model ValueError
+        # propagate transparently through this layer.
+        message = _call_inner(
+            task=task,
+            system_prompt=system_prompt,
+            user_content=user_content,
+            output_schema=output_schema,
+            max_tokens=max_tokens,
+        )
+        usage = _message_to_usage_dict(message)
+        if output_schema is not None:
+            return _extract_tool_use_input(message), usage
+        return _join_text_blocks(message), usage
+
     return _call
 
 
 __all__ = [
     "RECORD_EXTRACTION_TOOL_NAME",
     "ExtractionFn",
-    "extract_tool_use_input",
     "make_extraction_client",
 ]
