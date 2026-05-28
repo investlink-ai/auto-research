@@ -63,8 +63,7 @@ def _valid_narrative() -> dict[str, Any]:
 
 
 def _chunkset_narrative_only() -> ChunkSet:
-    """A chunkset whose parents have NO table_html — exercises the
-    RAG narrative branch code path."""
+    """A minimal chunkset — exercises the RAG narrative branch code path."""
     meta = ChunkMetadata(
         ticker="ACME",
         filing_date=date(2026, 1, 30),
