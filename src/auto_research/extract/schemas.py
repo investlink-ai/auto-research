@@ -29,10 +29,11 @@ migration. See `docs/CONTRACTS.md` §1.3.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import Annotated, ClassVar, Literal
 
 from pydantic import (
+    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
@@ -219,7 +220,12 @@ class TenKOutput(BaseModel):
     accrual_flags: list[Claim]
     supplier_mentions: list[SupplierMention]
     customer_mentions: list[CustomerMention]
-    language_novelty_score: float  # vs prior 10-K, computed downstream
+    # Computed downstream from the supplier/customer/risk-factor text vs
+    # the prior year's extraction — extraction workers leave it at the
+    # default. Defaulted so the narrative prompt's "DO NOT populate
+    # `language_novelty_score`" instruction does not trip schema
+    # validation when the model obeys.
+    language_novelty_score: float = 0.0
     risk_factor_deltas: list[RiskFactorDelta]
     # Item 8 financials are extracted from `ParentChunk.table_html` via
     # the structured `ten_k_financials` prompt + `TenKFinancials` schema,
@@ -235,7 +241,12 @@ class TranscriptOutput(BaseModel):
     SCHEMA_VERSION: ClassVar[str] = "v1"
 
     ticker: str
-    event_datetime: datetime
+    # AwareDatetime: timezone offset is mandatory. Naive datetimes carry
+    # no semantics — a transcript without an explicit time should emit
+    # null here rather than have the LLM guess the issuer's HQ timezone
+    # (a 3-hour offset error silently corrupts every time-windowed
+    # signal downstream).
+    event_datetime: AwareDatetime | None
     prepared_remarks_tone: Claim
     q_and_a_evasiveness: Claim  # subjective; G-Eval scored
     forward_statements: list[ForwardStatement]

@@ -84,6 +84,7 @@ def test_extract_transcript_returns_validated_output(tmp_path: Path) -> None:
     )
     assert out is not None
     assert out.ticker == "ACME"
+    assert out.event_datetime is not None
     assert out.event_datetime.year == 2026
     assert out.prepared_remarks_tone.confidence == pytest.approx(0.75)
 

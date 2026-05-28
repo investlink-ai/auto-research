@@ -8,7 +8,7 @@ the citation-grounding validator, which is the right failure mode.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -139,7 +139,7 @@ def _ten_k_output() -> TenKOutput:
 def _transcript_output() -> TranscriptOutput:
     return TranscriptOutput(
         ticker="NVDA",
-        event_datetime=datetime(2025, 2, 26, 17, 0),
+        event_datetime=datetime(2025, 2, 26, 17, 0, tzinfo=UTC),
         prepared_remarks_tone=_claim(),
         q_and_a_evasiveness=_claim(),
         forward_statements=[],
@@ -193,6 +193,49 @@ def test_transcript_output_is_frozen() -> None:
     out = _transcript_output()
     with pytest.raises(ValidationError):
         out.ticker = "OTHER"
+
+
+def test_transcript_event_datetime_rejects_naive() -> None:
+    """Naive datetime carries no semantics — schema must reject so the
+    LLM can't silently substitute a guessed timezone (the prompt now
+    instructs `null` instead of inventing an HQ offset)."""
+    with pytest.raises(ValidationError):
+        TranscriptOutput(
+            ticker="NVDA",
+            event_datetime=datetime(2025, 2, 26, 17, 0),  # naive
+            prepared_remarks_tone=_claim(),
+            q_and_a_evasiveness=_claim(),
+            forward_statements=[],
+        )
+
+
+def test_transcript_event_datetime_accepts_null() -> None:
+    """When the transcript lacks an explicit time + timezone, the prompt
+    tells the model to emit null; the schema must accept it."""
+    out = TranscriptOutput(
+        ticker="NVDA",
+        event_datetime=None,
+        prepared_remarks_tone=_claim(),
+        q_and_a_evasiveness=_claim(),
+        forward_statements=[],
+    )
+    assert out.event_datetime is None
+
+
+def test_transcript_event_datetime_accepts_iso_with_offset() -> None:
+    """ISO-8601 with explicit offset (the prompt's mandated format) must
+    round-trip cleanly through Pydantic parsing."""
+    out = TranscriptOutput.model_validate(
+        {
+            "ticker": "NVDA",
+            "event_datetime": "2026-01-30T17:00:00-05:00",
+            "prepared_remarks_tone": _claim().model_dump(),
+            "q_and_a_evasiveness": _claim().model_dump(),
+            "forward_statements": [],
+        }
+    )
+    assert out.event_datetime is not None
+    assert out.event_datetime.tzinfo is not None
 
 
 def test_eight_k_output_is_frozen() -> None:
@@ -448,6 +491,26 @@ def test_ten_k_output_financials_defaults_to_none() -> None:
     construction (without specifying financials) must continue to validate."""
     out = _ten_k_output()
     assert out.financials is None
+
+
+def test_ten_k_output_language_novelty_score_defaults_to_zero() -> None:
+    """The narrative prompt instructs the model `DO NOT populate
+    language_novelty_score (computed downstream)`. The schema must default
+    the field so a prompt-compliant model that omits it does not trip
+    Pydantic validation — otherwise every production 10-K extraction
+    silently quarantines on the field-required error.
+    """
+    out = TenKOutput(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        guidance_tone=_claim(),
+        accrual_flags=[],
+        supplier_mentions=[],
+        customer_mentions=[],
+        risk_factor_deltas=[],
+    )
+    assert out.language_novelty_score == 0.0
 
 
 def test_ten_k_output_accepts_financials_when_supplied() -> None:

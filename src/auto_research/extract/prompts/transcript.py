@@ -30,8 +30,13 @@ DO NOT include `source_span`. Character offsets are computed in code.
 Fields to populate:
 - ticker: the issuing company's stock ticker (uppercase).
 - event_datetime: the earnings call's start time in ISO-8601 format
-  (e.g., "2026-01-30T17:00:00-05:00"). If the transcript does not give
-  a precise time, use 17:00 in the company's headquarters timezone.
+  WITH an explicit timezone offset (e.g., "2026-01-30T17:00:00-05:00").
+  The timezone offset is MANDATORY — a naive datetime (no offset) is
+  rejected by the schema. If the transcript does not state a precise
+  time AND an explicit timezone (e.g., "Eastern Time", "EST", "ET",
+  "Pacific Time"), return `null`. Do NOT guess the timezone from the
+  company's headquarters or from training data — a wrong offset
+  silently corrupts every time-windowed downstream signal.
 - prepared_remarks_tone: a single Claim describing the overall tone of
   the prepared remarks portion (e.g., "cautious bullish on FY26
   demand; gross-margin headwinds called out twice"). Confidence in [0, 1].
