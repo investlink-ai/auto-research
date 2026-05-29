@@ -1,0 +1,16 @@
+{
+  "worker": "ten_k",
+  "metrics": {
+    "n": 7,
+    "quarantined": 6,
+    "hallucination_rate": 0.8571428571428571,
+    "accrual_flags": 1.0,
+    "supplier_mentions": 0.0,
+    "customer_mentions": 1.0,
+    "risk_factor_deltas": 0.0,
+    "icfr_material_weaknesses": 1.0,
+    "critical_accounting_estimate_changes": 1.0,
+    "going_concern": 1.0,
+    "language_novelty_score": null
+  }
+}

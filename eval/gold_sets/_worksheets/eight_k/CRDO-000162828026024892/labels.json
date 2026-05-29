@@ -1,0 +1,23 @@
+{
+  "doc_id": "CRDO-000162828026024892",
+  "_meta": {
+    "ticker": "CRDO",
+    "cik": "0001807794",
+    "accession": "0001628280-26-024892",
+    "accepted": "2026-04-13T20:13:25+00:00"
+  },
+  "_instructions": "Fill event_classification (one of ['milestone', 'partnership', 'contract', 'guidance_change', 'leadership_change', 'dilution', 'other']). Copy EXACT quote spans from source.txt into the two lists; empty lists are fine. Verify and prune _candidates \u2014 they are keyword hints, not answers.",
+  "event_classification": "",
+  "milestone_mentions": [],
+  "dilution_language_flags": [],
+  "rationale": "",
+  "_candidates": {
+    "milestone_mentions": [
+      "On April 13, 2026, Credo Technology Group Holding Ltd (the \u201cCompany\u201d) and Credo Semiconductor, Inc., a California corporation and wholly owned subsidiary of the Company, entered into a share purchase agreement (the \u201cShare Purchase Agreement\u201d) with DustPhotonics Ltd., an Israeli company (\u201cDustPhotonics\u201d), the shareholders of DustPhotonics party thereto and the shareholder representative party thereto to acquire 100% of the issued and outstanding ordinary shares and preferred shares of DustPhotonics for upfront consideration consisting of (i) $750,000,000 in cash and (ii) approximately 0.92 million ordinary shares, par value $0.00005 per share, of the Company (\u201cCompany Ordinary Shares\u201d), subject to the terms and conditions of the definitive agreement. The Share Purchase Agreement also provides for potential incremental contingent consideration of up to approximately 3.21 million Company Ordinary Shares payable based on the achievement of certain financial milestones, subject to the terms and conditions of the definitive agreement.",
+      "The Company Ordinary Shares to be issued as consideration in the Acquisition will be issued in reliance on the exemption from registration requirements of the Securities Act of 1933, as amended (the \u201cSecurities Act\u201d), provided by Section 4(a)(2) thereof and Rule 506 of Regulation D and Regulation S promulgated under the Securities Act. Recipients of the Company Ordinary Shares will be provided customary piggyback registration rights with respect to such shares pursuant to the terms and conditions of the Share Purchase Agreement.",
+      "On April 13, 2026, the Company issued a press release, a copy of which is filed hereto as Exhibit 99.1 and is incorporated herein by reference into this Item 7.01, announcing its entry into the Share Purchase Agreement.",
+      "This Current Report on Form 8-K contains forward-looking statements within the meaning of Section 27A of the Securities Act and Section 21E of the Exchange Act. All statements other than statements of historical fact could be deemed forward-looking statements, including, but not limited to, any statements regarding our acquisition of DustPhotonics, launches of new or expansion of existing products or services; technology developments and innovation; our plans, strategies or objectives with respect to future operations; financial outlook; future financial results; expectations regarding the markets and industries in which we conduct business; and assumptions underlying any of the foregoing. Words such as \u201canticipates,\u201d \u201cexpects,\u201d \u201cintends,\u201d \u201cplans,\u201d \u201cprojects,\u201d \u201cbelieves,\u201d \u201cseeks,\u201d \u201cestimates,\u201d \u201ccan,\u201d \u201cmay,\u201d \u201cwill,\u201d \u201cwould,\u201d \u201coutlook,\u201d \u201cforecast,\u201d \u201ctargets\u201d and similar expressions, or their negatives, may identify such forward-looking statements. These statements are not guarantees of results and should not be considered as an indication of future activity or future performance. Forward-looking statements are predictions, projections and other statements about future events that are based on current expectations and assumptions and, as a result, are subject to risks and uncertainties that may cause actual events or results to differ materially from those described in this press release, including but not limited to: the ability to complete the acquisition on the expected timeline or at all; the ability to successfully integrate DustPhotonics' operations and technology; the ability to achieve the f"
+    ],
+    "dilution_language_flags": []
+  }
+}

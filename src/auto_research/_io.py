@@ -24,6 +24,23 @@ import threading
 from pathlib import Path
 
 
+def project_root() -> Path:
+    """Return the repo root: the nearest ancestor containing `pyproject.toml`.
+
+    Editable installs (`uv sync`) keep `src/auto_research/` inside the repo,
+    so walking up from this module hits `pyproject.toml` deterministically.
+    Non-editable installs (a wheel in site-packages) have no `pyproject.toml`
+    above the module — fall back to the current working directory rather than
+    raising `StopIteration`. This is the single shared implementation; callers
+    (`experiment`, the eval harness) must not re-walk inline.
+    """
+    here = Path(__file__).resolve()
+    for parent in (here, *here.parents):
+        if (parent / "pyproject.toml").exists():
+            return parent
+    return Path.cwd()
+
+
 def atomic_write_bytes(dest: Path, content: bytes) -> None:
     """Write `content` to `dest` atomically and durably.
 
@@ -76,4 +93,4 @@ def atomic_write_text(dest: Path, content: str, *, encoding: str = "utf-8") -> N
     atomic_write_bytes(dest, content.encode(encoding))
 
 
-__all__ = ["atomic_write_bytes", "atomic_write_text"]
+__all__ = ["atomic_write_bytes", "atomic_write_text", "project_root"]

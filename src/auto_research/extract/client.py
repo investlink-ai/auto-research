@@ -80,9 +80,12 @@ from auto_research.agents.reliability import reliable_agent_node
 from auto_research.extract._caching import cached_system_block
 from auto_research.extract._response import UsageDict
 
-# The tool name every worker forces via `tool_choice`. Single value
-# (not a per-worker name) so the wrapper's response-parsing branch
-# can match by literal without threading the worker name through.
+# The single structured-output tool name offered to every worker. On
+# non-thinking (Haiku) routes the wrapper forces it via `tool_choice`; on
+# thinking-enabled (Sonnet/Opus) routes it is offered with the default
+# `auto` choice (forcing is incompatible with extended thinking). One fixed
+# value (not a per-worker name) lets the response-parsing branch match by
+# literal without threading the worker name through.
 RECORD_EXTRACTION_TOOL_NAME: Final[str] = "record_extraction"
 
 
@@ -279,7 +282,8 @@ def make_extraction_client(
         # leaves 2048 for actual output, which fits every current
         # output schema.
         extra_kwargs: dict[str, Any] = {}
-        if model.startswith(("claude-sonnet-", "claude-opus-")):
+        thinking_enabled = model.startswith(("claude-sonnet-", "claude-opus-"))
+        if thinking_enabled:
             extra_kwargs["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": EXTENDED_THINKING_BUDGET,
@@ -289,13 +293,21 @@ def make_extraction_client(
         # `output_schema` is provided. The tool's `input_schema` is the
         # pydantic model's JSON schema; Anthropic rejects responses
         # whose tool_use.input doesn't conform, cutting json-decode and
-        # schema-noncompliance quarantines from ~5-15% to <1%. The
-        # forced `tool_choice` makes the model emit exactly one
-        # `record_extraction` tool_use block; the outer wrapper pulls
-        # `tool_use.input` directly without a json.loads round-trip.
-        # When `output_schema` is None (contextual-chunker and similar
-        # free-form text callers), the call falls back to ordinary text
-        # content with no tool plumbing.
+        # schema-noncompliance quarantines from ~5-15% to <1%. The outer
+        # wrapper pulls `tool_use.input` directly without a json.loads
+        # round-trip. When `output_schema` is None (contextual-chunker
+        # and similar free-form text callers), the call falls back to
+        # ordinary text content with no tool plumbing.
+        #
+        # tool_choice is forced (`type: tool`) ONLY on non-thinking
+        # (Haiku) routes — that guarantees exactly one `record_extraction`
+        # block. The Anthropic API rejects a forced tool_choice while
+        # extended thinking is enabled ("Thinking may not be enabled when
+        # tool_choice forces tool use"), so on Sonnet/Opus routes the tool
+        # is offered but tool_choice is left at its default (`auto`). The
+        # single offered tool plus its description reliably elicits the
+        # call; a miss surfaces as a `None` payload and routes to
+        # quarantine, exactly like a refusal.
         if output_schema is not None:
             tool: ToolParam = {
                 "name": RECORD_EXTRACTION_TOOL_NAME,
@@ -305,12 +317,13 @@ def make_extraction_client(
                 ),
                 "input_schema": _tool_input_schema(output_schema),
             }
-            tool_choice: ToolChoiceToolParam = {
-                "type": "tool",
-                "name": RECORD_EXTRACTION_TOOL_NAME,
-            }
             extra_kwargs["tools"] = [tool]
-            extra_kwargs["tool_choice"] = tool_choice
+            if not thinking_enabled:
+                tool_choice: ToolChoiceToolParam = {
+                    "type": "tool",
+                    "name": RECORD_EXTRACTION_TOOL_NAME,
+                }
+                extra_kwargs["tool_choice"] = tool_choice
 
         # `cached_system_block` builds the structured-block form with
         # `cache_control: ephemeral` — same helper as the batch client

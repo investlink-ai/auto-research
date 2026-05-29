@@ -46,6 +46,11 @@ dev = [
 mlx = [
     "mlx-embeddings>=0.1.0",
 ]
+# Extraction/RAG eval stack. Kept optional so base installs and CI unit
+# runs don't pull the heavy LLM-judge tree. Install with `uv sync --extra eval`.
+eval = [
+    "deepeval>=2,<4",
+]
 
 [project.scripts]
 auto-research = "auto_research.cli:cli"
@@ -130,6 +135,7 @@ exclude = [
     "tests/_otel_helpers\\.py$",
     "tests/unit/conftest\\.py$",
     "tests/unit/_fixture_meta\\.py$",
+    "tests/evals/_eval_asserts\\.py$",
     "tests/integration/conftest\\.py$",
 ]
 

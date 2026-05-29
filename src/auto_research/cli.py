@@ -29,6 +29,7 @@ import httpx
 import pyarrow.parquet as pq
 
 from auto_research._io import atomic_write_text
+from auto_research.cli_eval import eval_group
 from auto_research.extract.embeddings import _PER_CORPUS_STORE
 from auto_research.extract.materialization import (
     ActiveMaterialization,
@@ -1106,14 +1107,4 @@ def ingest_fmp(ticker: str | None) -> None:
     )
 
 
-@cli.group(name="eval", help="Run eval suites against extracted outputs.")
-def eval_group() -> None: ...
-
-
-@eval_group.command("extract", help="DeepEval on extraction outputs (not yet implemented).")
-def eval_extract() -> None:
-    raise _not_implemented(
-        "eval extract",
-        "DeepEval suite for extraction is planned for the W1 wrap-up; "
-        "see docs/plans/2026-05-22-auto-research-implementation.md.",
-    )
+cli.add_command(eval_group)

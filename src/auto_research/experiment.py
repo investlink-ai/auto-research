@@ -31,21 +31,9 @@ from pathlib import Path
 import mlflow
 from mlflow.entities import Run
 
+from auto_research._io import project_root as _project_root
+
 _DEFAULT_URI = "file:./mlruns"
-
-
-def _project_root() -> Path:
-    """Walk up from this module to find the directory containing pyproject.toml.
-
-    Editable installs (uv sync) keep src/auto_research/ inside the repo, so
-    walking up from __file__ hits pyproject.toml deterministically. For
-    non-editable installs (wheel in site-packages), falls back to CWD.
-    """
-    here = Path(__file__).resolve()
-    for parent in (here, *here.parents):
-        if (parent / "pyproject.toml").exists():
-            return parent
-    return Path.cwd()
 
 
 def _normalize_uri(raw: str) -> str:
