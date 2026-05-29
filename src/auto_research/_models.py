@@ -52,10 +52,11 @@ _OPUS: Final = "claude-opus-4-7"
 # `make_extraction_client`. The bare-model portion is the
 # server-native ID — HuggingFace repo path form, which is what
 # `vllm-mlx` and `mlx-openai-server` accept directly; the wrapper
-# strips the `local/` prefix before forwarding to the API. No
-# `_ROUTING` rows resolve to these constants today; route flips ship
-# per-worker as eval validates the substitution (cost-model doc
-# §10.5).
+# strips the `local/` prefix before forwarding to the API. Route
+# flips ship per-worker as eval validates the substitution (cost-model
+# doc §10.5); the three 10-K narrative-disclosure rows
+# (going_concern, icfr_material_weaknesses,
+# critical_accounting_estimate_changes) are the first flips to land.
 #
 # `_LOCAL_QWEN_35B_MOE` is the smoke-tested locked stack (Mac M2 96 GB
 # on vllm-mlx==0.3.0 with `--default-chat-template-kwargs
@@ -83,11 +84,17 @@ _ROUTING: Final[dict[tuple[str, str], str]] = {
     ("ten_k", "accrual_flags"): _HAIKU,
     ("ten_k", "risk_factor_deltas"): _HAIKU,
     # Going-concern, ICFR material weaknesses, and critical accounting
-    # estimate changes: narrative-only signals XBRL cannot give;
-    # templated language-pattern recognition per spec §7.3 ⇒ Haiku.
-    ("ten_k", "going_concern"): _HAIKU,
-    ("ten_k", "icfr_material_weaknesses"): _HAIKU,
-    ("ten_k", "critical_accounting_estimate_changes"): _HAIKU,
+    # estimate changes: narrative-only signals XBRL cannot give. Three
+    # high-volume templated-pattern fields with bounded output shape
+    # (single Claim or short list of Claims) and per-field cache keys —
+    # the workload profile the local Qwen 35B-MoE stack was smoke-tested
+    # against (cost-model doc §10.5 "Locked stack"). Routed to the
+    # locked local stack to keep narrative-extraction throughput off
+    # the Anthropic per-call budget; semantics validated via the
+    # tests/live smoke test before production backfill.
+    ("ten_k", "going_concern"): _LOCAL_QWEN_35B_MOE,
+    ("ten_k", "icfr_material_weaknesses"): _LOCAL_QWEN_35B_MOE,
+    ("ten_k", "critical_accounting_estimate_changes"): _LOCAL_QWEN_35B_MOE,
     # Transcripts (TranscriptOutput): Q&A nuance ⇒ Sonnet; prepared remarks ⇒ Haiku.
     ("transcript", "q_and_a_evasiveness"): _SONNET,
     ("transcript", "prepared_remarks_tone"): _HAIKU,

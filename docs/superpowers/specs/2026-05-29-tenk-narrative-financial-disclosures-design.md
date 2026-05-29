@@ -113,10 +113,17 @@ The new fields plug into both paths unchanged in shape:
   `accession_number`, `fiscal_period_end`) plus exactly one narrative
   field — same shape as the existing `TenK*Partial` set.
 - Routing-table rows go in `_models.py` under the existing 10-K block;
-  all three route to Haiku per spec §7.3 (templated language-pattern
-  recognition tier). The routing rows apply to the RAG per-field
-  calls; the single-shot call already routes via
+  all three route to `_LOCAL_QWEN_35B_MOE` — the smoke-tested locked
+  local stack (cost-model doc §10.5). Each field is a high-volume
+  templated-pattern call with bounded output shape (one Claim or a
+  short list of Claims), which is the workload the local stack was
+  validated for. The routing rows apply to the RAG per-field calls;
+  the single-shot call already routes via
   `_NARRATIVE_DEFAULT_TASK = "supplier_mentions"` and that is unchanged.
+  The local routing is gated by `_ALLOWED_LOCAL_ROWS` in
+  `tests/unit/test_extract_local_dispatch.py` — adding a fourth local
+  row in a future change requires extending that allowlist with
+  smoke-test evidence.
 - INV-2 grounding inherits from `Claim`/`Citation` — `_resolve_spans`
   in `_common.py` handles whitespace-flexible regex resolution; ZERO
   / AMBIGUOUS match handling unchanged.
@@ -209,7 +216,9 @@ The new fields plug into both paths unchanged in shape:
     existing five fields).
 - `src/auto_research/_models.py`
   - Add three routing rows in the 10-K block, all `_HAIKU`. Comment
-    cites spec §7.3 (templated language-pattern recognition tier).
+    cites the cost-model doc §10.5 "Locked stack" — the smoke-tested
+    Qwen 35B-MoE backend that these three high-volume templated-pattern
+    fields route to.
 
 ## 7. Tests
 
@@ -274,10 +283,14 @@ Per long 10-K (RAG path, post-#78 PR-B economics ~$0.47/filing):
 | Change | Per-filing delta |
 |---|---|
 | Delete Item 8 LLM table call | −~$0.05 |
-| Add 3 Haiku field calls (`going_concern`, `icfr_material_weaknesses`, `critical_accounting_estimate_changes`) | +~$0.015 |
-| **Net** | **−~$0.035** |
+| Add 3 local Qwen 35B-MoE field calls (`going_concern`, `icfr_material_weaknesses`, `critical_accounting_estimate_changes`) | \$0 incremental Anthropic spend (local stack) |
+| **Net** | **−~$0.05** |
 
-At 500 long 10-Ks per backfill cycle: ~$17.50 saved per cycle. Short
+The local-stack calls have no per-call Anthropic budget; the only
+incremental cost is on-prem GPU time on the locked Mac M2 / vllm-mlx
+host (cost-model doc §10.5).
+
+At 500 long 10-Ks per backfill cycle: ~$25 saved per cycle. Short
 10-Ks (single-shot path) see the same direction.
 
 ## 10. Sequencing

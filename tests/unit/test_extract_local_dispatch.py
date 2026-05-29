@@ -168,15 +168,37 @@ def test_local_singleton_keyed_by_worker_and_model_id() -> None:
     assert d is not a, "different worker under the same model_id must isolate"
 
 
-def test_no_production_routes_flipped_to_local() -> None:
-    """Acceptance-criteria pin: this change adds dispatch infra only;
-    no `_ROUTING` row resolves to a `local/*` model id. Route flips
-    ship per-worker as the eval suite validates the substitution. If a
-    future change flips a route, this test fails and the author is
-    forced to look at the eval evidence."""
+_ALLOWED_LOCAL_ROWS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # 10-K narrative-disclosure signals XBRL cannot give. Bounded
+        # output shape (Claim | None or list[Claim]), per-field cache
+        # keys, smoke-tested via tests/live/test_ten_k_local_qwen_smoke.py
+        # against the locked Qwen 35B-MoE stack (cost-model doc §10.5).
+        ("ten_k", "going_concern"),
+        ("ten_k", "icfr_material_weaknesses"),
+        ("ten_k", "critical_accounting_estimate_changes"),
+    }
+)
+
+
+def test_only_allowed_routes_flipped_to_local() -> None:
+    """Acceptance-criteria pin: the only `_ROUTING` rows allowed to
+    resolve to a `local/*` model id are those enumerated in
+    `_ALLOWED_LOCAL_ROWS`. New flips must extend the allowlist AND cite
+    the eval / smoke-test evidence in the PR body — the assertion is
+    the gate the author has to look at."""
     for (worker, task), model_id in _models._ROUTING.items():
-        assert not model_id.startswith("local/"), (
-            f"({worker!r}, {task!r}) routes to {model_id!r} — local routes are "
-            "eval-gated; flipping a row to local/* requires removing this "
-            "assertion AND citing the eval delta in the PR body"
-        )
+        is_local = model_id.startswith("local/")
+        is_allowed = (worker, task) in _ALLOWED_LOCAL_ROWS
+        if is_local:
+            assert is_allowed, (
+                f"({worker!r}, {task!r}) routes to {model_id!r} but is not "
+                f"in _ALLOWED_LOCAL_ROWS — local routes are eval-gated; "
+                "extend the allowlist and cite the eval delta in the PR body"
+            )
+        else:
+            assert not is_allowed, (
+                f"({worker!r}, {task!r}) is in _ALLOWED_LOCAL_ROWS but routes "
+                f"to {model_id!r}, not a local/* model — remove the row from "
+                "_ALLOWED_LOCAL_ROWS or restore the local routing"
+            )

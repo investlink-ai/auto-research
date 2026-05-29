@@ -70,25 +70,29 @@ def test_route_model_raises_on_unknown_worker() -> None:
     assert "not_a_worker" in str(exc_info.value)
 
 
-def test_route_model_routes_ten_k_going_concern_to_haiku() -> None:
-    """Going-concern is binary auditor language — templated
-    pattern-recognition tier per spec §7.3 ⇒ Haiku."""
-    assert route_model("ten_k", "going_concern") == "claude-haiku-4-5"
-
-
-def test_route_model_routes_ten_k_icfr_material_weaknesses_to_haiku() -> None:
-    """ICFR material-weakness language is Item 9A pattern recognition
-    — Haiku per §7.3."""
+def test_route_model_routes_ten_k_going_concern_to_local_qwen() -> None:
+    """Going-concern is binary auditor language — high-volume templated
+    pattern recognition, routed to the locked local stack
+    (cost-model doc §10.5)."""
     assert (
-        route_model("ten_k", "icfr_material_weaknesses")
-        == "claude-haiku-4-5"
+        route_model("ten_k", "going_concern")
+        == "local/unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit"
     )
 
 
-def test_route_model_routes_ten_k_critical_accounting_estimate_changes_to_haiku() -> None:
+def test_route_model_routes_ten_k_icfr_material_weaknesses_to_local_qwen() -> None:
+    """ICFR material-weakness language is Item 9A pattern recognition —
+    routed to the locked local stack."""
+    assert (
+        route_model("ten_k", "icfr_material_weaknesses")
+        == "local/unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit"
+    )
+
+
+def test_route_model_routes_ten_k_critical_accounting_estimate_changes_to_local_qwen() -> None:
     """Critical-estimate language is Item 7 / footnote pattern
-    recognition — Haiku per §7.3."""
+    recognition — routed to the locked local stack."""
     assert (
         route_model("ten_k", "critical_accounting_estimate_changes")
-        == "claude-haiku-4-5"
+        == "local/unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit"
     )
