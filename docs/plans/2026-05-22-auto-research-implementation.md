@@ -441,7 +441,7 @@ field, G-Eval for subjective fields, hallucination metric.
 
 **Labels.** `eval`, `large` **Milestone.** W2 **Blocked by.** #19
 
-### Issue 21 — `feat(eval): Ragas RAG eval (context_recall, faithfulness, answer_relevancy)`
+### Issue 21 — `feat(eval): Ragas RAG eval (context_recall, faithfulness, response_relevancy)`
 
 **Objective.** Hand-build ~30 `(query, expected_chunk_ids)` pairs for Flow 1
 and ~30 `(query, expected_memo_ids)` pairs for Flow 2. Build Ragas pytest
