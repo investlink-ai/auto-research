@@ -4,12 +4,25 @@ DeepEval is used *only* here — structured field comparison (F1 / exact /
 Spearman) stays in metrics.py because the test-case API is text-based. Each
 field's rubric scores whether the extracted claim's quote + categorical
 confidence is a defensible reading of the source passage, judged against
-the gold rationale supplied via the test case context."""
+the gold rationale supplied via the test case context.
+
+The judge is an Anthropic model, not DeepEval's default OpenAI `GPTModel`:
+this is an Anthropic-based project, the eval suites already gate on
+`ANTHROPIC_API_KEY`, and defaulting to OpenAI would force a *second*
+(`OPENAI_API_KEY`) credential for every eval run. `AnthropicModel` reads
+`ANTHROPIC_API_KEY` at construction, so `build_geval_metric` must only be
+called where that key is present (the @pytest.mark.eval suites) — or with a
+dummy key set for construction-only unit tests."""
 
 from __future__ import annotations
 
 from deepeval.metrics import GEval
+from deepeval.models import AnthropicModel
 from deepeval.test_case import SingleTurnParams
+
+# Sonnet-tier judge: G-Eval rubric scoring needs cross-sentence reasoning,
+# matching the tier the subjective fields themselves are extracted at.
+_JUDGE_MODEL = "claude-sonnet-4-6"
 
 _RUBRICS: dict[str, str] = {
     "guidance_tone": (
@@ -41,6 +54,7 @@ def build_geval_metric(field: str, *, threshold: float) -> GEval:
     return GEval(
         name=f"{field}_quality",
         criteria=_RUBRICS[field],
+        model=AnthropicModel(model=_JUDGE_MODEL),
         evaluation_params=[
             SingleTurnParams.INPUT,
             SingleTurnParams.ACTUAL_OUTPUT,
