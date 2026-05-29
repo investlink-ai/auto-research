@@ -483,7 +483,7 @@ the "templated" bucket.
 
 The codebase is already designed for this. The routing-table
 abstraction (`_models.py:_ROUTING`) means adding e.g.
-`_LOCAL_QWEN_27B` as a route is a one-line extension. The
+`_LOCAL_QWEN_35B_MOE` as a route is a one-line extension. The
 `ExtractionFn` protocol abstracts the call. What you'd build:
 
 1. **New route constants** in `_ROUTING` for the specific
@@ -710,11 +710,14 @@ joined text when `output_schema=None`) plus a tiny `UsageDict` —
 callout above for why we picked this over a normalized
 `ExtractionResponse` dataclass.
 
-1. Add `_LOCAL_QWEN_9B`, `_LOCAL_QWEN_27B`, `_LOCAL_QWEN_35B_MOE`
-   constants in `auto_research/_models.py` alongside `_HAIKU`,
-   `_SONNET`, `_OPUS`. Values are `local/qwen3.5:9b` etc. — the
-   `local/` prefix is the dispatch hint that `_get_or_build_client`
-   reads.
+1. Add `_LOCAL_QWEN_4B`, `_LOCAL_QWEN_27B_DENSE`,
+   `_LOCAL_QWEN_35B_MOE` constants in `auto_research/_models.py`
+   alongside `_HAIKU`, `_SONNET`, `_OPUS`. The `local/` prefix is
+   the dispatch hint that `_get_or_build_client` reads; the suffix
+   is the server-native model id (HuggingFace repo path for
+   vllm-mlx / mlx-openai-server; Ollama-tag form is acceptable for
+   Ollama deploys). Only `_LOCAL_QWEN_35B_MOE` is smoke-tested; the
+   other two are placeholders for follow-up tiers.
 2. Change `ExtractionFn` Protocol return to
    `tuple[dict[str, Any] | str | None, UsageDict]`. Update
    `make_extraction_client._call` to parse `Message.content`
@@ -747,41 +750,111 @@ callout above for why we picked this over a normalized
    pins this (`test_no_production_routes_flipped_to_local`); flipping
    a row requires removing the assertion AND citing eval evidence.
 
-**Server choice (Ollama vs vLLM vs MLX-server).** The wrapper is the
-OpenAI-compat HTTP shape, so all three back-end choices use the same
-client code; the decision is at deploy time, controlled by `base_url`:
+**Server choice (Ollama vs vllm-mlx vs other MLX servers).** The
+wrapper is the OpenAI-compat HTTP shape, so all back-end choices use
+the same client code; the decision is at deploy time, controlled by
+`base_url`:
 
-- **Ollama** (`:11434/v1`, the default). Easiest DX — `ollama pull
-  qwen3.5:9b` and the server is up. Quantizes by default (Q4_K_M).
-  Right for dev / single-machine pilots; structured outputs (`format:
-  "json"`, `response_format=json_schema`) supported on recent versions.
-  Throughput is fine for backfill-class workloads.
-- **vLLM** (`:8000/v1`). Highest throughput per GPU; prefix-cache
-  built-in; supports guided generation via `outlines`-backed
-  decoding. Right for cloud-GPU rental or owned-fleet serving.
-  Heavier ops cost than Ollama.
-- **MLX-server** (custom port). Apple-Silicon-native; matches the
-  embedding stack's existing MLX use. Slightly less mature
-  structured-outputs story than Ollama as of mid-2026 — fine for
-  free-form text (contextual chunking) and templated JSON tasks
-  where schema-validation downstream catches drift. Right when the
-  deploy is already on an M-series Mac and the embedding workload is
-  there too.
+- **Ollama** (`:11434/v1`). Easiest DX — `ollama pull <tag>` and the
+  server is up. Quantizes by default (Q4_K_M). Fine for prototyping;
+  on Apple Silicon trails MLX by ~2× on decode and ~5× on prompt
+  processing, and no client-visible prefix cache.
+- **vllm-mlx** (`:8000/v1`). Native MLX backend with PagedAttention
+  + prefix cache (the structural analogue of Anthropic's
+  `cache_control: ephemeral` that §3.4's cache-read canary depends
+  on). Right for Apple Silicon when the workload pattern is
+  many-calls-share-a-system-prefix (the contextual chunker hits this
+  pattern; per-field RAG narrative does too).
+- **mlx-openai-server / MLX Omni Server** (custom port). MLX-native,
+  simpler than vllm-mlx, no prefix cache on most builds. The
+  drop-in if vllm-mlx's PagedAttention hits an edge case on a
+  specific model.
 
-Production deploy starts with Ollama on the dev Mac; vLLM is the
-escalation path if backfill throughput becomes the binding constraint.
+### Locked stack (smoke-tested 2026-05-29 on Mac M2 96 GB)
 
-7. Verify the wrapper end-to-end against a real Ollama serving
-   `qwen3.5:9b`: run a contextual-chunking call shape (free-form
-   text, no schema) and an Item 8 classifier shape (structured,
+For the M2-class development hardware this codebase deploys to, the
+locked combination is:
+
+- **Server**: `vllm-mlx==0.3.0` in a dedicated venv outside the
+  project tree (avoids pulling vllm-mlx + its transformers / torch
+  deps into the main lockfile).
+- **Model**: `unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit` — Unsloth's
+  dynamic-4-bit MLX checkpoint of Qwen 3.6-35B-A3B MoE. ~20 GB on
+  disk, ~20 GB RSS at runtime. UD-quant preserves quality on
+  sensitive layers (early/late attention, embeddings) at 6-8 bit
+  while compressing FFN to 4-bit — empirically within 0.5-1.5
+  points of FP16 on aggregate benchmarks, and well within the §10.6
+  acceptable zone (<5 % citation-paraphrase quarantine).
+- **Launch command**:
+
+  ```bash
+  vllm-mlx serve unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit \
+    --host 127.0.0.1 --port 8000 \
+    --enable-prefix-cache \
+    --max-tokens 4096 --max-request-tokens 16384 \
+    --reasoning-parser qwen3 \
+    --default-chat-template-kwargs '{"enable_thinking": false}'
+  ```
+
+  Three of those flags are load-bearing and not the defaults — pin
+  them on every relaunch:
+
+  - `--enable-prefix-cache` — the cache-economics framing depends
+    on it. Without it the contextual chunker re-processes the
+    shared system prefix on every call, wasting most of the
+    per-call latency budget.
+  - `--max-request-tokens 16384` — sized for our actual workload
+    (max ~10-15 K context on the RAG narrative path). The native
+    256 K context would allocate a KV-cache reserve we never use
+    and steal from the prefix-cache pool. Raise only if a new
+    worker shape needs more.
+  - `--default-chat-template-kwargs '{"enable_thinking": false}'`
+    — Qwen 3.6 enables a "thinking mode" by default that emits
+    prose-form chain-of-thought into `choices[0].message.content`
+    (not into a separate `reasoning_content` channel). For our
+    workload — structured JSON via `response_format=json_schema`,
+    or short text rewrites for contextual chunking — CoT prose in
+    `content` is junk that either trips the chunker's
+    output-token cap or pollutes the structured payload. The
+    `--reasoning-parser qwen3` flag is kept for the case where a
+    future model does emit `<think>` tags; with `enable_thinking`
+    off it is a no-op.
+
+- **Wrapper config**: pass `base_url="http://127.0.0.1:8000/v1"` to
+  `make_openai_compat_extraction_client`. No code change.
+
+### Smoke-test results
+
+Captured against the launch command above on M2 96 GB:
+
+| Check | Result |
+|---|---|
+| Server `/v1/models` reachability | OK |
+| OpenAI SDK free-form chat completion | clean text, `finish_reason=stop`, no CoT leak |
+| OpenAI SDK `response_format=json_schema` (`strict: true`) | schema honored, JSON parsed cleanly |
+| `make_openai_compat_extraction_client` structured path | `(dict, UsageDict)` round-trip; `usage["stop_reason"]="stop"` |
+| `make_openai_compat_extraction_client` free-form path | `(str, UsageDict)` round-trip; non-empty text |
+| Sustained decode (512 completion tokens) | **64.4 tok/s** |
+| Process RSS at steady state | **20.2 GB** (leaves ~70 GB for KV cache + Qwen3-Embedding MLX workload) |
+
+7. Verify the wrapper end-to-end against vllm-mlx serving the locked
+   model: run a contextual-chunking call shape (free-form text, no
+   schema) and an Item 8 classifier shape (structured,
    `response_format=json_schema`). Both should round-trip through
-   the new Protocol without leaking provider-specific types.
+   the new Protocol without leaking provider-specific types. The
+   smoke scripts at `tests/integration/` or ad-hoc `/tmp/`
+   equivalents work; this is operator verification, not a
+   committed test (the server isn't available in CI).
 
 **Phase 2 — Pilot on contextual chunking (1 week):**
 
-1. Flip ONE worker — contextual chunking — to `_LOCAL_QWEN_9B`
-   in the routing table. Highest-volume Haiku call, lowest quality
-   risk (free-text rewrite, no schema, no citations).
+1. Flip ONE worker — contextual chunking — to `_LOCAL_QWEN_35B_MOE`
+   in the routing table (the locked smoke-tested stack). Highest-volume
+   Haiku call, lowest quality risk (free-text rewrite, no schema,
+   no citations). At the same time, widen `_VALID_STOP_REASONS` in
+   `chunking_contextual.py` to include OpenAI's `"stop"` synonym —
+   the existing Anthropic-only allow-set would silently drop every
+   local response.
 2. Run a backfill cycle on a 10-ticker subset; compare:
    - Latency (per-chunk wall-clock)
    - Downstream retrieval quality (does the BGE/Voyage embedder
@@ -792,9 +865,11 @@ escalation path if backfill throughput becomes the binding constraint.
 
 **Phase 3 — Item 8 + 8-K + S-1 (after eval #20 lands, 2 weeks):**
 
-1. With `#20` providing per-task eval baselines, flip Item 8
-   classifier + extractor to `_LOCAL_QWEN_27B` and 8-K +
-   S-1 workers to the same.
+1. With the eval suite providing per-task baselines, flip Item 8
+   classifier + extractor to `_LOCAL_QWEN_35B_MOE` and 8-K + S-1
+   workers to the same. The 27B-dense constant remains a fallback
+   if the MoE's structured-output adherence on Item 8 line items
+   regresses under eval.
 2. Re-run eval against the local-extracted outputs; require parity
    on the citation-grounding and schema-adherence metrics.
 3. Flip the routing table on a corpus subset; promote to full
@@ -802,10 +877,10 @@ escalation path if backfill throughput becomes the binding constraint.
 
 **Phase 4 — 10-K narrative templated fields (after eval, 2 weeks):**
 
-1. `guidance_tone`, `accrual_flags`: flip to `_LOCAL_QWEN_27B` or
-   `_LOCAL_QWEN_35B_MOE`. These are the highest-risk migrations
-   because they involve judgment; require strong eval signal before
-   promoting.
+1. `guidance_tone`, `accrual_flags`: flip to `_LOCAL_QWEN_35B_MOE`
+   (the locked stack handles both). These are the highest-risk
+   migrations because they involve judgment; require strong eval
+   signal before promoting.
 2. `risk_factor_deltas`: defer indefinitely. Year-over-year delta
    reasoning is at the edge of what 30B-class models do reliably.
 

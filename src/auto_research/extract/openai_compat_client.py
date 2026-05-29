@@ -43,8 +43,7 @@ Production callers compose:
 
     _CLIENT = make_openai_compat_extraction_client(
         worker="contextual_chunking",
-        base_url="http://localhost:11434/v1",
-        api_key="ollama",
+        base_url="http://127.0.0.1:8000/v1",
     )
 
     text, usage = _CLIENT(
@@ -52,6 +51,16 @@ Production callers compose:
         system_prompt=PROMPT,
         user_content=child.text,
     )
+
+The locked Mac deploy serves `unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit`
+on `vllm-mlx` at `127.0.0.1:8000`; the exact launch flags
+(`--enable-prefix-cache`, `--max-request-tokens 16384`,
+`--default-chat-template-kwargs '{"enable_thinking": false}'`) are
+load-bearing and documented in
+`learning/2026-05-28-extraction-pipeline-cost-model.md` §10.5
+"Locked stack". Other backends (Ollama, mlx-openai-server) work
+behind the same wrapper but their server-config knobs are out of
+scope here.
 """
 
 from __future__ import annotations

@@ -102,6 +102,16 @@ _WHITESPACE_RE = re.compile(r"\s+")
 # Only these terminal stop reasons signal a complete, usable response.
 # `max_tokens` is a truncated fragment; `refusal` is a model-side refusal
 # sentence; `pause_turn`/`tool_use` produce text we don't want to embed.
+#
+# Anthropic-native today. When a future change flips this worker's
+# route to a `local/*` model id (see cost-model doc §10.5 "Locked
+# stack"), widen this set to include OpenAI's `"stop"` synonym —
+# vllm-mlx / mlx-openai-server return `finish_reason="stop"` for the
+# natural-completion case, and our wrapper surfaces it verbatim
+# through `UsageDict.stop_reason`. The Anthropic-only allow-set
+# would silently drop every local response. Don't add provider
+# detection here: keep the allow-set authoritative and update it in
+# the same change that flips the route plus its eval evidence.
 _VALID_STOP_REASONS: frozenset[str] = frozenset({"end_turn", "stop_sequence"})
 
 _log = logging.getLogger(__name__)

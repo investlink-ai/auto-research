@@ -49,18 +49,23 @@ def test_local_qwen_constants_are_local_prefixed() -> None:
     `_get_or_build_client` reads. A regression that renames the
     prefix without updating the dispatch would silently send local
     routes to the Anthropic SDK."""
-    assert _models._LOCAL_QWEN_9B.startswith("local/")
-    assert _models._LOCAL_QWEN_27B.startswith("local/")
+    assert _models._LOCAL_QWEN_4B.startswith("local/")
+    assert _models._LOCAL_QWEN_27B_DENSE.startswith("local/")
     assert _models._LOCAL_QWEN_35B_MOE.startswith("local/")
 
 
 def test_local_qwen_constants_have_documented_values() -> None:
-    """The cost-model doc §10.5 names specific Ollama tags. Pin them
-    so a drift between the constant values and the documented Ollama
-    pull command surfaces here."""
-    assert _models._LOCAL_QWEN_9B == "local/qwen3.5:9b"
-    assert _models._LOCAL_QWEN_27B == "local/qwen3.5:27b"
-    assert _models._LOCAL_QWEN_35B_MOE == "local/qwen3.5:35b-a3b"
+    """The cost-model doc §10.5 "Locked stack" names the smoke-tested
+    vllm-mlx checkpoint for the MoE constant and upstream Qwen HF
+    paths for the placeholder dense / pocket constants. Pin them so
+    a drift between the constants and the documented launch command
+    surfaces here. Changing any of these values means revisiting the
+    smoke-test artifacts in the doc."""
+    assert _models._LOCAL_QWEN_4B == "local/Qwen/Qwen3.6-4B-Instruct"
+    assert _models._LOCAL_QWEN_27B_DENSE == "local/Qwen/Qwen3.6-27B-Instruct"
+    assert (
+        _models._LOCAL_QWEN_35B_MOE == "local/unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit"
+    )
 
 
 # --- dispatch --------------------------------------------------------------
@@ -101,7 +106,7 @@ def test_dispatch_picks_local_for_local_route(
     # production routing table stays untouched.
     monkeypatch.setattr(
         "auto_research.extract.workers._common.route_model",
-        lambda _w, _t: _models._LOCAL_QWEN_9B,
+        lambda _w, _t: _models._LOCAL_QWEN_35B_MOE,
     )
     sentinel = MagicMock(name="local_client_sentinel")
     monkeypatch.setattr(
@@ -123,7 +128,7 @@ def test_dispatch_local_ignores_injected_anthropic_client(
     accidentally short-circuit the local dispatch."""
     monkeypatch.setattr(
         "auto_research.extract.workers._common.route_model",
-        lambda _w, _t: _models._LOCAL_QWEN_9B,
+        lambda _w, _t: _models._LOCAL_QWEN_35B_MOE,
     )
     sentinel = MagicMock(name="local_client_sentinel")
     monkeypatch.setattr(
@@ -143,22 +148,22 @@ def test_local_singleton_keyed_by_worker_and_model_id() -> None:
     a fresh client rather than reusing the stale 9B singleton — the
     routing change wouldn't otherwise take effect mid-process."""
     a = local_module.get_or_build_local_client(
-        "contextual_chunking", _models._LOCAL_QWEN_9B
+        "contextual_chunking", _models._LOCAL_QWEN_35B_MOE
     )
     b = local_module.get_or_build_local_client(
-        "contextual_chunking", _models._LOCAL_QWEN_9B
+        "contextual_chunking", _models._LOCAL_QWEN_35B_MOE
     )
     assert a is b, "same (worker, model_id) must return the same instance"
 
     c = local_module.get_or_build_local_client(
-        "contextual_chunking", _models._LOCAL_QWEN_27B
+        "contextual_chunking", _models._LOCAL_QWEN_27B_DENSE
     )
     assert c is not a, (
         "different model_id under the same worker must build a fresh client"
     )
 
     d = local_module.get_or_build_local_client(
-        "some_other_worker", _models._LOCAL_QWEN_9B
+        "some_other_worker", _models._LOCAL_QWEN_35B_MOE
     )
     assert d is not a, "different worker under the same model_id must isolate"
 
