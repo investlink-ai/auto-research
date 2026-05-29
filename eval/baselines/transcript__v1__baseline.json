@@ -1,0 +1,9 @@
+{
+  "worker": "transcript",
+  "metrics": {
+    "n": 7,
+    "quarantined": 7,
+    "hallucination_rate": 1.0,
+    "forward_statements": null
+  }
+}
