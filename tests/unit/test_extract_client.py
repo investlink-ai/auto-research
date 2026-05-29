@@ -148,10 +148,15 @@ def test_extended_thinking_auto_enabled_on_sonnet() -> None:
     """Sonnet-tier extraction (cross-doc reasoning per §7.3) gets extended
     thinking automatically — the worker doesn't have to remember it.
     Haiku-tier templated extraction does NOT get thinking (no quality
-    benefit, pure latency cost). Also pins that `tools` + `tool_choice`
-    are present alongside `thinking` so a future refactor that drops
-    one when the other is set surfaces here instead of silently
-    breaking Sonnet extraction.
+    benefit, pure latency cost).
+
+    The `record_extraction` tool is still offered on the Sonnet path so
+    the structured-output channel exists, but `tool_choice` is left at
+    its default (`auto`) rather than forced: the Anthropic API rejects a
+    forced `tool_choice` while extended thinking is enabled
+    ("Thinking may not be enabled when tool_choice forces tool use"). The
+    model reliably calls the single offered tool from the prompt + tool
+    description; a missed call surfaces as a `None` payload → quarantine.
     """
     fake = _FakeAnthropicClient(
         response_factory=lambda **kw: _make_message(model=kw["model"]),
@@ -168,14 +173,34 @@ def test_extended_thinking_auto_enabled_on_sonnet() -> None:
     assert "thinking" in sonnet_call
     assert sonnet_call["thinking"]["type"] == "enabled"
     assert sonnet_call["thinking"]["budget_tokens"] == 2048
-    # thinking + tool_use compose together — both must be present on
-    # the Sonnet path.
+    # The tool is offered (structured channel available)...
     assert "tools" in sonnet_call
     assert sonnet_call["tools"][0]["name"] == RECORD_EXTRACTION_TOOL_NAME
-    assert sonnet_call["tool_choice"] == {
-        "type": "tool",
-        "name": RECORD_EXTRACTION_TOOL_NAME,
-    }
+    # ...but tool_choice is NOT forced — forcing it alongside thinking is
+    # a 400 from the live API. Default (omitted) means `auto`.
+    assert "tool_choice" not in sonnet_call
+
+
+def test_thinking_and_forced_tool_choice_never_coexist() -> None:
+    """Regression guard for the Anthropic constraint: a single request may
+    not carry extended thinking AND a forced (`type: tool`/`any`)
+    tool_choice. Exercises both routed tiers and asserts the invariant
+    holds on whichever path enables thinking.
+    """
+    fake = _FakeAnthropicClient(
+        response_factory=lambda **kw: _make_message(model=kw["model"]),
+    )
+    for worker, task in (("ten_k", "supplier_mentions"), ("s_filings", "dilution_event")):
+        client = make_extraction_client(
+            worker=worker, usd_cap=10.00, anthropic_client=_as_sdk(fake)
+        )
+        client(task=task, system_prompt="sys", user_content="doc", output_schema=_TinyOutput)
+    for call in fake.messages.calls:
+        thinking_on = call.get("thinking", {}).get("type") == "enabled"
+        forced = isinstance(call.get("tool_choice"), dict) and call["tool_choice"].get(
+            "type"
+        ) in {"tool", "any"}
+        assert not (thinking_on and forced), call
 
 
 def test_extended_thinking_skipped_on_haiku() -> None:
