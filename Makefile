@@ -1,4 +1,4 @@
-.PHONY: quick check check-full test test-broad integration eval live-smoke lint typecheck setup-nlp setup-mlx smoke
+.PHONY: quick check check-full test test-broad integration eval live-smoke lint typecheck setup-nlp setup-mlx setup-reranker smoke serve-local-llm
 
 # Fast pre-commit gate — run constantly during development.
 quick: lint typecheck
@@ -58,6 +58,14 @@ setup-reranker:
 
 # Full local gate: + integration. Requires `docker compose up -d` first.
 check-full: quick test integration
+
+# Spin up the locked local-LLM serving stack
+# (vllm-mlx + Qwen3.6-35B-A3B UD-MLX-4bit on Mac). Thin wrapper around
+# `scripts/serve_local_llm.sh` — that script is the source of truth for
+# the launch flags. Foreground; Ctrl-C stops the server. Override
+# defaults via env vars: MODEL=..., PORT=..., VLLM_MLX_VENV=...
+serve-local-llm:
+	./scripts/serve_local_llm.sh
 
 lint:
 	uv run ruff check .

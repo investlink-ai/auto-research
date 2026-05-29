@@ -785,7 +785,12 @@ locked combination is:
   while compressing FFN to 4-bit — empirically within 0.5-1.5
   points of FP16 on aggregate benchmarks, and well within the §10.6
   acceptable zone (<5 % citation-paraphrase quarantine).
-- **Launch command**:
+- **Launch**: `make serve-local-llm` (or
+  `./scripts/serve_local_llm.sh` directly). The script is the
+  operator-facing source of truth for the launch flags; this doc
+  references it and vice versa so the two don't drift. Override
+  defaults via env vars (`MODEL=`, `PORT=`, `VLLM_MLX_VENV=`).
+  Effective command:
 
   ```bash
   vllm-mlx serve unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit \
