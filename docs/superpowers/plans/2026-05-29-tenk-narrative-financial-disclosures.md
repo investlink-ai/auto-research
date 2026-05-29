@@ -1,5 +1,16 @@
 # 10-K Narrative Financial-Disclosure Signals (re-scope of #79) — Implementation Plan
 
+> **Historical note (post-merge):** the routing rows for the three new
+> fields in Tasks 3 / 4 / 5 below were originally added as `_HAIKU` and
+> subsequently flipped to `_LOCAL_QWEN_35B_MOE` (the locked Mac M2 /
+> vllm-mlx Qwen 35B-MoE stack) on top of #84's provider-agnostic
+> dispatch. The unit-test assertions, `_ALLOWED_LOCAL_ROWS` gate, and
+> the live smoke under `tests/live/test_ten_k_local_qwen_smoke.py`
+> reflect the final state; the canonical design is in the spec, not
+> this plan. Read the plan body for the TDD step sequence and ignore
+> the `_HAIKU` literal in Tasks 3 / 4 / 5 — the symbol is now
+> `_LOCAL_QWEN_35B_MOE`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Delete the redundant LLM Item 8 table-extraction path on the

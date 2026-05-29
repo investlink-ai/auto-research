@@ -12,11 +12,13 @@ What's pinned here:
   routing flip from 9B to 27B builds a fresh client rather than reusing
   the stale 9B singleton.
 
-Today no `_ROUTING` row resolves to a `local/*` model id; the
-acceptance criteria on the issue are infra-only. These tests use a
-monkeypatched `route_model` to simulate a flipped routing entry —
-exercising the dispatch path without polluting the production
-routing table.
+Three `_ROUTING` rows currently resolve to `local/*` model ids
+(`going_concern`, `icfr_material_weaknesses`,
+`critical_accounting_estimate_changes`). Most dispatch tests still
+monkeypatch `route_model` to probe a single dispatch decision in
+isolation; `test_only_allowed_routes_flipped_to_local` walks the
+real `_ROUTING` table against `_ALLOWED_LOCAL_ROWS` and is the gate
+a future flipper has to look at.
 """
 
 from __future__ import annotations

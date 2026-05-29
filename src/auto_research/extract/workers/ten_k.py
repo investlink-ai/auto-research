@@ -3,13 +3,17 @@
 Two paths, one entry point:
 
 1. **Narrative single-shot.** `count_tokens(raw_doc) <
-   SINGLE_SHOT_TOKEN_CUTOFF` and no chunkset supplied → one Anthropic
-   call against the full raw doc via the shared
+   SINGLE_SHOT_TOKEN_CUTOFF` and no chunkset supplied → one LLM call
+   against the full raw doc via the shared
    `run_single_shot_extraction` driver.
 2. **Narrative RAG.** `count_tokens(raw_doc) ≥ SINGLE_SHOT_TOKEN_CUTOFF`
-   AND a `ChunkSet` is supplied → one Anthropic call PER narrative
-   field, iterating `TEN_K_NARRATIVE_FIELD_CONFIGS`. Each field gets a
+   AND a `ChunkSet` is supplied → one LLM call PER narrative field,
+   iterating `TEN_K_NARRATIVE_FIELD_CONFIGS`. Each field gets a
    field-specific query string and a distinct `doc_id` cache key.
+   Each call's provider is decided by the routing table — Anthropic
+   for the Sonnet/Haiku tiers and the local Qwen 35B-MoE stack for
+   the going-concern / ICFR / critical-accounting narrative-only
+   signals.
 
 `retrieve_fn` is injected so this module stays orthogonal to the RAG
 stack — the backfill orchestrator owns wiring it to the real
@@ -17,8 +21,10 @@ stack — the backfill orchestrator owns wiring it to the real
 stub.
 
 Production callers omit `cache_root` / `quarantine_root` (package
-defaults) and rely on `_common._CLIENTS["ten_k"]`'s singleton state
-across docs.
+defaults). The Anthropic-routed calls share `_common._CLIENTS["ten_k"]`
+across docs; the local-routed calls share
+`openai_compat_client._LOCAL_CLIENTS[("ten_k", model_id)]`, with the
+two singletons owned by their respective wrappers.
 """
 
 from __future__ import annotations
@@ -100,14 +106,18 @@ def _extract_ten_k_rag(
     partial output.
 
     Each per-field call uses the model tier the routing table actually
-    declares (most fields are Haiku; the cross-doc supplier/customer
-    fields run on Sonnet) — the unified pre-split call routed everything
-    to Sonnet via `_NARRATIVE_DEFAULT_TASK = supplier_mentions`, paying
-    for the wrong tier on guidance_tone / accrual_flags /
-    risk_factor_deltas. The partial schemas eliminate the dual-output
-    waste from emitting the full TenKOutput shape on every call and
-    discarding all but one field downstream — the unified-call path
-    paid ~5x output cost for this waste.
+    declares: Haiku for the Anthropic-routed templated fields
+    (guidance_tone, accrual_flags, risk_factor_deltas), Sonnet for the
+    cross-doc supplier/customer fields, and the local Qwen 35B-MoE
+    stack for the narrative-only signals XBRL cannot give
+    (going_concern, icfr_material_weaknesses,
+    critical_accounting_estimate_changes). The unified pre-split call
+    routed everything to Sonnet via `_NARRATIVE_DEFAULT_TASK =
+    supplier_mentions`, paying for the wrong tier on the three
+    Anthropic Haiku-tier fields. The partial schemas eliminate the
+    dual-output waste from emitting the full TenKOutput shape on every
+    call and discarding all but one field downstream — the
+    unified-call path paid ~5x output cost for this waste.
 
     `chunkset` is currently unused inside the loop — `retrieve_fn`
     abstracts the chunkset-to-parent pipeline behind the

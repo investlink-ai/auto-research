@@ -215,16 +215,21 @@ The new fields plug into both paths unchanged in shape:
     cache namespace; appending preserves the cache state of the
     existing five fields).
 - `src/auto_research/_models.py`
-  - Add three routing rows in the 10-K block, all `_HAIKU`. Comment
-    cites the cost-model doc §10.5 "Locked stack" — the smoke-tested
-    Qwen 35B-MoE backend that these three high-volume templated-pattern
-    fields route to.
+  - Add three routing rows in the 10-K block, all
+    `_LOCAL_QWEN_35B_MOE`. Comment cites the cost-model doc §10.5
+    "Locked stack" — the smoke-tested Qwen 35B-MoE backend that these
+    three high-volume templated-pattern fields route to.
+- `tests/unit/test_extract_local_dispatch.py`
+  - Extend `_ALLOWED_LOCAL_ROWS` to include the three `(ten_k, …)`
+    rows so the bidirectional gate in
+    `test_only_allowed_routes_flipped_to_local` admits them.
 
 ## 7. Tests
 
 - `tests/unit/test_models.py` — three assertions:
-  `route_model("ten_k", "going_concern") == _HAIKU`, same for
-  `icfr_material_weaknesses` and `critical_accounting_estimate_changes`.
+  `route_model("ten_k", "going_concern")` returns the local Qwen
+  35B-MoE model id, same for `icfr_material_weaknesses` and
+  `critical_accounting_estimate_changes`.
 - `tests/unit/test_extract_prompts.py`
   - Assert the three new entries exist in
     `TEN_K_NARRATIVE_FIELD_CONFIGS` and the count matches.
