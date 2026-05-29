@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from datetime import date
+from pathlib import Path
 
-from auto_research.eval.baseline import score_output
-from auto_research.eval.gold import GoldSample
+from auto_research.eval.baseline import _json_safe, capture_baseline, score_output
+from auto_research.eval.gold import GoldSample, GoldSet
 from auto_research.eval.registry import WORKER_EVALS
 from auto_research.extract.enums import EventClassification, FormType
 from auto_research.extract.schemas import (
@@ -120,3 +122,40 @@ def test_score_output_s_filings_mandatory_dilution_event() -> None:
     assert scores["capital_raise_language"] == 1.0
     assert scores["use_of_proceeds"] == 1.0
     assert scores["_grounding"] == "grounded"
+
+
+def test_json_safe_maps_nonfinite_to_none() -> None:
+    assert _json_safe(float("nan")) is None
+    assert _json_safe(float("inf")) is None
+    assert _json_safe(float("-inf")) is None
+    assert _json_safe(0.83) == 0.83
+    assert _json_safe("grounded") == "grounded"
+    assert _json_safe(3) == 3
+
+
+def test_capture_baseline_writes_valid_json(
+    monkeypatch: object, tmp_path: Path
+) -> None:
+    stub_agg = {
+        "n": 1,
+        "quarantined": 0,
+        "hallucination_rate": 0.0,
+        "language_novelty_score": float("nan"),
+        "milestone_mentions": 0.83,
+    }
+    monkeypatch.setattr(
+        "auto_research.eval.baseline.run_worker_eval",
+        lambda *a, **k: stub_agg,
+    )
+    gold_set = GoldSet(
+        worker="eight_k",
+        thresholds={},
+        samples=(),
+    )
+    out_path = capture_baseline(
+        WORKER_EVALS["eight_k"], gold_set, baselines_root=tmp_path
+    )
+    raw = out_path.read_text()
+    assert "NaN" not in raw
+    data = json.loads(raw)
+    assert data["metrics"]["language_novelty_score"] is None

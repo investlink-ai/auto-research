@@ -12,6 +12,8 @@ scores and leaves subjective scoring to the suite.
 from __future__ import annotations
 
 import json
+import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,15 @@ from auto_research.eval.gold import GoldSample, GoldSet
 from auto_research.eval.hallucination import grounding_outcome
 from auto_research.eval.metrics import claim_list_f1, exact_match, spearman
 from auto_research.eval.registry import WorkerEvalSpec
+
+logger = logging.getLogger(__name__)
+
+
+def _json_safe(value: Any) -> Any:
+    """Map non-finite floats (NaN/Inf) to None so baselines are valid JSON."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
 
 
 def _claim_quotes(value: Any) -> list[str]:
@@ -98,19 +109,36 @@ def run_worker_eval(
             vals = [
                 r[fname] for r in per_sample if isinstance(r.get(fname), (int, float))
             ]
-            agg[fname] = sum(vals) / len(vals) if vals else float("nan")
+            if vals:
+                agg[fname] = sum(vals) / len(vals)
+            else:
+                logger.warning(
+                    "field %r has zero scoreable samples; aggregated value will be NaN",
+                    fname,
+                )
+                agg[fname] = float("nan")
     return agg
 
 
-def capture_baseline(spec: WorkerEvalSpec, gold_set: GoldSet, **kwargs: Any) -> Path:
-    """Run `run_worker_eval` and write results to eval/baselines/."""
+def capture_baseline(
+    spec: WorkerEvalSpec,
+    gold_set: GoldSet,
+    *,
+    baselines_root: Path | None = None,
+    **kwargs: Any,
+) -> Path:
+    """Run `run_worker_eval` and write results to eval/baselines/.
+
+    ``baselines_root`` overrides the default project-rooted output directory;
+    pass a ``tmp_path`` in tests to avoid writing into the repository tree.
+    """
     agg = run_worker_eval(spec, gold_set, **kwargs)
-    here = Path(__file__).resolve()
-    root = next(p for p in here.parents if (p / "pyproject.toml").exists())
-    out_path = (
-        root / "eval" / "baselines"
-        / f"{spec.worker}__{spec.prompt_version}__baseline.json"
-    )
+    if baselines_root is None:
+        here = Path(__file__).resolve()
+        root = next(p for p in here.parents if (p / "pyproject.toml").exists())
+        baselines_root = root / "eval" / "baselines"
+    out_path = baselines_root / f"{spec.worker}__{spec.prompt_version}__baseline.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps({"worker": spec.worker, "metrics": agg}, indent=2))
+    metrics = {k: _json_safe(v) for k, v in agg.items()}
+    out_path.write_text(json.dumps({"worker": spec.worker, "metrics": metrics}, indent=2))
     return out_path
