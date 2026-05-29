@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -20,10 +22,10 @@ def test_gold_sample_roundtrips_minimal() -> None:
 
 def test_gold_set_rejects_unknown_key() -> None:
     with pytest.raises(ValidationError):
-        GoldSet(worker="ten_k", thresholds={"min_f1": 0.6}, samples=(), bogus=1)
+        GoldSet(worker="ten_k", thresholds={"min_f1": 0.6}, samples=(), bogus=1)  # type: ignore[call-arg]
 
 
-def test_load_gold_set_parses_jsonl(tmp_path) -> None:
+def test_load_gold_set_parses_jsonl(tmp_path: Path) -> None:
     p = tmp_path / "ten_k.jsonl"
     p.write_text(
         '{"doc_id":"g-001","raw_doc":"x","expected":{"cik":"1"},"subjective":{},"rationale":"r"}\n'

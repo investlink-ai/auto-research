@@ -4,6 +4,8 @@ import json
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from auto_research.eval.baseline import _json_safe, capture_baseline, score_output
 from auto_research.eval.gold import GoldSample, GoldSet
 from auto_research.eval.registry import WORKER_EVALS
@@ -11,13 +13,14 @@ from auto_research.extract.enums import EventClassification, FormType
 from auto_research.extract.schemas import (
     Citation,
     Claim,
+    ConfidenceLevel,
     EightKOutput,
     SFilingOutput,
     TenKOutput,
 )
 
 
-def _claim(quote: str, span: tuple[int, int], conf: str = "high") -> Claim:
+def _claim(quote: str, span: tuple[int, int], conf: ConfidenceLevel = "high") -> Claim:
     return Claim(citation=Citation(source_span=span, source_quote=quote), confidence=conf)
 
 
@@ -134,7 +137,7 @@ def test_json_safe_maps_nonfinite_to_none() -> None:
 
 
 def test_capture_baseline_writes_valid_json(
-    monkeypatch: object, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     stub_agg = {
         "n": 1,

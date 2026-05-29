@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from auto_research.eval.hallucination import grounding_outcome
+from auto_research.extract.enums import EventClassification
 from auto_research.extract.schemas import Citation, Claim, EightKOutput
 
 
@@ -8,7 +9,7 @@ def _output(quote: str, span: tuple[int, int]) -> EightKOutput:
     return EightKOutput(
         cik="1",
         accession_number="a",
-        event_classification="partnership",
+        event_classification=EventClassification.PARTNERSHIP,
         milestone_mentions=[
             Claim(citation=Citation(source_span=span, source_quote=quote), confidence="high")
         ],
