@@ -1,0 +1,11 @@
+{
+  "worker": "eight_k",
+  "metrics": {
+    "n": 8,
+    "quarantined": 1,
+    "hallucination_rate": 0.125,
+    "event_classification": 1.0,
+    "milestone_mentions": 0.5714285714285714,
+    "dilution_language_flags": 0.8571428571428571
+  }
+}

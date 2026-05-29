@@ -1,0 +1,12 @@
+{
+  "worker": "s_filings",
+  "metrics": {
+    "n": 7,
+    "quarantined": 2,
+    "hallucination_rate": 0.2857142857142857,
+    "form_type": 0.8,
+    "dilution_event": 0.6,
+    "capital_raise_language": 0.13333333333333333,
+    "use_of_proceeds": 0.2
+  }
+}
