@@ -45,6 +45,30 @@ _SONNET: Final = "claude-sonnet-4-6"
 _HAIKU: Final = "claude-haiku-4-5"
 _OPUS: Final = "claude-opus-4-7"
 
+# Local OSS-model routes served via an OpenAI-compatible HTTP backend.
+# The `local/` prefix is the dispatch hint that
+# `extract.workers._common._get_or_build_client` reads to pick
+# `make_openai_compat_extraction_client` instead of the Anthropic
+# `make_extraction_client`. The bare-model portion is the
+# server-native ID — HuggingFace repo path form, which is what
+# `vllm-mlx` and `mlx-openai-server` accept directly; the wrapper
+# strips the `local/` prefix before forwarding to the API. No
+# `_ROUTING` rows resolve to these constants today; route flips ship
+# per-worker as eval validates the substitution (cost-model doc
+# §10.5).
+#
+# `_LOCAL_QWEN_35B_MOE` is the smoke-tested locked stack (Mac M2 96 GB
+# on vllm-mlx==0.3.0 with `--default-chat-template-kwargs
+# '{"enable_thinking": false}'` — see cost-model doc §10.5 "Locked
+# stack" + "Smoke-test results"). The 4B and 27B-dense constants are
+# placeholders for follow-up routing tiers; their string values
+# correspond to upstream Qwen HF paths but the checkpoints have not
+# been smoke-tested in this codebase. Pick a quantized MLX
+# checkpoint for those before flipping any route to them.
+_LOCAL_QWEN_4B: Final = "local/Qwen/Qwen3.6-4B-Instruct"
+_LOCAL_QWEN_27B_DENSE: Final = "local/Qwen/Qwen3.6-27B-Instruct"
+_LOCAL_QWEN_35B_MOE: Final = "local/unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit"
+
 # (worker, task) → model id. Sourced from `docs/specs/2026-05-22-design.md`
 # §7.3. `task` keys match the schema field names in `extract/schemas.py`
 # verbatim (e.g., `supplier_mentions`, not `supplier_mapping`), so a

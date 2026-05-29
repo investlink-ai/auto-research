@@ -256,7 +256,11 @@ def test_run_single_shot_extraction_quarantines_when_no_record_extraction_block(
     quar_path = tmp_path / "quar" / "eight_k" / "doc-bad.json"
     assert quar_path.exists()
     record = json.loads(quar_path.read_text())
-    assert "record_extraction" in record["error"]
+    # Wrapper surfaces "no usable structured payload" rather than
+    # leaking the Anthropic-specific `record_extraction` tool name —
+    # the assertion narrows to the structural error that both
+    # provider wrappers produce.
+    assert "no structured payload" in record["error"]
 
 
 def test_run_single_shot_extraction_cache_hit_skips_llm(tmp_path: Path) -> None:

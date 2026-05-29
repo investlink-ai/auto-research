@@ -1,4 +1,4 @@
-"""VCR-recorded integration test for `make_extraction_client` (Issue #10 AC).
+"""VCR-recorded integration test for `make_extraction_client`.
 
 Acceptance criterion: "VCR test confirms `cache_creation_input_tokens` /
 `cache_read_input_tokens` appear in response metadata after a second call
@@ -25,7 +25,6 @@ from pathlib import Path
 import pytest
 import vcr
 from anthropic import Anthropic
-from anthropic.types import Message
 
 from auto_research.extract.client import make_extraction_client
 
@@ -78,27 +77,28 @@ def test_cache_create_then_read_against_recorded_response(
     )
 
     with cassette.use_cassette(CASSETTE_PATH.name):
-        first = client(
+        _first_text, first_usage = client(
             task="dilution_event",
             system_prompt="A long stable system prompt that should be cached.",
             user_content="document A: dilution language sample",
         )
-        second = client(
+        _second_text, second_usage = client(
             task="dilution_event",
             system_prompt="A long stable system prompt that should be cached.",
             user_content="document B: different dilution language",
         )
 
-    # Real Pydantic Messages — not mocks — with usage metadata.
-    assert isinstance(first, Message)
-    assert isinstance(second, Message)
+    # `UsageDict` lifts the cache counters from `Message.usage` —
+    # provider-agnostic dict access on what used to be a typed pydantic
+    # field. `cache_*` are `NotRequired` so `usage.get(...)` collapses
+    # absent + zero into the same comparison.
 
     # AC: cache_creation_input_tokens appears on the first call (write).
-    assert first.usage.cache_creation_input_tokens == 5000
+    assert first_usage["cache_creation_input_tokens"] == 5000
     # First call did not read any cache (nothing was there yet).
-    assert (first.usage.cache_read_input_tokens or 0) == 0
+    assert first_usage.get("cache_read_input_tokens", 0) == 0
 
     # AC: cache_read_input_tokens appears on the second call (hit).
-    assert second.usage.cache_read_input_tokens == 5000
+    assert second_usage["cache_read_input_tokens"] == 5000
     # Second call did not write to the cache again.
-    assert (second.usage.cache_creation_input_tokens or 0) == 0
+    assert second_usage.get("cache_creation_input_tokens", 0) == 0
