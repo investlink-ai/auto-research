@@ -6,6 +6,17 @@ AC bullet 3 ("Hybrid extraction policy: single-shot for
 
 The RAG path uses an injected `retrieve_fn` so the test doesn't have
 to stand up the full hybrid_retrieve + rerank stack.
+
+Routing dispatch (Anthropic vs `local/*`) is short-circuited at the
+test boundary by `_short_circuit_dispatch_to_injected_anthropic_fake`
+below: every routed call returns the same `make_extraction_client`
+wrapper around the test's injected fake Anthropic SDK, regardless of
+which model id `route_model` resolved to. The real dispatch is
+covered by `tests/unit/test_extract_local_dispatch.py`; real local
+inference is covered by `tests/live/test_ten_k_local_qwen_smoke.py`.
+This file tests the worker's control flow (single-shot vs RAG,
+identity-agreement, staged-cache-commit, quarantine semantics), which
+is provider-agnostic.
 """
 
 from __future__ import annotations
@@ -15,6 +26,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import anthropic
 import pytest
 
 from auto_research.extract.chunking import (
@@ -29,6 +41,41 @@ from tests.unit.conftest import (
 from tests.unit.conftest import (
     make_fake_anthropic_client_sequence as _fake_client_sequence,
 )
+
+
+@pytest.fixture(autouse=True)
+def _short_circuit_dispatch_to_injected_anthropic_fake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Make `_get_or_build_client` always wrap the test's injected
+    Anthropic fake in `make_extraction_client`, even when
+    `route_model` returns a `local/*` id. The worker's RAG loop
+    iterates `TEN_K_NARRATIVE_FIELD_CONFIGS` — half-Anthropic,
+    half-local after the `local/*` flips on going_concern /
+    icfr_material_weaknesses / critical_accounting_estimate_changes —
+    but every call here routes through the same fake queue. Anthropic
+    dispatch + local dispatch are tested separately
+    (`test_extract_local_dispatch.py`); the worker's control flow is
+    provider-agnostic, so collapsing the two branches here makes the
+    response-sequence assertions readable.
+    """
+    from auto_research.extract import client as anthropic_module
+    from auto_research.extract.workers import _common
+
+    original = _common._get_or_build_client
+
+    def _patched(
+        worker: str,
+        task: str,
+        anthropic_client: anthropic.Anthropic | None,
+    ) -> Any:
+        if anthropic_client is None:
+            return original(worker, task, anthropic_client)
+        return anthropic_module.make_extraction_client(
+            worker=worker, anthropic_client=anthropic_client
+        )
+
+    monkeypatch.setattr(_common, "_get_or_build_client", _patched)
 
 _SAMPLE_10K = (
     "Item 1A. Risk Factors. Our supply chain depends on TSMC.\n"
