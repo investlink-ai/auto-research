@@ -135,6 +135,7 @@ exclude = [
     "tests/_otel_helpers\\.py$",
     "tests/unit/conftest\\.py$",
     "tests/unit/_fixture_meta\\.py$",
+    "tests/evals/_eval_asserts\\.py$",
     "tests/integration/conftest\\.py$",
 ]
 

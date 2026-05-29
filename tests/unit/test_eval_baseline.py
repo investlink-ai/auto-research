@@ -162,3 +162,24 @@ def test_capture_baseline_writes_valid_json(
     assert "NaN" not in raw
     data = json.loads(raw)
     assert data["metrics"]["language_novelty_score"] is None
+
+
+def test_score_output_rejects_non_list_gold_for_claim_field() -> None:
+    """A misauthored gold value (string instead of list) for a claim_list
+    field must raise loudly, not be silently shredded into characters."""
+    src = "We announced a partnership with Acme Corp today."
+    predicted = EightKOutput(
+        cik="1",
+        accession_number="a",
+        event_classification=EventClassification.PARTNERSHIP,
+        milestone_mentions=[_claim("partnership with Acme Corp", (15, 41))],
+        dilution_language_flags=[],
+    )
+    gold = GoldSample(
+        doc_id="g-bad",
+        raw_doc=src,
+        expected={"milestone_mentions": "partnership with Acme Corp"},  # should be a list
+        rationale="r",
+    )
+    with pytest.raises(ValueError, match="must be a list"):
+        score_output(WORKER_EVALS["eight_k"], predicted, gold)

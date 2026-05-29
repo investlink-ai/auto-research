@@ -58,11 +58,6 @@ def exact_match(predicted: object, gold: object) -> float:
     return 1.0 if predicted == gold else 0.0
 
 
-def confidence_match(predicted: str, gold: str) -> float:
-    """Categorical confidence agreement (high/medium/low)."""
-    return 1.0 if predicted == gold else 0.0
-
-
 def spearman(predicted: list[float], gold: list[float]) -> float:
     """Spearman rank correlation. Returns NaN for <2 points or zero
     variance (rank correlation is undefined there)."""

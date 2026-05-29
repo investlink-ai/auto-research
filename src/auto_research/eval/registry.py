@@ -36,6 +36,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from auto_research._io import project_root
 from auto_research.extract.prompts.eight_k import EIGHT_K_PROMPT_VERSION
 from auto_research.extract.prompts.s_filings_dilution import (
     S_FILINGS_DILUTION_PROMPT_VERSION,
@@ -57,11 +58,7 @@ from auto_research.extract.workers.transcript import extract_transcript
 
 
 def _gold_root() -> Path:
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        if (parent / "pyproject.toml").exists():
-            return parent / "eval" / "gold_sets"
-    raise FileNotFoundError("project root not found")
+    return project_root() / "eval" / "gold_sets"
 
 
 @dataclass(frozen=True)
@@ -98,7 +95,7 @@ WORKER_EVALS: dict[str, WorkerEvalSpec] = {
             "going_concern": "claim_presence",
             "language_novelty_score": "numeric",
         },
-        default_thresholds={"min_f1": 0.6, "min_geval": 0.6},
+        default_thresholds={"min_f1": 0.6, "min_geval": 0.6, "max_hallucination_rate": 0.1},
     ),
     "transcript": WorkerEvalSpec(
         worker="transcript",
@@ -122,7 +119,7 @@ WORKER_EVALS: dict[str, WorkerEvalSpec] = {
             "milestone_mentions": "claim_list",
             "dilution_language_flags": "claim_list",
         },
-        default_thresholds={"min_f1": 0.6},
+        default_thresholds={"min_f1": 0.6, "min_exact": 0.8, "max_hallucination_rate": 0.1},
     ),
     "s_filings": WorkerEvalSpec(
         worker="s_filings",
@@ -137,6 +134,6 @@ WORKER_EVALS: dict[str, WorkerEvalSpec] = {
             "capital_raise_language": "claim_list",
             "use_of_proceeds": "claim_list",
         },
-        default_thresholds={"min_f1": 0.6},
+        default_thresholds={"min_f1": 0.6, "min_exact": 0.8, "max_hallucination_rate": 0.1},
     ),
 }

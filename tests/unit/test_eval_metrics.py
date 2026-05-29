@@ -5,7 +5,6 @@ import math
 from auto_research.eval.metrics import (
     PRF,
     claim_list_f1,
-    confidence_match,
     exact_match,
     spearman,
 )
@@ -32,11 +31,6 @@ def test_claim_list_f1_empty_both_is_one() -> None:
 def test_exact_match() -> None:
     assert exact_match("S-3", "S-3") == 1.0
     assert exact_match("S-3", "S-1") == 0.0
-
-
-def test_confidence_match() -> None:
-    assert confidence_match("high", "high") == 1.0
-    assert confidence_match("high", "low") == 0.0
 
 
 def test_spearman_monotonic() -> None:

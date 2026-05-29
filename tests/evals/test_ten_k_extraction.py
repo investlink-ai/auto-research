@@ -8,16 +8,20 @@ entity-resolution eval.
 from __future__ import annotations
 
 import math
-import os
 from typing import Any
 
 import pytest
 from pydantic import BaseModel
 
 from auto_research.eval.baseline import run_worker_eval
-from auto_research.eval.geval import build_geval_metric
 from auto_research.eval.gold import GoldSample, GoldSet, load_gold_set
 from auto_research.eval.registry import WORKER_EVALS
+from tests.evals._eval_asserts import (
+    assert_claim_list_f1,
+    assert_geval_fields,
+    assert_hallucination_rate,
+    require_anthropic_key,
+)
 
 pytestmark = pytest.mark.eval
 
@@ -29,67 +33,33 @@ def gold_set() -> GoldSet:
     return load_gold_set(_SPEC.gold_path, worker="ten_k", thresholds=_SPEC.default_thresholds)
 
 
-def _require_key() -> None:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        pytest.skip("ANTHROPIC_API_KEY not set — 10-K extraction eval needs a real LLM")
-
-
 @pytest.fixture(scope="module")
 def aggregate(gold_set: GoldSet) -> dict[str, Any]:
-    _require_key()
+    require_anthropic_key("10-K")
     return run_worker_eval(_SPEC, gold_set)
 
 
 @pytest.fixture(scope="module")
 def outputs(gold_set: GoldSet) -> list[tuple[GoldSample, BaseModel | None]]:
-    _require_key()
+    require_anthropic_key("10-K")
     return [
         (s, _SPEC.extract_fn(raw_doc=s.raw_doc, doc_id=s.doc_id)) for s in gold_set.samples
     ]
 
 
 def test_claim_list_f1_meets_threshold(gold_set: GoldSet, aggregate: dict[str, Any]) -> None:
-    threshold = gold_set.thresholds["min_f1"]
-    below = {
-        f: aggregate[f]
-        for f, kind in _SPEC.field_metrics.items()
-        if kind == "claim_list"
-        and aggregate[f] == aggregate[f]  # not NaN
-        and aggregate[f] < threshold
-    }
-    assert not below, f"10-K fields below F1 {threshold}: {below}"
+    assert_claim_list_f1(_SPEC, aggregate, gold_set)
 
 
-def test_hallucination_rate_is_low(aggregate: dict[str, Any]) -> None:
-    assert aggregate["hallucination_rate"] <= 0.1, aggregate["hallucination_rate"]
+def test_hallucination_rate_is_low(gold_set: GoldSet, aggregate: dict[str, Any]) -> None:
+    assert_hallucination_rate(aggregate, gold_set)
 
 
-@pytest.mark.parametrize("field", ["guidance_tone"])
 def test_subjective_field_geval(
-    field: str,
     gold_set: GoldSet,
     outputs: list[tuple[GoldSample, BaseModel | None]],
 ) -> None:
-    from deepeval.test_case import LLMTestCase
-
-    metric = build_geval_metric(field, threshold=gold_set.thresholds["min_geval"])
-    failures: list[str] = []
-    for sample, out in outputs:
-        if out is None or field not in sample.subjective:
-            continue
-        claim = getattr(out, field)
-        tc = LLMTestCase(
-            input=f"Assess {field} for this passage.",
-            actual_output=f"{claim.citation.source_quote} (confidence={claim.confidence})",
-            context=[sample.raw_doc, sample.subjective[field].get("rubric_note", "")],
-        )
-        metric.measure(tc)
-        score = metric.score
-        if score is not None and score < metric.threshold:
-            failures.append(
-                f"{sample.doc_id}: {field} G-Eval {score:.2f} ({metric.reason})"
-            )
-    assert not failures, "\n".join(failures)
+    assert_geval_fields(outputs, gold_set, list(_SPEC.subjective_fields))
 
 
 def test_language_novelty_score_spearman_reported(aggregate: dict[str, Any]) -> None:

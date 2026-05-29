@@ -80,9 +80,12 @@ from auto_research.agents.reliability import reliable_agent_node
 from auto_research.extract._caching import cached_system_block
 from auto_research.extract._response import UsageDict
 
-# The tool name every worker forces via `tool_choice`. Single value
-# (not a per-worker name) so the wrapper's response-parsing branch
-# can match by literal without threading the worker name through.
+# The single structured-output tool name offered to every worker. On
+# non-thinking (Haiku) routes the wrapper forces it via `tool_choice`; on
+# thinking-enabled (Sonnet/Opus) routes it is offered with the default
+# `auto` choice (forcing is incompatible with extended thinking). One fixed
+# value (not a per-worker name) lets the response-parsing branch match by
+# literal without threading the worker name through.
 RECORD_EXTRACTION_TOOL_NAME: Final[str] = "record_extraction"
 
 

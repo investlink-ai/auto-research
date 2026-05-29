@@ -7,7 +7,6 @@ entity-resolution eval.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import pytest
@@ -15,6 +14,12 @@ import pytest
 from auto_research.eval.baseline import run_worker_eval
 from auto_research.eval.gold import GoldSet, load_gold_set
 from auto_research.eval.registry import WORKER_EVALS
+from tests.evals._eval_asserts import (
+    assert_claim_list_f1,
+    assert_exact_field,
+    assert_hallucination_rate,
+    require_anthropic_key,
+)
 
 pytestmark = pytest.mark.eval
 
@@ -30,26 +35,17 @@ def gold_set() -> GoldSet:
 
 @pytest.fixture(scope="module")
 def aggregate(gold_set: GoldSet) -> dict[str, Any]:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        pytest.skip("ANTHROPIC_API_KEY not set — S-filings extraction eval needs a real LLM")
+    require_anthropic_key("S-filings")
     return run_worker_eval(_SPEC, gold_set)
 
 
 def test_claim_list_f1_meets_threshold(gold_set: GoldSet, aggregate: dict[str, Any]) -> None:
-    threshold = gold_set.thresholds["min_f1"]
-    below = {
-        f: aggregate[f]
-        for f, kind in _SPEC.field_metrics.items()
-        if kind == "claim_list"
-        and aggregate[f] == aggregate[f]  # not NaN
-        and aggregate[f] < threshold
-    }
-    assert not below, f"S-filings fields below F1 {threshold}: {below}"
+    assert_claim_list_f1(_SPEC, aggregate, gold_set)
 
 
-def test_form_type_exact_match(aggregate: dict[str, Any]) -> None:
-    assert aggregate["form_type"] >= 0.8, aggregate["form_type"]
+def test_form_type_exact_match(gold_set: GoldSet, aggregate: dict[str, Any]) -> None:
+    assert_exact_field(aggregate, "form_type", gold_set)
 
 
-def test_hallucination_rate_is_low(aggregate: dict[str, Any]) -> None:
-    assert aggregate["hallucination_rate"] <= 0.1, aggregate["hallucination_rate"]
+def test_hallucination_rate_is_low(gold_set: GoldSet, aggregate: dict[str, Any]) -> None:
+    assert_hallucination_rate(aggregate, gold_set)
