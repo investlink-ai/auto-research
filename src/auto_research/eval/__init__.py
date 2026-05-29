@@ -1,4 +1,4 @@
-"""Extraction-quality eval harness (issue #20).
+"""Extraction-quality eval harness.
 
 Reference-based field metrics live in `metrics.py` (pure, hermetic);
 LLM-judge scoring of subjective `Claim` fields lives in `geval.py`
