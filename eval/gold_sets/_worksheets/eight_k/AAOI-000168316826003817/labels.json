@@ -1,0 +1,23 @@
+{
+  "doc_id": "AAOI-000168316826003817",
+  "_meta": {
+    "ticker": "AAOI",
+    "cik": "0001158114",
+    "accession": "0001683168-26-003817",
+    "accepted": "2026-05-13T20:10:26+00:00"
+  },
+  "_instructions": "Fill event_classification (one of ['milestone', 'partnership', 'contract', 'guidance_change', 'leadership_change', 'dilution', 'other']). Copy EXACT quote spans from source.txt into the two lists; empty lists are fine. Verify and prune _candidates \u2014 they are keyword hints, not answers.",
+  "event_classification": "",
+  "milestone_mentions": [],
+  "dilution_language_flags": [],
+  "rationale": "",
+  "_candidates": {
+    "milestone_mentions": [
+      "Item 1.01 Entry into a Material Definitive Agreement.",
+      "On May 8, 2026, Applied Optoelectronics, Inc. (the \u201cCompany\u201d) entered into three separate lease agreements (each, a \u201cLease\u201d and collectively, the \u201cLeases\u201d) with Hightower Phase I Owner, LLC, a Delaware limited liability company (the \u201cLandlord\u201d), for three industrial buildings located in Houston, Texas (\u201cBuilding 1,\u201d \u201cBuilding 2,\u201d and \u201cBuilding 3\u201d). The Leases are intended for manufacturing, warehouse, and office use.",
+      "Each Lease includes a purchase and sale agreement (each, a \u201cPSA\u201d and collectively, the \u201cPSAs\u201d) granting the Company an option to purchase Building 1, Building 2, and Building 3, together with the land on which such buildings are located. The PSAs provide for an aggregate purchase price of $102,250,000 and require earnest money of $1,758,750. Closing is expected to occur forty-five (45) days following the Company\u2019s exercise of the purchase option, subject to the terms and conditions set forth in the PSAs.",
+      "The foregoing description of the Leases does not purport to be complete and is subject to and qualified in its entirety by reference to the full text of the Leases, which are filed as Exhibits 10.1, 10.2, and 10.3 to this Current Report on Form 8-K and incorporated by reference herein."
+    ],
+    "dilution_language_flags": []
+  }
+}

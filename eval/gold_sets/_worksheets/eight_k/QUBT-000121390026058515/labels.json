@@ -1,0 +1,18 @@
+{
+  "doc_id": "QUBT-000121390026058515",
+  "_meta": {
+    "ticker": "QUBT",
+    "cik": "0001758009",
+    "accession": "0001213900-26-058515",
+    "accepted": "2026-05-18T16:47:26+00:00"
+  },
+  "_instructions": "Fill event_classification (one of ['milestone', 'partnership', 'contract', 'guidance_change', 'leadership_change', 'dilution', 'other']). Copy EXACT quote spans from source.txt into the two lists; empty lists are fine. Verify and prune _candidates \u2014 they are keyword hints, not answers.",
+  "event_classification": "",
+  "milestone_mentions": [],
+  "dilution_language_flags": [],
+  "rationale": "",
+  "_candidates": {
+    "milestone_mentions": [],
+    "dilution_language_flags": []
+  }
+}

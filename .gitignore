@@ -70,6 +70,3 @@ data/cache/
 
 # Promotion-gate decisions log (scripts/promote_prompt.py)
 eval/promotions/
-
-# Gold-set labeling scratch (intermediate; gold JSONL is the committed artifact)
-eval/gold_sets/_worksheets/

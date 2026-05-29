@@ -1,0 +1,8 @@
+Item 7.01 Regulation FD Disclosure.
+On May 13, 2026, Quantum Computing Inc. (the “Company”) presented an investor presentation at an investor conference, and on May 14, 2026, the Company posted the presentation to the Company’s website. A copy of the presentation is attached hereto and furnished herewith as Exhibit 99.1.
+This information is being furnished pursuant to Item 7.01, “Regulation FD Disclosure,” and shall not be deemed “filed” for purposes of Section 18 of the Securities Exchange Act of 1934, as amended (the “Exchange Act”), or incorporated by reference in any filing under the Securities Act of 1933, as amended, or the Exchange Act, except as shall be expressly set forth by specific reference in such a filing.
+Item 9.01 Financial Statements and Exhibits.
+(d) Exhibits.
+Exhibit
+    No. Description 99.1 Investor Presentation, dated May 13, 2026 104 Cover Page Interactive Data File (embedded within the
+    Inline XBRL document)

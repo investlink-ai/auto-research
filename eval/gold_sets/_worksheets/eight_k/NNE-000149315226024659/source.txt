@@ -1,0 +1,8 @@
+Item 8.01 Other Events.
+On May 20, 2026, Nano Nuclear Energy Inc. (the “Company”) issued a press release announcing that the U.S. Nuclear Regulatory Commission has formally accepted the previously submitted Construction Permit Application for the deployment of the Company’s KRONOS MMR™ at the University of Illinois Urbana-Champaign.
+A copy of the press release is filed as Exhibit 99.1 to this Current Report on Form 8-K and is incorporated herein by reference.
+Item 9.01 Financial Statements and Exhibits.
+(d) Exhibits
+Exhibit
+    No. Description  99.1 Press Release of the Company. 104 Cover Page Interactive
+    Data File (embedded within the Inline XBRL document).
