@@ -1,15 +1,31 @@
 """Per-worker eval wiring.
 
-``field_metrics`` maps a schema field to how it is scored:
+``field_metrics`` maps a schema field to how it is scored. Both list and
+single-claim kinds reduce to the same quote-level F1 (``claim_list_f1`` over
+the elements' ``source_quote`` strings), so the distinction is about the
+field's *shape*, not a different metric:
 
-- ``"claim_list"``: ``list[Claim|Mention]`` -> claim_list_f1 over source_quotes
-- ``"exact"``: scalar categorical/identity-ish field -> exact_match
-- ``"numeric"``: float field -> Spearman across the gold set
-- ``"claim_presence"``: ``Claim | None`` -> presence + quote match
+- ``"claim_list"``: any list of citation-bearing elements -> F1 over their
+  ``source_quote`` strings. The elements need not be ``Claim``: the entity
+  mention types (``SupplierMention``, ``CustomerMention``), ``RiskFactorDelta``
+  and ``ForwardStatement`` each carry a ``citation`` directly, so the scorer
+  reads ``.citation.source_quote`` generically (the same dual route the
+  guardrails walker uses).
+- ``"claim_presence"``: a single ``Claim`` that may be ``None`` (e.g.
+  ``going_concern``) OR mandatory (e.g. ``dilution_event``) -> the single
+  quote (or empty when ``None``) is scored by the same F1. When gold and
+  prediction are both absent this is a perfect score; when present it is a
+  quote match. (Not "present-vs-absent": a mandatory ``Claim`` is graded on
+  its quote, a nullable one additionally on correctly emitting / omitting.)
+- ``"exact"``: scalar categorical/identity-ish field (e.g. an enum) ->
+  exact_match.
+- ``"numeric"``: float field -> Spearman across the gold set.
 
 Subjective Claim fields are scored by G-Eval (see geval.py) and listed in
 ``subjective_fields``; identity fields (cik/accession/...) are excluded from
-quality scoring but listed so the coverage test passes.
+quality scoring but listed so the coverage test passes. Note
+``event_datetime`` is nullable yet listed as identity — a downstream gold
+joiner keying on identity fields must tolerate ``None`` there.
 """
 
 from __future__ import annotations
