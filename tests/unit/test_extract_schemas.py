@@ -23,12 +23,10 @@ from auto_research.extract.schemas import (
     Claim,
     CustomerMention,
     EightKOutput,
-    FinancialLineItem,
     ForwardStatement,
     RiskFactorDelta,
     SFilingOutput,
     SupplierMention,
-    TenKFinancials,
     TenKOutput,
     TranscriptOutput,
 )
@@ -136,6 +134,9 @@ def _ten_k_output() -> TenKOutput:
         customer_mentions=[],
         language_novelty_score=0.0,
         risk_factor_deltas=[],
+        going_concern=None,
+        icfr_material_weaknesses=[],
+        critical_accounting_estimate_changes=[],
     )
 
 
@@ -188,6 +189,9 @@ def test_ten_k_output_rejects_extra_fields() -> None:
             customer_mentions=[],
             language_novelty_score=0.0,
             risk_factor_deltas=[],
+            going_concern=None,
+            icfr_material_weaknesses=[],
+            critical_accounting_estimate_changes=[],
             unknown_field=1,  # type: ignore[call-arg]
         )
 
@@ -426,76 +430,6 @@ def test_schema_version_is_classvar_not_pydantic_field() -> None:
         assert "SCHEMA_VERSION" not in cls.model_fields
 
 
-# --- TenKFinancials + FinancialLineItem (Item 8 structured extraction) ------
-
-
-def test_financial_line_item_construction() -> None:
-    line = FinancialLineItem(
-        value_usd=1_234_000_000.0,
-        citation=_citation(),
-        confidence="high",
-    )
-    assert line.value_usd == 1_234_000_000.0
-    assert line.confidence == "high"
-
-
-def test_financial_line_item_confidence_is_categorical_not_float() -> None:
-    """Float `confidence` must reject — categorical-confidence policy
-    (user feedback memory: `LLM confidence is categorical`). Float
-    confidence on table extraction is uncalibrated noise."""
-    with pytest.raises(ValidationError):
-        FinancialLineItem(
-            value_usd=1.0,
-            citation=_citation(),
-            confidence=0.9,  # type: ignore[arg-type]
-        )
-
-
-def test_financial_line_item_confidence_rejects_unknown_label() -> None:
-    with pytest.raises(ValidationError):
-        FinancialLineItem(
-            value_usd=1.0,
-            citation=_citation(),
-            confidence="very-high",  # type: ignore[arg-type]
-        )
-
-
-def test_financial_line_item_is_frozen() -> None:
-    line = FinancialLineItem(
-        value_usd=1.0, citation=_citation(), confidence="medium"
-    )
-    with pytest.raises(ValidationError):
-        line.value_usd = 2.0
-
-
-def test_ten_k_financials_supports_none_per_field() -> None:
-    """Each TenKFinancials line item is independently optional — firms
-    omit different sub-statements, so the schema must accept null on any."""
-    fin = TenKFinancials(
-        revenue=FinancialLineItem(
-            value_usd=1.0, citation=_citation(), confidence="high"
-        ),
-        gross_profit=None,
-        operating_income=None,
-        net_income=None,
-        total_assets=None,
-        total_liabilities=None,
-        stockholders_equity=None,
-        cash_from_operations=None,
-        cash_from_investing=None,
-        cash_from_financing=None,
-    )
-    assert fin.revenue is not None
-    assert fin.gross_profit is None
-
-
-def test_ten_k_output_financials_defaults_to_none() -> None:
-    """Adding the `financials` field is additive: existing TenKOutput
-    construction (without specifying financials) must continue to validate."""
-    out = _ten_k_output()
-    assert out.financials is None
-
-
 def test_ten_k_output_language_novelty_score_defaults_to_zero() -> None:
     """The narrative prompt instructs the model `DO NOT populate
     language_novelty_score (computed downstream)`. The schema must default
@@ -512,25 +446,57 @@ def test_ten_k_output_language_novelty_score_defaults_to_zero() -> None:
         supplier_mentions=[],
         customer_mentions=[],
         risk_factor_deltas=[],
+        going_concern=None,
+        icfr_material_weaknesses=[],
+        critical_accounting_estimate_changes=[],
     )
     assert out.language_novelty_score == 0.0
 
 
-def test_ten_k_output_accepts_financials_when_supplied() -> None:
-    fin = TenKFinancials(
-        revenue=FinancialLineItem(
-            value_usd=1.0, citation=_citation(), confidence="high"
-        ),
-        gross_profit=None,
-        operating_income=None,
-        net_income=None,
-        total_assets=None,
-        total_liabilities=None,
-        stockholders_equity=None,
-        cash_from_operations=None,
-        cash_from_investing=None,
-        cash_from_financing=None,
+# --- TenKGoingConcernPartial -------------------------------------------------
+
+
+def test_ten_k_going_concern_partial_carries_identity_and_field() -> None:
+    """`TenKGoingConcernPartial` is the RAG-path schema for the new
+    going_concern field — same identity-fields + single-narrative-field
+    shape as the other TenK*Partial models."""
+    from auto_research.extract.schemas import TenKGoingConcernPartial
+
+    p = TenKGoingConcernPartial(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        going_concern=_claim(),
     )
+    assert p.going_concern is not None
+    assert p.going_concern.confidence == "medium"
+
+
+def test_ten_k_going_concern_partial_accepts_none() -> None:
+    """`going_concern` is `Claim | None` — the modal case in
+    `universe_v1` is the auditor's unqualified opinion, where the
+    field MUST be None rather than a fabricated Claim."""
+    from auto_research.extract.schemas import TenKGoingConcernPartial
+
+    p = TenKGoingConcernPartial(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        going_concern=None,
+    )
+    assert p.going_concern is None
+
+
+# --- TenKOutput new fields ---------------------------------------------------
+
+
+def test_ten_k_output_carries_going_concern_field() -> None:
+    """`TenKOutput.going_concern: Claim | None` — required field
+    (no default) consistent with the existing narrative fields
+    (guidance_tone, accrual_flags, ...). Both narrative paths
+    (single-shot via TEN_K_NARRATIVE_PROMPT, RAG via
+    the per-field config loop) populate these. Spec:
+    docs/superpowers/specs/2026-05-29-tenk-narrative-financial-disclosures-design.md."""
     out = TenKOutput(
         cik="0001045810",
         accession_number="0001045810-25-000001",
@@ -539,8 +505,98 @@ def test_ten_k_output_accepts_financials_when_supplied() -> None:
         accrual_flags=[],
         supplier_mentions=[],
         customer_mentions=[],
-        language_novelty_score=0.0,
         risk_factor_deltas=[],
-        financials=fin,
+        going_concern=_claim(),
+        icfr_material_weaknesses=[],
+        critical_accounting_estimate_changes=[],
     )
-    assert out.financials is fin
+    assert out.going_concern is not None
+    assert out.going_concern.confidence == "medium"
+
+
+def test_ten_k_output_going_concern_accepts_none() -> None:
+    out = TenKOutput(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        guidance_tone=_claim(),
+        accrual_flags=[],
+        supplier_mentions=[],
+        customer_mentions=[],
+        risk_factor_deltas=[],
+        going_concern=None,
+        icfr_material_weaknesses=[],
+        critical_accounting_estimate_changes=[],
+    )
+    assert out.going_concern is None
+
+
+# --- TenKIcfrMaterialWeaknessesPartial --------------------------------------
+
+
+def test_ten_k_icfr_material_weaknesses_partial_carries_identity_and_field() -> None:
+    """`TenKIcfrMaterialWeaknessesPartial` is the RAG-path schema for
+    Item 9A material-weakness disclosures."""
+    from auto_research.extract.schemas import (
+        TenKIcfrMaterialWeaknessesPartial,
+    )
+
+    p = TenKIcfrMaterialWeaknessesPartial(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        icfr_material_weaknesses=[_claim(), _claim(confidence="high")],
+    )
+    assert len(p.icfr_material_weaknesses) == 2
+    assert p.icfr_material_weaknesses[1].confidence == "high"
+
+
+def test_ten_k_icfr_material_weaknesses_partial_accepts_empty_list() -> None:
+    """`icfr_material_weaknesses` is `list[Claim]` — the modal case
+    in `universe_v1` is ICFR-effective (empty list)."""
+    from auto_research.extract.schemas import (
+        TenKIcfrMaterialWeaknessesPartial,
+    )
+
+    p = TenKIcfrMaterialWeaknessesPartial(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        icfr_material_weaknesses=[],
+    )
+    assert p.icfr_material_weaknesses == []
+
+
+# --- TenKCriticalAccountingEstimateChangesPartial ----------------------------
+
+
+def test_ten_k_critical_accounting_estimate_changes_partial_carries_identity_and_field() -> None:
+    """`TenKCriticalAccountingEstimateChangesPartial` is the RAG-path
+    schema for Item 7 / Item 8 footnote disclosures of critical
+    accounting estimate changes."""
+    from auto_research.extract.schemas import (
+        TenKCriticalAccountingEstimateChangesPartial,
+    )
+
+    p = TenKCriticalAccountingEstimateChangesPartial(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        critical_accounting_estimate_changes=[_claim(confidence="medium")],
+    )
+    assert len(p.critical_accounting_estimate_changes) == 1
+
+
+def test_ten_k_critical_accounting_estimate_changes_partial_accepts_empty_list() -> None:
+    """Empty list when no YoY change is flagged."""
+    from auto_research.extract.schemas import (
+        TenKCriticalAccountingEstimateChangesPartial,
+    )
+
+    p = TenKCriticalAccountingEstimateChangesPartial(
+        cik="0001045810",
+        accession_number="0001045810-25-000001",
+        fiscal_period_end=date(2025, 1, 31),
+        critical_accounting_estimate_changes=[],
+    )
+    assert p.critical_accounting_estimate_changes == []

@@ -220,10 +220,13 @@ def _get_or_build_client(
     `tests/unit/test_extract_openai_compat_client.py`; production
     callers route through `get_or_build_local_client` here.
 
-    Today no `_ROUTING` row resolves to a `local/*` model id; the
-    dispatch infrastructure lands first per the cost-model doc §10.5
-    Phase 1, and route flips ship per-worker as the eval suite
-    validates the substitution.
+    Three 10-K narrative-disclosure rows (`going_concern`,
+    `icfr_material_weaknesses`,
+    `critical_accounting_estimate_changes`) are the first `_ROUTING`
+    entries resolving to a `local/*` model id; new flips require
+    extending `_ALLOWED_LOCAL_ROWS` in
+    `tests/unit/test_extract_local_dispatch.py` with smoke-test
+    evidence per the cost-model doc §10.5.
     """
     model_id = route_model(worker, task)
     if model_id.startswith("local/"):

@@ -5,11 +5,9 @@ SINGLE_SHOT_TOKEN_CUTOFF`) AND the RAG branch. In the RAG branch the
 worker stuffs the top-5 reranked parents per field into the user-content
 turn; the prompt itself does not change between branches.
 
-The prompt covers ONLY narrative TenKOutput fields. `financials` (Item 8)
-is extracted by a separate worker path from `ParentChunk.table_html` and
-has its own prompt + schema (`ten_k_financials.py`). `language_novelty_
-score` is NOT requested in the prompt — it is computed downstream from
-the supplier/customer/risk-factor text vs the prior year's extraction.
+The prompt covers narrative TenKOutput fields. `language_novelty_score`
+is NOT requested in the prompt — it is computed downstream from the
+supplier/customer/risk-factor text vs the prior year's extraction.
 
 Version-pinned per INV-6.
 """
@@ -59,6 +57,24 @@ Fields to populate:
   - citation: {source_quote: "..."} anchoring the text in THIS filing.
   When the prior year is not available in the supplied text, treat all
   Item 1A risk factors as "added".
+- going_concern: a single Claim quoting verbatim the auditor's
+  "substantial doubt" sentence from the Item 8 audit report or the
+  Item 7 liquidity discussion, or null when the audit report carries
+  an unqualified opinion. Do NOT paraphrase — quote the actual
+  disclaimer sentence. Confidence categorical
+  ("high", "medium", "low").
+- icfr_material_weaknesses: a list of Claims, one per distinct
+  material weakness disclosed in management's Item 9A internal-
+  controls-over-financial-reporting (ICFR) report. Empty list when
+  management concludes ICFR is effective with no material
+  weaknesses. Quote the verbatim weakness description.
+- critical_accounting_estimate_changes: a list of Claims for
+  accounting estimates that management flags in Item 7 MD&A "Critical
+  Accounting Estimates" or the Item 8 Significant Accounting Policies
+  note as requiring significant judgment AND where management
+  indicates a change versus the prior year (new estimate, methodology
+  change, materially different assumptions). Empty list when no YoY
+  change is flagged.
 
 A Claim is `{"citation": {"source_quote": "..."}, "confidence":
 "high"|"medium"|"low"}` — float confidence is rejected. A
@@ -69,8 +85,8 @@ RiskFactorDelta is `{"change_type": "...", "text": "...",
 "citation": {"source_quote": "..."}}`. No other fields are allowed
 inside any of these objects.
 
-Example of a fully-formed narrative TenKOutput (financials and
-language_novelty_score omitted — see Constraints):
+Example of a fully-formed narrative TenKOutput (language_novelty_score
+omitted — see Constraints):
 
   {
     "cik": "0001045810",
@@ -96,7 +112,10 @@ language_novelty_score omitted — see Constraints):
       }
     ],
     "customer_mentions": [],
-    "risk_factor_deltas": []
+    "risk_factor_deltas": [],
+    "going_concern": null,
+    "icfr_material_weaknesses": [],
+    "critical_accounting_estimate_changes": []
   }
 
 Constraints (apply to every field unless noted):
@@ -111,7 +130,6 @@ Constraints (apply to every field unless noted):
 - Choose quotes long and specific enough to be unique unless
   intentionally emitting per-occurrence multiple citations.
 - DO NOT include `source_span`; character offsets are computed in code.
-- DO NOT populate `financials` (Item 8 is handled by a separate prompt).
 - DO NOT populate `language_novelty_score` (computed downstream; the
   schema defaults it to 0.0).
 - DO NOT invent quotes. If a field has no support, return an empty list.

@@ -47,12 +47,6 @@ def test_route_model_returns_haiku_for_routine_extraction() -> None:
     )
 
 
-def test_route_model_routes_ten_k_financials_to_haiku() -> None:
-    # 10-K Item 8 financials: table → JSON is a templated, high-volume
-    # pattern-recognition task per §7.3 — Haiku, not Sonnet.
-    assert route_model("ten_k", "financials") == "claude-haiku-4-5"
-
-
 def test_route_model_returns_opus_for_hard_critique() -> None:
     # Spec §7.3: research agent / live critic default Sonnet, Opus for
     # hard critique moments.
@@ -74,3 +68,31 @@ def test_route_model_raises_on_unknown_worker() -> None:
     with pytest.raises(ValueError) as exc_info:
         route_model("not_a_worker", "default")
     assert "not_a_worker" in str(exc_info.value)
+
+
+def test_route_model_routes_ten_k_going_concern_to_local_qwen() -> None:
+    """Going-concern is binary auditor language — high-volume templated
+    pattern recognition, routed to the locked local stack
+    (cost-model doc §10.5)."""
+    assert (
+        route_model("ten_k", "going_concern")
+        == "local/unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit"
+    )
+
+
+def test_route_model_routes_ten_k_icfr_material_weaknesses_to_local_qwen() -> None:
+    """ICFR material-weakness language is Item 9A pattern recognition —
+    routed to the locked local stack."""
+    assert (
+        route_model("ten_k", "icfr_material_weaknesses")
+        == "local/unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit"
+    )
+
+
+def test_route_model_routes_ten_k_critical_accounting_estimate_changes_to_local_qwen() -> None:
+    """Critical-estimate language is Item 7 / footnote pattern
+    recognition — routed to the locked local stack."""
+    assert (
+        route_model("ten_k", "critical_accounting_estimate_changes")
+        == "local/unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit"
+    )

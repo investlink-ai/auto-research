@@ -92,6 +92,9 @@ def _minimal_ten_k_with_supplier(supplier: SupplierMention) -> TenKOutput:
         customer_mentions=[],
         language_novelty_score=0.0,
         risk_factor_deltas=[],
+        going_concern=None,
+        icfr_material_weaknesses=[],
+        critical_accounting_estimate_changes=[],
     )
 
 

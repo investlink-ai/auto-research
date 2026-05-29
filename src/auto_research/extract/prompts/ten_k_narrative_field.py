@@ -1,17 +1,16 @@
 """Per-field 10-K narrative extraction prompt (Option A / PR-B).
 
 The RAG path runs one Anthropic call per narrative field so each call
-uses the model tier the routing table actually declares: three of the
-five fields are Haiku-tier (`guidance_tone`, `accrual_flags`,
-`risk_factor_deltas`); only `supplier_mentions` and `customer_mentions`
-genuinely need the Sonnet cross-doc tier. The unified pre-split call
+uses the model tier the routing table actually declares: most fields
+are Haiku-tier (only the cross-doc supplier/customer mentions need
+Sonnet). The unified pre-split call
 forced everything through `_NARRATIVE_DEFAULT_TASK = "supplier_mentions"`
-(Sonnet) — 3 of 5 fields paid the wrong tier.
+(Sonnet) — the Haiku-tier fields paid the wrong tier.
 
 Cache-prefix discipline: the parameterized blocks (`{field_name}`,
 `{field_description}`) sit at the END of the template so the long
 preamble (constraints, identity-field rules, citation discipline) is
-the cached prefix across all five fields. With the per-worker
+the cached prefix across all fields. With the per-worker
 ephemeral-cache marker on the system block, this keeps the
 ~80%-cached prefix economics intact across the field loop.
 """
@@ -22,8 +21,11 @@ from typing import NamedTuple
 
 from auto_research.extract.schemas import (
     TenKAccrualFlagsPartial,
+    TenKCriticalAccountingEstimateChangesPartial,
     TenKCustomerMentionsPartial,
+    TenKGoingConcernPartial,
     TenKGuidanceTonePartial,
+    TenKIcfrMaterialWeaknessesPartial,
     TenKRiskFactorDeltasPartial,
     TenKSupplierMentionsPartial,
 )
@@ -51,8 +53,8 @@ class TenKNarrativeFieldConfig(NamedTuple):
 
 TEN_K_NARRATIVE_FIELD_PROMPT = """\
 You are extracting ONE narrative signal from an SEC 10-K annual report.
-The retrieved top passages (Item 1A Risk Factors, Item 7 MD&A, Item 7A
-Market Risk) will be supplied in the next user message.
+The retrieved top passages from the filing sections relevant to this
+field will be supplied in the next user message.
 
 This call extracts EXACTLY ONE narrative field — do not populate any
 other narrative fields. The output schema's `extra="forbid"` enforces
@@ -81,10 +83,12 @@ Constraints (apply to every citation in this output):
   intentionally emitting per-occurrence multiple citations.
 - DO NOT include `source_span`; character offsets are computed in code.
 - DO NOT invent quotes. If the field has no support in the retrieved
-  passages, emit the empty list (or, for single-Claim fields, you
-  MUST still cite — silent omission is not an option; if the
-  passages truly carry no signal, cite the strongest available
-  hedging language).
+  passages, emit the empty list (for list fields) or null (for
+  fields whose type allows null, e.g. `going_concern: Claim | None`
+  when the audit opinion is unqualified). For non-nullable
+  single-Claim fields (e.g. `guidance_tone`) you MUST still cite —
+  silent omission is not an option; if the passages truly carry no
+  signal, cite the strongest available hedging language.
 
 Confidence on every Claim is EXACTLY one of "high", "medium", or "low"
 — float confidence is rejected.
@@ -189,6 +193,62 @@ TEN_K_NARRATIVE_FIELD_CONFIGS: tuple[TenKNarrativeFieldConfig, ...] = (
         retrieval_query=(
             "What new, removed, or modified Item 1A risk factors does this "
             "filing disclose?"
+        ),
+    ),
+    TenKNarrativeFieldConfig(
+        field_name="going_concern",
+        schema=TenKGoingConcernPartial,
+        description=(
+            "A single Claim quoting verbatim the auditor's "
+            "'substantial doubt' sentence from the Item 8 audit report "
+            "or the Item 7 liquidity discussion, or null when the audit "
+            "report carries an unqualified opinion. Do NOT paraphrase — "
+            "quote the actual disclaimer sentence."
+        ),
+        retrieval_query=(
+            "Does the auditor's report in Item 8 or the liquidity "
+            "discussion in Item 7 express substantial doubt about the "
+            "company's ability to continue as a going concern?"
+        ),
+    ),
+    TenKNarrativeFieldConfig(
+        field_name="icfr_material_weaknesses",
+        schema=TenKIcfrMaterialWeaknessesPartial,
+        description=(
+            "A list of Claims, one per distinct material weakness "
+            "disclosed in management's Item 9A internal-controls-over-"
+            "financial-reporting (ICFR) report. Empty list when "
+            "management concludes ICFR is effective with no material "
+            "weaknesses identified. Quote the verbatim weakness "
+            "description sentence (e.g., 'we did not maintain "
+            "effective controls over X')."
+        ),
+        retrieval_query=(
+            "Does management's Item 9A internal-controls-over-financial-"
+            "reporting report identify any material weaknesses in ICFR?"
+        ),
+    ),
+    TenKNarrativeFieldConfig(
+        field_name="critical_accounting_estimate_changes",
+        schema=TenKCriticalAccountingEstimateChangesPartial,
+        description=(
+            "A list of Claims for accounting estimates that management "
+            "flags in Item 7 MD&A 'Critical Accounting Estimates' or "
+            "the Item 8 Significant Accounting Policies note as "
+            "requiring significant judgment AND where management "
+            "indicates a change versus the prior year (new estimate, "
+            "methodology change, materially different assumptions). "
+            "Empty list when no YoY change is flagged. Quote the "
+            "verbatim change-indicating sentence. "
+            "Do NOT flag routine annual updates driven solely by market "
+            "input changes (e.g., updated discount rates, commodity "
+            "prices) unless management explicitly calls out a "
+            "methodological or structural change to the estimate itself."
+        ),
+        retrieval_query=(
+            "Which critical accounting estimates does Item 7 MD&A or "
+            "the Item 8 footnotes flag as new, changed, or requiring "
+            "materially different assumptions versus the prior year?"
         ),
     ),
 )

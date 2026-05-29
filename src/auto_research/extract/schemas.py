@@ -100,8 +100,6 @@ class Claim(BaseModel):
     project's standing rule is that LLM confidence is categorical so a
     downstream consumer can threshold cleanly without pretending a
     `0.73` from one prompt is comparable to a `0.73` from another.
-    `FinancialLineItem.confidence` uses the same shape — keep them
-    aligned when adding new claim-bearing schemas.
     """
 
     model_config = _FROZEN_STRICT
@@ -176,54 +174,6 @@ class ForwardStatement(BaseModel):
     horizon: str
 
 
-class FinancialLineItem(BaseModel):
-    """One line item from a 10-K Item 8 financial statement.
-
-    `value_usd` is the dollar value reported on the filing (negatives
-    allowed for losses / cash outflows). `confidence` is a categorical
-    label — float confidence on table-cell extraction is uncalibrated
-    noise; categorical lets a downstream consumer threshold cleanly
-    (e.g., only use `high`-confidence rows for financial signals).
-    """
-
-    model_config = _FROZEN_STRICT
-
-    value_usd: float
-    citation: Citation
-    confidence: ConfidenceLevel
-
-
-class TenKFinancials(BaseModel):
-    """10-K Item 8 financial statements extracted from `ParentChunk.table_html`.
-
-    Each field is a `FinancialLineItem | None`; `None` means the line item
-    wasn't reported in this filing (firms sometimes break out cash-flow
-    categories differently or omit a sub-statement entirely). Adding line
-    items here is non-breaking; renaming or removing is a breaking change
-    that requires a Feast schema migration.
-
-    `SCHEMA_VERSION` is carried directly (not inherited from `TenKOutput`)
-    because the Item 8 extraction is its own (raw_table_html,
-    ten_k_financials_prompt, schema_version, model_id) cache key. Bumping
-    the financials schema must invalidate only Item 8 cache rows, not the
-    narrative cache.
-    """
-
-    model_config = _FROZEN_STRICT
-    SCHEMA_VERSION: ClassVar[str] = "v1"
-
-    revenue: FinancialLineItem | None
-    gross_profit: FinancialLineItem | None
-    operating_income: FinancialLineItem | None
-    net_income: FinancialLineItem | None
-    total_assets: FinancialLineItem | None
-    total_liabilities: FinancialLineItem | None
-    stockholders_equity: FinancialLineItem | None
-    cash_from_operations: FinancialLineItem | None
-    cash_from_investing: FinancialLineItem | None
-    cash_from_financing: FinancialLineItem | None
-
-
 # --- Per-worker outputs -----------------------------------------------------
 
 
@@ -245,13 +195,13 @@ class TenKOutput(BaseModel):
     # validation when the model obeys.
     language_novelty_score: float = 0.0
     risk_factor_deltas: list[RiskFactorDelta]
-    # Item 8 financials are extracted from `ParentChunk.table_html` via
-    # the structured `ten_k_financials` prompt + `TenKFinancials` schema,
-    # NOT via dense retrieval. `None` when the worker ran narrative-only
-    # (no chunkset supplied, or chunkset had no table parents).
-    # Additive field — defaults to None so existing TenKOutput
-    # construction continues to validate without modification.
-    financials: TenKFinancials | None = None
+    # Narrative-only signals XBRL definitionally cannot give. Both
+    # narrative paths (single-shot via TEN_K_NARRATIVE_PROMPT, RAG via
+    # the per-field config loop) populate these. Spec:
+    # docs/superpowers/specs/2026-05-29-tenk-narrative-financial-disclosures-design.md.
+    going_concern: Claim | None
+    icfr_material_weaknesses: list[Claim]
+    critical_accounting_estimate_changes: list[Claim]
 
 
 class TranscriptOutput(BaseModel):
@@ -296,9 +246,9 @@ class SFilingOutput(BaseModel):
 # --- Per-field 10-K narrative partials --------------------------------------
 #
 # The 10-K RAG path runs one Anthropic call per narrative field so each
-# call uses the model tier the routing table actually declares (3 of 5
-# narrative fields are Haiku-tier; the unified pre-split call routed
-# everything to Sonnet). Each partial carries the identity fields plus
+# call uses the model tier the routing table actually declares (most
+# fields are Haiku; the cross-doc supplier/customer mentions need
+# Sonnet). Each partial carries the identity fields plus
 # exactly ONE narrative field — the worker assembles them into a full
 # `TenKOutput` at the end of the loop, with a cross-partial identity
 # check to catch hallucinated cik / accession_number / fiscal_period_end
@@ -360,6 +310,36 @@ class TenKRiskFactorDeltasPartial(BaseModel):
     risk_factor_deltas: list[RiskFactorDelta]
 
 
+class TenKGoingConcernPartial(BaseModel):
+    model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
+
+    cik: str
+    accession_number: str
+    fiscal_period_end: date
+    going_concern: Claim | None
+
+
+class TenKIcfrMaterialWeaknessesPartial(BaseModel):
+    model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
+
+    cik: str
+    accession_number: str
+    fiscal_period_end: date
+    icfr_material_weaknesses: list[Claim]
+
+
+class TenKCriticalAccountingEstimateChangesPartial(BaseModel):
+    model_config = _FROZEN_STRICT
+    SCHEMA_VERSION: ClassVar[str] = "v1"
+
+    cik: str
+    accession_number: str
+    fiscal_period_end: date
+    critical_accounting_estimate_changes: list[Claim]
+
+
 # --- Transcript partials ----------------------------------------------------
 #
 # Binary split by routing tier (spec §7.3). Prepared remarks is
@@ -395,15 +375,16 @@ __all__ = [
     "ConfidenceLevel",
     "CustomerMention",
     "EightKOutput",
-    "FinancialLineItem",
     "ForwardStatement",
     "RiskFactorDelta",
     "SFilingOutput",
     "SupplierMention",
     "TenKAccrualFlagsPartial",
+    "TenKCriticalAccountingEstimateChangesPartial",
     "TenKCustomerMentionsPartial",
-    "TenKFinancials",
+    "TenKGoingConcernPartial",
     "TenKGuidanceTonePartial",
+    "TenKIcfrMaterialWeaknessesPartial",
     "TenKOutput",
     "TenKRiskFactorDeltasPartial",
     "TenKSupplierMentionsPartial",

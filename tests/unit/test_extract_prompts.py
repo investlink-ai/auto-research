@@ -16,10 +16,6 @@ from auto_research.extract.prompts.s_filings_dilution import (
     S_FILINGS_DILUTION_PROMPT,
     S_FILINGS_DILUTION_PROMPT_VERSION,
 )
-from auto_research.extract.prompts.ten_k_financials import (
-    TEN_K_FINANCIALS_PROMPT,
-    TEN_K_FINANCIALS_PROMPT_VERSION,
-)
 from auto_research.extract.prompts.ten_k_narrative import (
     TEN_K_NARRATIVE_PROMPT,
     TEN_K_NARRATIVE_PROMPT_VERSION,
@@ -106,25 +102,56 @@ def test_ten_k_narrative_prompt_exports() -> None:
         "supplier_mentions",
         "customer_mentions",
         "risk_factor_deltas",
+        "going_concern",
+        "icfr_material_weaknesses",
+        "critical_accounting_estimate_changes",
     ):
         assert field in TEN_K_NARRATIVE_PROMPT, f"missing instruction for {field}"
-    # Item 8 / financials and language_novelty_score must be explicitly
-    # excluded from the narrative prompt — they're handled separately.
-    assert "financials" in TEN_K_NARRATIVE_PROMPT  # mentioned as "do not populate"
+    # language_novelty_score must be explicitly excluded from the
+    # narrative prompt — it is computed downstream.
     assert "language_novelty_score" in TEN_K_NARRATIVE_PROMPT
 
 
-# --- 10-K Item 8 financials prompt ------------------------------------------
+def test_ten_k_narrative_field_configs_includes_going_concern() -> None:
+    """The RAG per-field loop iterates TEN_K_NARRATIVE_FIELD_CONFIGS.
+    A new field MUST appear there with a non-empty retrieval_query that
+    names its source section (so retrieval drift is mechanically
+    catchable) and a description that names the source section too."""
+    from auto_research.extract.prompts.ten_k_narrative_field import (
+        TEN_K_NARRATIVE_FIELD_CONFIGS,
+    )
+
+    by_name = {c.field_name: c for c in TEN_K_NARRATIVE_FIELD_CONFIGS}
+    assert "going_concern" in by_name
+    config = by_name["going_concern"]
+    assert config.retrieval_query.strip(), "retrieval_query is empty"
+    assert "Item 8" in config.retrieval_query or "going concern" in config.retrieval_query.lower()
+    assert "Item 8" in config.description or "going concern" in config.description.lower()
 
 
-def test_ten_k_financials_prompt_exports() -> None:
-    assert re.fullmatch(r"v\d+", TEN_K_FINANCIALS_PROMPT_VERSION)
-    assert "source_quote" in TEN_K_FINANCIALS_PROMPT
-    assert "value_usd" in TEN_K_FINANCIALS_PROMPT
-    # Categorical confidence labels (per user-feedback memory).
-    assert "high" in TEN_K_FINANCIALS_PROMPT
-    assert "medium" in TEN_K_FINANCIALS_PROMPT
-    assert "low" in TEN_K_FINANCIALS_PROMPT
-    # Line-item coverage.
-    for line in ("revenue", "net_income", "total_assets", "cash_from_operations"):
-        assert line in TEN_K_FINANCIALS_PROMPT, f"missing line item {line}"
+def test_ten_k_narrative_field_configs_includes_icfr_material_weaknesses() -> None:
+    from auto_research.extract.prompts.ten_k_narrative_field import (
+        TEN_K_NARRATIVE_FIELD_CONFIGS,
+    )
+
+    by_name = {c.field_name: c for c in TEN_K_NARRATIVE_FIELD_CONFIGS}
+    assert "icfr_material_weaknesses" in by_name
+    config = by_name["icfr_material_weaknesses"]
+    assert config.retrieval_query.strip()
+    assert "Item 9A" in config.retrieval_query
+    assert "Item 9A" in config.description
+
+
+def test_ten_k_narrative_field_configs_includes_critical_accounting_estimate_changes() -> None:
+    from auto_research.extract.prompts.ten_k_narrative_field import (
+        TEN_K_NARRATIVE_FIELD_CONFIGS,
+    )
+
+    by_name = {c.field_name: c for c in TEN_K_NARRATIVE_FIELD_CONFIGS}
+    assert "critical_accounting_estimate_changes" in by_name
+    config = by_name["critical_accounting_estimate_changes"]
+    assert config.retrieval_query.strip()
+    assert "Item 7" in config.retrieval_query
+    assert "Item 7" in config.description
+    assert "Item 8" in config.retrieval_query
+    assert "Item 8" in config.description
